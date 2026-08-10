@@ -38,7 +38,7 @@ def cmd_run(args: argparse.Namespace, out: TextIO) -> int:
         report = scheduler.run(store)
         print(
             f"ran {report.steps} node(s): {report.completed} completed, "
-            f"{report.split} split, {report.refused} split(s) refused, "
+            f"{report.split} split, {report.refused} answer(s) refused, "
             f"{report.failed} failed",
             file=out,
         )

@@ -23,6 +23,7 @@ from .store import (
     TERMINAL_STATUSES,
     Node,
     Store,
+    plan_artifacts,
 )
 
 MAX_DEPTH = 3
@@ -72,7 +73,7 @@ def next_node(store: Store, nodes: list[Node]) -> Node | None:
     return max(ready, key=lambda node: node.depth)
 
 
-def _refusal(node: Node, reason: str) -> str:
+def _split_refusal(reason: str) -> str:
     return (
         f"Your split was refused by the orchestrator: {reason}. "
         "No child nodes were created. Complete this contract yourself now, "
@@ -80,13 +81,20 @@ def _refusal(node: Node, reason: str) -> str:
     )
 
 
+def _complete_refusal(reason: str) -> str:
+    return (
+        f"Your completion was refused by the orchestrator: {reason}. "
+        "Nothing was recorded. Answer again with the complete tool, and give "
+        "at least one artifact with a path and non-empty content."
+    )
+
+
 def execute(store: Store, node: Node, *, report: RunReport) -> None:
     """Run one node and apply its result."""
+    children = store.children(node)
     aggregating = node.status == STATUS_SPLIT
     child_summaries = (
-        [(child.id, child.summary) for child in store.children(node)]
-        if aggregating
-        else []
+        [(child.id, child.summary) for child in children] if aggregating else []
     )
     store.set_status(node, RUNNING)
 
@@ -129,18 +137,25 @@ def execute(store: Store, node: Node, *, report: RunReport) -> None:
             store.append_log(node, {"event": "split_refused", "reason": reason})
             store.append_decision(node, f"split refused: {reason}")
             report.refused += 1
-            rejection = _refusal(node, reason)
+            rejection = _split_refusal(reason)
             continue
 
         if result.verb == COMPLETE:
-            store.complete(
-                node,
-                summary=result.summary,
-                deliverable=result.deliverable,
-                artifacts=result.artifacts,
-            )
-            report.completed += 1
-            return
+            reason = _reject_complete(result, is_leaf=not children)
+            if reason is None:
+                store.complete(
+                    node,
+                    summary=result.summary,
+                    deliverable=result.deliverable,
+                    artifacts=result.artifacts,
+                )
+                report.completed += 1
+                return
+            store.append_log(node, {"event": "complete_refused", "reason": reason})
+            store.append_decision(node, f"completion refused: {reason}")
+            report.refused += 1
+            rejection = _complete_refusal(reason)
+            continue
 
     store.append_decision(node, "failed: no usable answer after repeated refusals")
     store.set_status(node, FAILED)
@@ -158,6 +173,22 @@ def _reject_split(node: Node, result: Result, aggregating: bool) -> str | None:
         )
     if not result.subtasks:
         return "a split must propose at least one subtask"
+    return None
+
+
+def _reject_complete(result: Result, *, is_leaf: bool) -> str | None:
+    """Return why this completion must be refused, or None if it is usable.
+
+    A leaf is the only place work actually lands, so a leaf that claims to be
+    finished having written nothing has not delivered its contract.  A node
+    whose children carry the artifacts is judged by their deliverables, not
+    by its own.
+    """
+    if is_leaf and not plan_artifacts(result.artifacts, result.deliverable):
+        return (
+            "a leaf must leave an artifact behind, and this completion carried "
+            "neither an artifact with content nor a deliverable"
+        )
     return None
 
 

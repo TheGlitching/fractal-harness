@@ -186,6 +186,26 @@ def _safe_relative_path(raw: str, fallback: str) -> Path:
     return Path(*parts)
 
 
+def plan_artifacts(
+    artifacts: list[tuple[str, str]], deliverable: str = ""
+) -> list[tuple[Path, str]]:
+    """Decide which files a completion would leave behind, as paths relative
+    to the node's ``artifacts/``.
+
+    Stated once and shared, so the scheduler's check that a leaf delivered
+    something and the writing of the files themselves can never disagree.
+    """
+    planned: list[tuple[Path, str]] = []
+    for number, (raw_path, content) in enumerate(artifacts, start=1):
+        if not str(content).strip():
+            continue
+        relative = _safe_relative_path(raw_path, f"artifact-{number:02d}.txt")
+        planned.append((relative, str(content)))
+    if not planned and str(deliverable).strip():
+        planned.append((Path("deliverable.md"), str(deliverable)))
+    return planned
+
+
 class Store:
     """Create, read and update nodes; keep the SQLite index in step."""
 
@@ -392,18 +412,10 @@ class Store:
     ) -> list[Path]:
         node.artifacts_dir.mkdir(parents=True, exist_ok=True)
         written: list[Path] = []
-        for number, (raw_path, content) in enumerate(artifacts, start=1):
-            if not str(content).strip():
-                continue
-            target = node.artifacts_dir / _safe_relative_path(
-                raw_path, f"artifact-{number:02d}.txt"
-            )
+        for relative, content in plan_artifacts(artifacts, deliverable):
+            target = node.artifacts_dir / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(str(content), encoding="utf-8")
-            written.append(target)
-        if not written and str(deliverable).strip():
-            target = node.artifacts_dir / "deliverable.md"
-            target.write_text(str(deliverable), encoding="utf-8")
+            target.write_text(content, encoding="utf-8")
             written.append(target)
         return written
 
