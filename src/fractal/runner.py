@@ -159,6 +159,18 @@ def assemble_context(
     contract_text = node.contract_path.read_text(encoding="utf-8").strip()
     parts = [f"## Your contract\n\n{contract_text}\n"]
 
+    if store.budget_enabled():
+        remaining = store.budget_remaining(node.id)
+        parts.append(
+            "## Budget\n"
+            f"- remaining token allowance: {remaining}\n"
+            "- every model call debits its usage from this budget; a split "
+            "debits a split-fee and divides the remaining allowance across its "
+            "children.  Propose a per-child ``allocation`` (tokens) such that "
+            "the split-fee plus the sum of allocations does not exceed the "
+            "remaining allowance above.\n"
+        )
+
     ancestors = store.ancestors(node)
     if ancestors:
         lines: list[str] = []
@@ -324,6 +336,18 @@ def _field(block: Any, name: str) -> Any:
     return getattr(block, name, None)
 
 
+def _usage_tokens(message: Any) -> int:
+    """Total input+output tokens a model call reported as usage."""
+    usage = _field(message, "usage")
+    if usage is None:
+        return 0
+    if isinstance(usage, dict):
+        return int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0)
+    return int(getattr(usage, "input_tokens", 0) or 0) + int(
+        getattr(usage, "output_tokens", 0) or 0
+    )
+
+
 def _as_list(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
@@ -342,6 +366,11 @@ def _contract_from_payload(payload: Any) -> Contract | None:
     goal = str(payload.get("goal") or payload.get("task") or "").strip()
     if not goal:
         return None
+    allocation = payload.get("allocation") or payload.get("token_allowance")
+    try:
+        allocation_int = int(allocation)
+    except (TypeError, ValueError):
+        allocation_int = 0
     return Contract(
         id=str(payload.get("id") or "").strip(),
         goal=goal,
@@ -351,6 +380,7 @@ def _contract_from_payload(payload: Any) -> Contract | None:
         interfaces=_strings(payload.get("interfaces")),
         constraints=_strings(payload.get("constraints")),
         depends_on=_strings(payload.get("depends_on")),
+        allocation=allocation_int,
     )
 
 
@@ -468,6 +498,7 @@ def run_node(
         },
     )
     message = call_model(prompt, model=model)
+    store.debit_call(node, _usage_tokens(message))
     result = parse_message(message)
     store.append_log(
         node,

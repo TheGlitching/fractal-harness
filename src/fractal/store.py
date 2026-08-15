@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -61,6 +62,15 @@ CREATE TABLE IF NOT EXISTS nodes (
 );
 CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(parent);
 CREATE INDEX IF NOT EXISTS nodes_status ON nodes(status);
+CREATE TABLE IF NOT EXISTS budget (
+    node_id     TEXT PRIMARY KEY,
+    parent      TEXT,
+    allowance   INTEGER NOT NULL DEFAULT 0,
+    calls       INTEGER NOT NULL DEFAULT 0,
+    fee_paid    INTEGER NOT NULL DEFAULT 0,
+    children    INTEGER NOT NULL DEFAULT 0,
+    debits      INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -93,6 +103,7 @@ class Contract:
     constraints: list[str] = field(default_factory=list)
     id: str = ""
     depends_on: list[str] = field(default_factory=list)
+    allocation: int = 0
 
     def render(self, node_id: str, depth: int, parent: str | None) -> str:
         def bullets(items: list[str]) -> str:
@@ -310,6 +321,13 @@ class Store:
 
         connection = self._begin()
         self._insert(connection, node)
+        budget_raw = os.environ.get("FRACTAL_BUDGET")
+        if budget_raw is not None:
+            connection.execute(
+                "INSERT OR IGNORE INTO budget (node_id, parent, allowance)"
+                " VALUES (?, ?, ?)",
+                (ROOT_ID, None, int(budget_raw)),
+            )
         self._commit(connection)
         return node
 
@@ -364,6 +382,20 @@ class Store:
         connection = self._begin()
         for child in children:
             self._insert(connection, child)
+        if self.budget_enabled():
+            fee = self.split_fee()
+            allocations = [max(0, int(contract.allocation)) for contract in contracts]
+            connection.execute(
+                "UPDATE budget SET fee_paid = fee_paid + ?, children = children + ?,"
+                " debits = debits + ? WHERE node_id = ?",
+                (fee, sum(allocations), fee, parent.id),
+            )
+            for child, allocation in zip(children, allocations):
+                connection.execute(
+                    "INSERT OR IGNORE INTO budget (node_id, parent, allowance)"
+                    " VALUES (?, ?, ?)",
+                    (child.id, parent.id, allocation),
+                )
         connection.execute(
             "UPDATE nodes SET status = ?, updated_at = ? WHERE id = ?",
             (SPLIT, _now(), parent.id),
@@ -404,6 +436,49 @@ class Store:
         )
         self._commit(connection)
         node.status = status
+
+    # -- budget ledger (SPEC.md gap 4 / Phase 2) ---------------------------
+
+    def split_fee(self) -> int:
+        return int(os.environ.get("FRACTAL_SPLIT_FEE", "200"))
+
+    def budget_enabled(self) -> bool:
+        """A per-subtree ledger exists when the root was initialised with a
+        FRACTAL_BUDGET.  Without one the harness runs the phase-0/1 depth cap."""
+        return self._budget_row(ROOT_ID) is not None
+
+    def _budget_row(self, node_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM budget WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def budget_remaining(self, node_id: str) -> int | None:
+        """The token allowance still spendable by ``node_id`` and its subtree,
+        with this node's split-fee set aside for the split it may propose."""
+        row = self._budget_row(node_id)
+        if row is None:
+            return None
+        return (
+            row["allowance"]
+            - row["calls"]
+            - row["fee_paid"]
+            - row["children"]
+            - self.split_fee()
+        )
+
+    def debit_call(self, node: Node, tokens: int) -> None:
+        """Charge a model call's actual usage to the node's ledger."""
+        tokens = max(0, int(tokens or 0))
+        if tokens == 0 or not self.budget_enabled():
+            return
+        connection = self._begin()
+        connection.execute(
+            "UPDATE budget SET calls = calls + ?, debits = debits + ?"
+            " WHERE node_id = ?",
+            (tokens, tokens, node.id),
+        )
+        self._commit(connection)
 
     def complete(
         self,

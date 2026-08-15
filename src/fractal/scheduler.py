@@ -144,6 +144,7 @@ def execute(store: Store, node: Node, *, report: RunReport) -> None:
 
     rejection: str | None = None
     for _ in range(MAX_ATTEMPTS):
+        pre_remaining = store.budget_remaining(node.id) if store.budget_enabled() else None
         try:
             result: Result = run_node(
                 store,
@@ -151,7 +152,6 @@ def execute(store: Store, node: Node, *, report: RunReport) -> None:
                 child_summaries=child_summaries,
                 dependency_summaries=_dependency_summaries(store, node),
                 rejection=rejection,
-                max_depth=MAX_DEPTH,
             )
         except RunnerError as error:
             store.append_log(node, {"event": "error", "error": str(error)})
@@ -170,7 +170,7 @@ def execute(store: Store, node: Node, *, report: RunReport) -> None:
             return
 
         if result.verb == SPLIT:
-            reason = _reject_split(node, result, aggregating)
+            reason = _reject_split(store, node, result, aggregating, pre_remaining)
             if reason is None:
                 children = store.add_children(node, result.subtasks)
                 store.append_decision(
@@ -244,11 +244,32 @@ def _has_cycle(edges: dict[str, list[str]]) -> bool:
     )
 
 
-def _reject_split(node: Node, result: Result, aggregating: bool) -> str | None:
-    """Return why this split must be refused, or None if it is legal."""
+def _reject_split(
+    store: Store,
+    node: Node,
+    result: Result,
+    aggregating: bool,
+    remaining: int | None,
+) -> str | None:
+    """Return why this split must be refused, or None if it is legal.
+
+    Phase 2 removes the hardcoded depth cap: when a budget ledger exists,
+    recursion is bounded by economics (the split-fee plus the proposed child
+    allocations must fit in the node's remaining allowance).  Without a budget
+    the phase-0/1 depth cap still applies.
+    """
     if aggregating:
         return "this node has already split once and its children are finished"
-    if node.depth >= MAX_DEPTH:
+    if store.budget_enabled():
+        fee = store.split_fee()
+        proposed = sum(max(0, int(contract.allocation)) for contract in result.subtasks)
+        if fee + proposed > (remaining if remaining is not None else 0):
+            return (
+                f"your proposed allocation is over budget: the {fee}-token "
+                f"split-fee plus {proposed} in child allocations exceeds your "
+                f"remaining token allowance of {remaining}"
+            )
+    elif node.depth >= MAX_DEPTH:
         return (
             f"the tree is limited to {MAX_DEPTH} levels and this node is already "
             f"at depth {node.depth}"
