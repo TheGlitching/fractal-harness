@@ -176,6 +176,7 @@ if _LOG:
             if _looks_like_node(kwargs):
                 tag = _identify(kwargs)
                 attempt = _TRIES.get(tag, 0) + 1
+                _TRIES[tag] = attempt
                 prompt_text = json.dumps(kwargs, default=str)
                 payload = _node_payload(tag, attempt, prompt_text)
                 flags = {}
@@ -390,7 +391,11 @@ def _max_depth(project: dict[str, Any]) -> int:
     """Deepest node path length: root alone is depth 1, root+child is 2, ..."""
     root = _root_dir(project)
     return max(
-        (len(node.relative_to(root).parts) + 1 for node in _walk_nodes(root)),
+        (
+            1
+            + sum(1 for part in node.relative_to(root).parts if part != "children")
+            for node in _walk_nodes(root)
+        ),
         default=0,
     )
 

@@ -25,6 +25,8 @@ DEFAULT_MAX_TOKENS = 8192
 
 SPLIT = "split"
 COMPLETE = "complete"
+ESCALATE = "escalate"
+ESCALATE_RESOLVE = "escalate_resolve"
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
@@ -37,7 +39,7 @@ You are given a contract: a goal, its acceptance criteria, the interfaces you \
 must respect, and the constraints inherited from every ancestor.  Those \
 constraints are laws — you may not relax them.
 
-Answer with exactly one of two verbs.
+Answer with one of four verbs.
 
 * split — the task is larger than one agent can carry.  Propose subtasks, \
 each a complete contract of its own: a goal, acceptance criteria, the \
@@ -46,6 +48,15 @@ Together the subtasks must cover your goal with no gaps and no overlap.
 * complete — the task fits within your competence.  Produce the deliverable \
 itself, a short distilled summary for your parent, and the files that should \
 be written as artifacts.
+* escalate — an inherited constraint you were given is false, or your \
+contract lacks something a sibling owns.  Name the assumption you believe \
+false and give the evidence you found.  The orchestrator will suspend your \
+branch and reopen the ancestor that owns that assumption.
+* escalate_resolve — returned only by an ancestor reopened to settle an \
+escalation.  Choose one resolution: amend (rewrite the offending constraint \
+or a target's interface), overrule (give a rationale the escalating child \
+must address), replan (re-plan the branch), or depends_on (add a dependency \
+edge on the escalating node).
 
 Split only when you must: every split costs a level of depth, and the depth \
 available to you is bounded.  If you are told a split was refused, you must \
@@ -113,6 +124,37 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["deliverable", "summary"],
         },
     },
+    {
+        "name": ESCALATE,
+        "description": "Challenge an inherited constraint (or name a needed interface "
+        "a sibling owns). The orchestrator suspends your branch and reopens the "
+        "owning ancestor.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "assumption": {"type": "string"},
+                "evidence": {"type": "string"},
+            },
+            "required": ["assumption", "evidence"],
+        },
+    },
+    {
+        "name": ESCALATE_RESOLVE,
+        "description": "Settle an escalation as the reopened owning ancestor. "
+        "resolution is one of amend | overrule | replan | depends_on.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "resolution": {"type": "string"},
+                "amended_constraint": {"type": "string"},
+                "amended_interface": {"type": "string"},
+                "rationale": {"type": "string"},
+                "target": {"type": "string"},
+                "dependency": {"type": "string"},
+            },
+            "required": ["resolution"],
+        },
+    },
 ]
 
 
@@ -129,6 +171,14 @@ class Result:
     deliverable: str = ""
     summary: str = ""
     artifacts: list[tuple[str, str]] = field(default_factory=list)
+    assumption: str = ""
+    evidence: str = ""
+    resolution: str = ""
+    amended_constraint: str = ""
+    amended_interface: str = ""
+    rationale: str = ""
+    target: str = ""
+    dependency: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +198,8 @@ def assemble_context(
     dependency_summaries: list[tuple[str, str, list[str]]] | None = None,
     rejection: str | None = None,
     max_depth: int | None = None,
+    escalation: tuple[str, str] | None = None,
+    rationale: str | None = None,
 ) -> str:
     """Build the prompt for one node: own contract, inherited constraints, and
     whatever its children rolled up.
@@ -215,6 +267,24 @@ def assemble_context(
 
     if rejection:
         parts.append(f"## Your last answer was refused\n\n{rejection.strip()}\n")
+
+    if escalation is not None:
+        assumption, evidence = escalation
+        parts.append(
+            "## A descendant escalated against this contract\n\n"
+            f"- challenged assumption: {assumption}\n"
+            f"- evidence from the escalating leaf: {evidence}\n\n"
+            "You are reopened as the ancestor that owns this assumption. "
+            "Settle it with the escalate_resolve tool.\n"
+        )
+
+    if rationale:
+        parts.append(
+            "## Your escalation was overruled\n\n"
+            f"The owning ancestor has overruled your escalation with this "
+            f"rationale:\n\n{rationale.strip()}\n\n"
+            "Address it and continue your contract.\n"
+        )
 
     parts.append(
         "## Now answer\n\n"
@@ -417,7 +487,25 @@ def result_from_payload(verb: str, payload: dict[str, Any]) -> Result:
             summary=str(payload.get("summary") or "").strip(),
             artifacts=_artifacts_from_payload(payload),
         )
-    raise RunnerError(f"unknown verb {verb!r}; phase 0 knows split and complete")
+    if verb == ESCALATE:
+        return Result(
+            verb=ESCALATE,
+            assumption=str(payload.get("assumption") or ""),
+            evidence=str(payload.get("evidence") or ""),
+        )
+    if verb == ESCALATE_RESOLVE:
+        return Result(
+            verb=ESCALATE_RESOLVE,
+            resolution=str(payload.get("resolution") or "").strip().lower(),
+            amended_constraint=str(payload.get("amended_constraint") or ""),
+            amended_interface=str(payload.get("amended_interface") or ""),
+            rationale=str(payload.get("rationale") or ""),
+            target=str(payload.get("target") or ""),
+            dependency=str(payload.get("dependency") or ""),
+        )
+    raise RunnerError(
+        f"unknown verb {verb!r}; phase 3 knows split, complete, escalate and escalate_resolve"
+    )
 
 
 def parse_message(message: Any) -> Result:
@@ -428,7 +516,7 @@ def parse_message(message: Any) -> Result:
         if _field(block, "type") != "tool_use":
             continue
         name = str(_field(block, "name") or "").strip().lower()
-        if name in (SPLIT, COMPLETE):
+        if name in (SPLIT, COMPLETE, ESCALATE, ESCALATE_RESOLVE):
             payload = _field(block, "input")
             if not isinstance(payload, dict):
                 payload = {}
@@ -444,7 +532,10 @@ def parse_message(message: Any) -> Result:
         if isinstance(payload, dict) and payload.get("verb"):
             return result_from_payload(str(payload["verb"]), payload)
 
-    raise RunnerError("the model answered with neither a split nor a complete")
+    raise RunnerError(
+        "the model answered with neither a split, complete, escalate "
+        "nor escalate_resolve"
+    )
 
 
 def _loads(text: str) -> Any:
@@ -476,6 +567,8 @@ def run_node(
     dependency_summaries: list[tuple[str, str, list[str]]] | None = None,
     rejection: str | None = None,
     max_depth: int | None = None,
+    escalation: tuple[str, str] | None = None,
+    rationale: str | None = None,
     model: str | None = None,
 ) -> Result:
     """Hydrate a node, ask the model for one verb, return the parsed result."""
@@ -486,6 +579,8 @@ def run_node(
         dependency_summaries=dependency_summaries,
         rejection=rejection,
         max_depth=max_depth,
+        escalation=escalation,
+        rationale=rationale,
     )
     store.append_log(
         node,
@@ -494,6 +589,8 @@ def run_node(
             "depth": node.depth,
             "aggregating": bool(child_summaries),
             "refused_before": bool(rejection),
+            "resolving_escalation": escalation is not None,
+            "overruled": rationale is not None,
             "prompt_chars": len(prompt),
         },
     )

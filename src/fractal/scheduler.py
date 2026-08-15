@@ -15,16 +15,28 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from .runner import COMPLETE, SPLIT, Result, RunnerError, run_node, verify_node
+from .runner import (
+    COMPLETE,
+    ESCALATE,
+    ESCALATE_RESOLVE,
+    SPLIT,
+    Result,
+    RunnerError,
+    run_node,
+    verify_node,
+)
 from .store import (
+    EVENTS_FILENAME,
     COMPLETE as STATUS_COMPLETE,
     FAILED,
     PENDING,
     RUNNING,
     SPLIT as STATUS_SPLIT,
+    SUSPENDED,
     TERMINAL_STATUSES,
     Node,
     Store,
+    StoreError,
     plan_artifacts,
 )
 
@@ -133,6 +145,70 @@ def _dependency_summaries(store: Store, node: Node) -> list[tuple[str, str, list
     return out
 
 
+def _apply_result(
+    store: Store,
+    node: Node,
+    result: Result,
+    report: RunReport,
+    aggregating: bool,
+    pre_remaining: int | None,
+    children: list[Node],
+) -> tuple[bool, str | None]:
+    """Apply a split or complete result.  Returns (applied, rejection).
+
+    ``applied`` is True when the node is settled (the caller returns).
+    ``rejection`` is a message to feed back when a result was refused and the
+    node should answer again.
+    """
+    if result.verb == SPLIT:
+        reason = _reject_split(store, node, result, aggregating, pre_remaining)
+        if reason is None:
+            children = store.add_children(node, result.subtasks)
+            store.append_decision(
+                node,
+                "split into " + ", ".join(child.id for child in children),
+            )
+            report.split += 1
+            return True, None
+        store.append_log(node, {"event": "split_refused", "reason": reason})
+        store.append_decision(node, f"split refused: {reason}")
+        report.refused += 1
+        return False, _split_refusal(reason)
+
+    if result.verb == COMPLETE:
+        reason = _reject_complete(result, is_leaf=not children)
+        if reason is None:
+            criteria = node.contract().acceptance_criteria
+            verdict, results = verify_node(
+                store, node, result.deliverable, criteria
+            )
+            if verdict != "PASS":
+                store.append_log(
+                    node, {"event": "verify_failed", "criteria": results}
+                )
+                report.refused += 1
+                return False, _verify_refusal(results)
+            store.complete(
+                node,
+                summary=result.summary,
+                deliverable=result.deliverable,
+                artifacts=result.artifacts,
+            )
+            store.record_dependencies(node)
+            store.append_decision(
+                node,
+                "verified: verdict=PASS; " + _criteria_line(results, criteria),
+            )
+            report.completed += 1
+            return True, None
+        store.append_log(node, {"event": "complete_refused", "reason": reason})
+        store.append_decision(node, f"completion refused: {reason}")
+        report.refused += 1
+        return False, _complete_refusal(reason)
+
+    return False, "unknown verb; answer with the split or complete tool"
+
+
 def execute(store: Store, node: Node, *, report: RunReport) -> None:
     """Run one node and apply its result."""
     children = store.children(node)
@@ -169,59 +245,241 @@ def execute(store: Store, node: Node, *, report: RunReport) -> None:
             report.failed += 1
             return
 
-        if result.verb == SPLIT:
-            reason = _reject_split(store, node, result, aggregating, pre_remaining)
-            if reason is None:
-                children = store.add_children(node, result.subtasks)
-                store.append_decision(
-                    node,
-                    "split into " + ", ".join(child.id for child in children),
-                )
-                report.split += 1
-                return
-            store.append_log(node, {"event": "split_refused", "reason": reason})
-            store.append_decision(node, f"split refused: {reason}")
-            report.refused += 1
-            rejection = _split_refusal(reason)
-            continue
+        if result.verb == ESCALATE:
+            handle_escalate(store, node, result, report)
+            return
+        if result.verb == ESCALATE_RESOLVE:
+            store.append_log(
+                node, {"event": "error", "error": "a leaf returned escalate_resolve"}
+            )
+            store.append_decision(
+                node, "failed: returned escalate_resolve without an escalation"
+            )
+            store.set_status(node, FAILED)
+            report.failed += 1
+            return
 
-        if result.verb == COMPLETE:
-            reason = _reject_complete(result, is_leaf=not children)
-            if reason is None:
-                criteria = node.contract().acceptance_criteria
-                verdict, results = verify_node(
-                    store, node, result.deliverable, criteria
-                )
-                if verdict != "PASS":
-                    store.append_log(
-                        node, {"event": "verify_failed", "criteria": results}
-                    )
-                    report.refused += 1
-                    rejection = _verify_refusal(results)
-                    continue
-                store.complete(
-                    node,
-                    summary=result.summary,
-                    deliverable=result.deliverable,
-                    artifacts=result.artifacts,
-                )
-                store.record_dependencies(node)
-                store.append_decision(
-                    node,
-                    "verified: verdict=PASS; "
-                    + _criteria_line(results, criteria),
-                )
-                report.completed += 1
-                return
-            store.append_log(node, {"event": "complete_refused", "reason": reason})
-            store.append_decision(node, f"completion refused: {reason}")
-            report.refused += 1
-            rejection = _complete_refusal(reason)
-            continue
+        applied, new_rejection = _apply_result(
+            store, node, result, report, aggregating, pre_remaining, children
+        )
+        if applied:
+            return
+        rejection = new_rejection
+        continue
 
     store.append_decision(node, "failed: no usable answer after repeated refusals")
     store.set_status(node, FAILED)
     report.failed += 1
+
+
+# ---------------------------------------------------------------------------
+# Upward escalation (SPEC.md 4.3 / Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def find_escalation_point(
+    store: Store, node: Node, assumption: str
+) -> Node | None:
+    """The nearest ancestor that owns the challenged assumption.
+
+    An ancestor owns an assumption when its contract lists it as an inherited
+    constraint.  When no ancestor names it (a discovered dependency: "my
+    contract does not provide X; sibling B owns it"), the escalation goes to
+    the direct parent, which owns the sibling topology.
+    """
+    ancestors = store.ancestors(node)  # root first, parent last
+    for ancestor in reversed(ancestors):  # nearest first
+        if assumption in ancestor.contract().constraints:
+            return ancestor
+    if node.parent is None:
+        return None
+    try:
+        return store.get(node.parent)
+    except StoreError:
+        return None
+
+
+def _resolve_sibling(store: Store, owner: Node, tag: str) -> Node | None:
+    """Find a sibling of ``owner`` by its [N:<tag>] goal marker."""
+    for child in store.children(owner):
+        if f"[N:{tag}]" in child.goal:
+            return child
+    return None
+
+
+def _suspend_branch(store: Store, node: Node, owner: Node) -> None:
+    """Mark ``node`` and its ancestors down to (not including) ``owner``
+    suspended, so nothing in the challenged branch runs while the escalation
+    is being settled."""
+    current = node
+    while current is not None and current.id != owner.id:
+        store.set_status(current, SUSPENDED)
+        current = store.get(current.parent) if current.parent else None
+
+
+def _resume_ancestors(store: Store, node: Node, owner: Node) -> None:
+    """Return the suspended intermediate ancestors to SPLIT so they can
+    aggregate once the escalated leaf has resumed."""
+    parent = store.get(node.parent) if node.parent else None
+    while parent is not None and parent.id != owner.id:
+        store.set_status(parent, STATUS_SPLIT)
+        parent = store.get(parent.parent) if parent.parent else None
+
+
+def _resume_escalating(
+    store: Store, node: Node, rationale: str | None, report: RunReport
+) -> None:
+    """Re-run the escalated node (under the new terms or the overruling
+    rationale) and apply its answer."""
+    children = store.children(node)
+    aggregating = node.status == STATUS_SPLIT
+    store.set_status(node, RUNNING)
+    try:
+        result = run_node(store, node, rationale=rationale)
+    except RunnerError as error:
+        store.append_decision(node, f"failed after escalation: {error}")
+        store.set_status(node, FAILED)
+        report.failed += 1
+        return
+    pre_remaining = store.budget_remaining(node.id) if store.budget_enabled() else None
+    applied, rejection = _apply_result(
+        store, node, result, report, aggregating, pre_remaining, children
+    )
+    if not applied:
+        store.append_decision(node, f"failed after escalation: {rejection}")
+        store.set_status(node, FAILED)
+        report.failed += 1
+
+
+def _compact_child_into(parent: Node, child: Node) -> None:
+    """Preserve a pruned child's episodic trace in the ancestor's log/ so the
+    work survives even when the child is deleted (AC3.5)."""
+    parent.log_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"# Compacted trace of pruned child {child.id}",
+        f"- goal: {child.goal}",
+        f"- summary: {child.summary or '(none)'}",
+    ]
+    decisions = child.decisions_path
+    if decisions.is_file():
+        lines.append("- decisions:")
+        lines += [
+            "    " + line for line in decisions.read_text(encoding="utf-8").splitlines()
+        ]
+    events = child.log_dir / EVENTS_FILENAME
+    if events.is_file():
+        lines.append("- events:")
+        lines += [
+            "    " + line for line in events.read_text(encoding="utf-8").splitlines()
+        ]
+    (parent.log_dir / f"compacted-{child.id}.md").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+
+def _replan(store: Store, parent: Node, report: RunReport) -> None:
+    """Prune the parent's children, compacting their logs into the parent's
+    log/ before deleting them (AC3.5)."""
+    for child in store.children(parent):
+        _compact_child_into(parent, child)
+        store.delete_node(child)
+    store.set_status(parent, PENDING)
+
+
+def _apply_resolution(
+    store: Store,
+    owner: Node,
+    node: Node,
+    resolve: Result,
+    assumption: str,
+    evidence: str,
+    report: RunReport,
+) -> None:
+    resolution = resolve.resolution
+    store.append_log(
+        owner,
+        {"event": "escalation_resolved", "resolution": resolution},
+    )
+    if resolution == "amend":
+        if resolve.amended_constraint:
+            store.amend_inherited_constraint(owner, assumption, resolve.amended_constraint)
+        if resolve.amended_interface and resolve.target:
+            target = _resolve_sibling(store, owner, resolve.target)
+            if target is not None:
+                store.add_interface(target, resolve.amended_interface)
+        _resume_escalating(store, node, None, report)
+        _resume_ancestors(store, node, owner)
+        return
+    if resolution == "overrule":
+        _resume_escalating(store, node, resolve.rationale, report)
+        _resume_ancestors(store, node, owner)
+        return
+    if resolution == "depends_on":
+        dep = _resolve_sibling(store, owner, resolve.dependency)
+        if dep is not None:
+            store.add_depends_on(node, dep.id)
+        store.set_status(node, PENDING)
+        _resume_ancestors(store, node, owner)
+        return
+    if resolution == "replan":
+        parent = store.get(node.parent) if node.parent else owner
+        try:
+            parent_resolve = run_node(
+                store, parent, escalation=(assumption, evidence)
+            )
+        except RunnerError as error:
+            store.append_decision(node, f"failed during re-plan: {error}")
+            store.set_status(node, FAILED)
+            report.failed += 1
+            return
+        if parent_resolve.resolution == "replan":
+            _replan(store, parent, report)
+        else:
+            _resume_escalating(store, node, None, report)
+            _resume_ancestors(store, node, owner)
+        return
+    store.append_decision(
+        node, f"failed: escalation resolved with unknown resolution {resolution!r}"
+    )
+    store.set_status(node, FAILED)
+    report.failed += 1
+
+
+def handle_escalate(
+    store: Store, node: Node, result: Result, report: RunReport
+) -> None:
+    """Suspend the branch, reopen the owning ancestor with the child's
+    evidence, and apply its resolution (AC3.1-AC3.6)."""
+    assumption = result.assumption
+    evidence = result.evidence
+    store.append_log(
+        node, {"event": "escalate", "assumption": assumption, "evidence": evidence}
+    )
+    store.append_decision(
+        node, f"escalated: {assumption}; evidence: {evidence}"
+    )
+
+    owner = find_escalation_point(store, node, assumption)
+    if owner is None:
+        store.append_decision(node, "failed: escalated with no owning ancestor")
+        store.set_status(node, FAILED)
+        report.failed += 1
+        return
+
+    _suspend_branch(store, node, owner)
+    store.set_status(owner, RUNNING)
+    try:
+        resolve = run_node(store, owner, escalation=(assumption, evidence))
+    except RunnerError as error:
+        store.set_status(owner, STATUS_SPLIT)
+        store.append_decision(node, f"failed: escalation resolution unusable: {error}")
+        store.set_status(node, FAILED)
+        report.failed += 1
+        return
+    store.set_status(owner, STATUS_SPLIT)
+    _apply_resolution(
+        store, owner, node, resolve, assumption, evidence, report
+    )
 
 
 def _has_cycle(edges: dict[str, list[str]]) -> bool:

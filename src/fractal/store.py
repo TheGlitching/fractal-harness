@@ -43,6 +43,7 @@ EVENTS_FILENAME = "events.jsonl"
 PENDING = "pending"
 RUNNING = "running"
 SPLIT = "split"
+SUSPENDED = "suspended"
 COMPLETE = "complete"
 FAILED = "failed"
 TERMINAL_STATUSES = frozenset({COMPLETE, FAILED})
@@ -506,6 +507,72 @@ class Store:
         node.status = COMPLETE
         node.summary = summary.strip()
         return written
+
+    # -- escalation support (SPEC.md 4.3 / Phase 3) ------------------------
+
+    def amend_inherited_constraint(
+        self, owner: Node, old: str, new: str
+    ) -> None:
+        """Replace an inherited constraint the owner owns, in the owner and in
+        every descendant's contract (SPEC.md 4.4 downward flow)."""
+        if not new or not old:
+            return
+        self._replace_in_subtree(owner, f"- {old}", f"- {new}")
+
+    def add_interface(self, node: Node, interface: str) -> None:
+        """Expose a named interface on ``node``'s contract (amending a sibling
+        so a discovered dependency is satisfied earlier, AC3.6)."""
+        if not interface:
+            return
+        text = node.contract_path.read_text(encoding="utf-8")
+        marker = "## Interfaces\n\n"
+        head, found, tail = text.partition(marker)
+        if not found:
+            return
+        if interface in text:
+            return
+        body, sep, rest = tail.partition("\n\n")
+        line = f"- {interface}"
+        body = body.replace("- (none stated)", line)
+        if line not in body:
+            body = body.rstrip("\n") + "\n" + line
+        node.contract_path.write_text(
+            head + marker + body + sep + rest, encoding="utf-8"
+        )
+
+    def add_depends_on(self, node: Node, dep_id: str) -> None:
+        """Add a dependency edge ``node -> dep_id`` (the depends_on resolution,
+        AC3.6)."""
+        if not dep_id or dep_id in node.depends_on:
+            return
+        node.depends_on = node.depends_on + [dep_id]
+        connection = self._begin()
+        connection.execute(
+            "UPDATE nodes SET depends_on = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(node.depends_on), _now(), node.id),
+        )
+        self._commit(connection)
+
+    def delete_node(self, node: Node) -> None:
+        """Remove a node's directory and index rows (re-plan pruning, AC3.5)."""
+        import shutil
+
+        shutil.rmtree(node.path, ignore_errors=True)
+        connection = self._begin()
+        connection.execute("DELETE FROM nodes WHERE id = ?", (node.id,))
+        connection.execute("DELETE FROM budget WHERE node_id = ?", (node.id,))
+        self._commit(connection)
+
+    def _replace_in_subtree(self, node: Node, old: str, new: str) -> None:
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            text = current.contract_path.read_text(encoding="utf-8")
+            if old in text:
+                current.contract_path.write_text(
+                    text.replace(old, new), encoding="utf-8"
+                )
+            stack.extend(self.children(current))
 
     def write_artifacts(
         self,
