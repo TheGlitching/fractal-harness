@@ -34,6 +34,22 @@ class _Block:
         self.__dict__.update(fields)
 
 
+def _passing_critic(prompt: str, *, model: str | None = None) -> _Block:
+    """Stand-in for the verifier: everything passes, so the leaf-artifact rules
+    under test are what get exercised, not the (out-of-scope) verify pass."""
+    return _Block(
+        content=[
+            _Block(
+                type="text",
+                text=(
+                    '{"verdict": "PASS", "criteria": '
+                    '[{"name": "ok", "pass": true}]}'
+                ),
+            )
+        ]
+    )
+
+
 def _message(payload: dict[str, Any]) -> _Block:
     tool_input = {key: value for key, value in payload.items() if key != "verb"}
     return _Block(
@@ -148,6 +164,7 @@ def test_leaf_completing_with_only_a_deliverable_is_accepted(
         )
 
     monkeypatch.setattr(runner, "call_model", deliverable_only)
+    monkeypatch.setattr(runner, "call_critic", _passing_critic)
 
     report = scheduler.run(store)
 
@@ -199,6 +216,7 @@ def test_a_parent_may_complete_without_artifacts_of_its_own(
         )
 
     monkeypatch.setattr(runner, "call_model", split_then_aggregate)
+    monkeypatch.setattr(runner, "call_critic", _passing_critic)
 
     report = scheduler.run(store)
 

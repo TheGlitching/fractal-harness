@@ -205,6 +205,31 @@ if _LOG:
         pass
 
     def _respond(kwargs):
+        names = {
+            str(t.get("name", "")).strip().lower()
+            for t in kwargs.get("tools") or []
+            if isinstance(t, dict)
+        }
+        is_critic = not ({"split", "complete"} & names)
+        if is_critic:
+            # The harness's verification pass: no node tools, so answer the
+            # critic and log nothing (phase 0 has no verifier; the calls the
+            # tests count are node calls only).
+            return _Message(
+                id="msg_verify",
+                type="message",
+                role="assistant",
+                model=kwargs.get("model", "claude-opus-5"),
+                stop_reason="end_turn",
+                stop_sequence=None,
+                content=[
+                    _Block(
+                        type="text",
+                        text=json.dumps({"verdict": "PASS", "criteria": []}),
+                    )
+                ],
+                usage=_Block(input_tokens=100, output_tokens=100),
+            )
         with _LOCK:
             call_number = (
                 sum(1 for record in _read_log() if record.get("event") == "start") + 1

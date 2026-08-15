@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 
-from .runner import COMPLETE, SPLIT, Result, RunnerError, run_node
+from .runner import COMPLETE, SPLIT, Result, RunnerError, run_node, verify_node
 from .store import (
+    COMPLETE as STATUS_COMPLETE,
     FAILED,
     PENDING,
     RUNNING,
@@ -30,7 +32,8 @@ MAX_DEPTH = 3
 """Hardcoded for phase 0; the root is depth 1, so at most three levels nest."""
 
 MAX_ATTEMPTS = 3
-"""How often one node may be asked again after a refused answer."""
+"""How often one node may be asked again after a refused answer (a refusal
+includes a failed verification round, so at most two revise rounds happen)."""
 
 MAX_STEPS = 500
 """A backstop so a pathological tree cannot spin forever."""
@@ -50,23 +53,42 @@ class RunReport:
         return self.root_status not in (FAILED,) and self.root_status in TERMINAL_STATUSES
 
 
-def _aggregatable(store: Store, node: Node, nodes: list[Node]) -> bool:
+def _deps_complete(store: Store, node: Node, stale: set[str]) -> bool:
+    """Every dependency of ``node`` is accepted and not itself stale."""
+    if not node.depends_on:
+        return True
+    by_id = {item.id: item for item in store.walk()}
+    for dep in node.depends_on:
+        dep_node = by_id.get(dep)
+        if dep_node is None or dep_node.status != STATUS_COMPLETE or dep in stale:
+            return False
+    return True
+
+
+def _aggregatable(
+    store: Store, node: Node, nodes: list[Node], stale: set[str]
+) -> bool:
     children = [item for item in nodes if item.parent == node.id]
     return bool(children) and all(
-        child.status in TERMINAL_STATUSES for child in children
+        child.status in TERMINAL_STATUSES and child.id not in stale
+        for child in children
     )
 
 
-def next_node(store: Store, nodes: list[Node]) -> Node | None:
-    """The next runnable node: pending work first, in on-disk order, then the
-    deepest parent whose children have all come back."""
+def next_node(store: Store, nodes: list[Node], stale: set[str]) -> Node | None:
+    """The next runnable node: stale dependents first (their dependency moved),
+    then pending work whose dependencies are all accepted, then the deepest
+    parent whose children have all come back."""
     for node in nodes:
-        if node.status == PENDING:
+        if node.id in stale:
+            return node
+    for node in nodes:
+        if node.status == PENDING and _deps_complete(store, node, stale):
             return node
     ready = [
         node
         for node in nodes
-        if node.status == STATUS_SPLIT and _aggregatable(store, node, nodes)
+        if node.status == STATUS_SPLIT and _aggregatable(store, node, nodes, stale)
     ]
     if not ready:
         return None
@@ -89,6 +111,28 @@ def _complete_refusal(reason: str) -> str:
     )
 
 
+def _dependency_summaries(store: Store, node: Node) -> list[tuple[str, str, list[str]]]:
+    """For each accepted dependency, its summary and the paths of the artifacts
+    it delivered, to inject into the dependent's context (AC1.1)."""
+    out: list[tuple[str, str, list[str]]] = []
+    if not node.depends_on:
+        return out
+    by_id = {item.id: item for item in store.walk()}
+    for dep in node.depends_on:
+        dep_node = by_id.get(dep)
+        if dep_node is None or dep_node.status != STATUS_COMPLETE:
+            continue
+        paths: list[str] = []
+        if dep_node.artifacts_dir.is_dir():
+            paths = [
+                str(path.relative_to(dep_node.path))
+                for path in sorted(dep_node.artifacts_dir.rglob("*"))
+                if path.is_file()
+            ]
+        out.append((dep_node.id, dep_node.summary, paths))
+    return out
+
+
 def execute(store: Store, node: Node, *, report: RunReport) -> None:
     """Run one node and apply its result."""
     children = store.children(node)
@@ -105,6 +149,7 @@ def execute(store: Store, node: Node, *, report: RunReport) -> None:
                 store,
                 node,
                 child_summaries=child_summaries,
+                dependency_summaries=_dependency_summaries(store, node),
                 rejection=rejection,
                 max_depth=MAX_DEPTH,
             )
@@ -143,11 +188,28 @@ def execute(store: Store, node: Node, *, report: RunReport) -> None:
         if result.verb == COMPLETE:
             reason = _reject_complete(result, is_leaf=not children)
             if reason is None:
+                criteria = node.contract().acceptance_criteria
+                verdict, results = verify_node(
+                    store, node, result.deliverable, criteria
+                )
+                if verdict != "PASS":
+                    store.append_log(
+                        node, {"event": "verify_failed", "criteria": results}
+                    )
+                    report.refused += 1
+                    rejection = _verify_refusal(results)
+                    continue
                 store.complete(
                     node,
                     summary=result.summary,
                     deliverable=result.deliverable,
                     artifacts=result.artifacts,
+                )
+                store.record_dependencies(node)
+                store.append_decision(
+                    node,
+                    "verified: verdict=PASS; "
+                    + _criteria_line(results, criteria),
                 )
                 report.completed += 1
                 return
@@ -162,6 +224,26 @@ def execute(store: Store, node: Node, *, report: RunReport) -> None:
     report.failed += 1
 
 
+def _has_cycle(edges: dict[str, list[str]]) -> bool:
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour: dict[str, int] = {}
+
+    def visit(node_id: str) -> bool:
+        colour[node_id] = GREY
+        for dep in edges.get(node_id, []):
+            if dep not in colour:
+                if visit(dep):
+                    return True
+            elif colour[dep] == GREY:
+                return True
+        colour[node_id] = BLACK
+        return False
+
+    return any(
+        visit(node_id) for node_id in list(edges) if colour.get(node_id, WHITE) == WHITE
+    )
+
+
 def _reject_split(node: Node, result: Result, aggregating: bool) -> str | None:
     """Return why this split must be refused, or None if it is legal."""
     if aggregating:
@@ -173,7 +255,40 @@ def _reject_split(node: Node, result: Result, aggregating: bool) -> str | None:
         )
     if not result.subtasks:
         return "a split must propose at least one subtask"
+    edges = {
+        contract.id or f"#{index}": [
+            dep.strip() for dep in contract.depends_on
+        ]
+        for index, contract in enumerate(result.subtasks)
+    }
+    for deps in edges.values():
+        for dep in deps:
+            if dep and dep not in edges:
+                return f"depends_on names an unknown sibling {dep!r}"
+    if _has_cycle(edges):
+        return (
+            "the proposed split contains a dependency cycle; a circular "
+            "dependency cannot be scheduled"
+        )
     return None
+
+
+def _verify_refusal(results: list[dict[str, Any]]) -> str:
+    return (
+        "Your completion was refused because it failed verification against "
+        "your acceptance criteria. Nothing was recorded. Fix the deliverable "
+        "so it satisfies every criterion, then answer again with the complete "
+        "tool. Criteria checked: "
+        + ", ".join(str(item.get("name") or item) for item in results)
+    )
+
+
+def _criteria_line(results: list[dict[str, Any]], fallback: list[str]) -> str:
+    if results:
+        return "criteria=[" + ", ".join(
+            f"{item.get('name') or item}={item.get('pass')}" for item in results
+        ) + "]"
+    return "criteria=" + ", ".join(fallback)
 
 
 def _reject_complete(result: Result, *, is_leaf: bool) -> str | None:
@@ -201,9 +316,8 @@ def run(store: Store, *, max_steps: int | None = None) -> RunReport:
     while report.steps < limit:
         nodes = store.walk()
         root = nodes[0] if nodes else None
-        if root is not None and root.status in TERMINAL_STATUSES:
-            break
-        node = next_node(store, nodes)
+        stale = store.stale_ids()
+        node = next_node(store, nodes, stale)
         if node is None:
             break
         report.steps += 1

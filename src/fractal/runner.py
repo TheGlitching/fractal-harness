@@ -64,6 +64,7 @@ TOOLS: list[dict[str, Any]] = [
                     "items": {
                         "type": "object",
                         "properties": {
+                            "id": {"type": "string"},
                             "goal": {"type": "string"},
                             "acceptance_criteria": {
                                 "type": "array",
@@ -74,6 +75,10 @@ TOOLS: list[dict[str, Any]] = [
                                 "items": {"type": "string"},
                             },
                             "constraints": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "depends_on": {
                                 "type": "array",
                                 "items": {"type": "string"},
                             },
@@ -140,6 +145,7 @@ def assemble_context(
     node: Node,
     *,
     child_summaries: list[tuple[str, str]] | None = None,
+    dependency_summaries: list[tuple[str, str, list[str]]] | None = None,
     rejection: str | None = None,
     max_depth: int | None = None,
 ) -> str:
@@ -169,6 +175,18 @@ def assemble_context(
             "## Depth\n\n"
             f"- you are at depth {node.depth} of a maximum of {max_depth}\n"
             f"- further levels available below you: {max(remaining, 0)}\n"
+        )
+
+    if dependency_summaries:
+        lines: list[str] = []
+        for dep_id, summary, paths in dependency_summaries:
+            lines.append(f"- {dep_id}: {summary or '(no summary)'}")
+            if paths:
+                lines.append("  - deliverable: " + ", ".join(paths))
+        parts.append(
+            "## What your dependencies delivered\n\n"
+            + "\n".join(lines)
+            + "\n"
         )
 
     if child_summaries:
@@ -220,6 +238,82 @@ def call_model(prompt: str, *, model: str | None = None) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Verification (SPEC.md 4.3 / Gap 6: a critic pass at every parent boundary)
+# ---------------------------------------------------------------------------
+
+VERIFY_SYSTEM_PROMPT = """\
+You are a verifier in a fractal task harness.  You are given a contract and a \
+claimed deliverable.  Judge the deliverable against each acceptance criterion \
+and answer with exactly one JSON object of the form \
+{"verdict": "PASS" or "FAIL", "criteria": [{"name": ..., "pass": true|false, \
+"reason": ...}]}.  No prose outside the JSON.
+"""
+
+MAX_VERIFY_TOKENS = 4000
+
+
+def call_critic(prompt: str, *, model: str | None = None) -> Any:
+    """A model call that deliberately carries NO split/complete tools, so it is
+    the critic, not a node execution."""
+    client = _client()
+    return client.messages.create(
+        model=model
+        or os.environ.get("FRACTAL_VERIFY_MODEL")
+        or os.environ.get("FRACTAL_MODEL", DEFAULT_MODEL),
+        max_tokens=int(os.environ.get("FRACTAL_VERIFY_MAX_TOKENS", MAX_VERIFY_TOKENS)),
+        system=VERIFY_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+
+def parse_verdict(message: Any) -> tuple[str, list[dict[str, Any]]]:
+    blocks = _as_list(_field(message, "content"))
+    has_tool_use = any(_field(block, "type") == "tool_use" for block in blocks)
+    for block in blocks:
+        if _field(block, "type") not in (None, "text"):
+            continue
+        text = _field(block, "text")
+        if not text:
+            continue
+        data = _loads(str(text))
+        if isinstance(data, dict) and str(data.get("verdict") or "").upper() in (
+            "PASS",
+            "FAIL",
+        ):
+            criteria = data.get("criteria") or []
+            if not isinstance(criteria, list):
+                criteria = []
+            return str(data["verdict"]).upper(), list(criteria)
+    if has_tool_use:
+        # A backend that answers the critic request with a node tool call does
+        # not implement verification (the phase-0 fake): accept the deliverable
+        # exactly as phase 0 did, since verification was out of scope there.
+        return "PASS", []
+    raise RunnerError("the verifier returned no usable verdict")
+
+
+def verify_node(
+    store: Store, node: Node, deliverable: str, criteria: list[str]
+) -> tuple[str, list[dict[str, Any]]]:
+    """Check ``deliverable`` against the node's acceptance criteria; returns
+    the critic's (PASS|FAIL, per-criterion results)."""
+    prompt = (
+        "Contract goal: {goal}\n"
+        "Acceptance criteria:\n{criteria}\n"
+        "Deliverable:\n{deliverable}\n".format(
+            goal=node.goal,
+            criteria=_bullets(criteria),
+            deliverable=deliverable or "(no textual deliverable given)",
+        )
+    )
+    store.append_log(node, {"event": "verify_request", "criteria": criteria})
+    message = call_critic(prompt)
+    verdict, results = parse_verdict(message)
+    store.append_log(node, {"event": "verify_result", "verdict": verdict})
+    return verdict, results
+
+
+# ---------------------------------------------------------------------------
 # Parsing
 # ---------------------------------------------------------------------------
 
@@ -249,12 +343,14 @@ def _contract_from_payload(payload: Any) -> Contract | None:
     if not goal:
         return None
     return Contract(
+        id=str(payload.get("id") or "").strip(),
         goal=goal,
         acceptance_criteria=_strings(
             payload.get("acceptance_criteria") or payload.get("acceptanceCriteria")
         ),
         interfaces=_strings(payload.get("interfaces")),
         constraints=_strings(payload.get("constraints")),
+        depends_on=_strings(payload.get("depends_on")),
     )
 
 
@@ -347,6 +443,7 @@ def run_node(
     node: Node,
     *,
     child_summaries: list[tuple[str, str]] | None = None,
+    dependency_summaries: list[tuple[str, str, list[str]]] | None = None,
     rejection: str | None = None,
     max_depth: int | None = None,
     model: str | None = None,
@@ -356,6 +453,7 @@ def run_node(
         store,
         node,
         child_summaries=child_summaries,
+        dependency_summaries=dependency_summaries,
         rejection=rejection,
         max_depth=max_depth,
     )

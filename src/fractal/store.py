@@ -16,6 +16,7 @@ is reconciled from disk on every load and can be rebuilt from it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass, field
@@ -53,6 +54,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     status      TEXT NOT NULL,
     goal        TEXT NOT NULL DEFAULT '',
     summary     TEXT NOT NULL DEFAULT '',
+    depends_on  TEXT NOT NULL DEFAULT '[]',
+    dep_fp      TEXT NOT NULL DEFAULT '{}',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -77,12 +80,19 @@ class StoreError(RuntimeError):
 @dataclass
 class Contract:
     """The boundary object handed to a node: what it must achieve and under
-    which inherited laws."""
+    which inherited laws.
+
+    ``id`` is the model-proposed subtask id used only to resolve dependency
+    edges at split time (mapped onto the real on-disk node id); ``depends_on``
+    names the sibling subtasks a child needs finished before it starts.
+    """
 
     goal: str
     acceptance_criteria: list[str] = field(default_factory=list)
     interfaces: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
+    id: str = ""
+    depends_on: list[str] = field(default_factory=list)
 
     def render(self, node_id: str, depth: int, parent: str | None) -> str:
         def bullets(items: list[str]) -> str:
@@ -102,7 +112,9 @@ class Contract:
             "## Interfaces\n\n"
             f"{bullets(self.interfaces)}\n"
             "## Inherited constraints\n\n"
-            f"{bullets(self.constraints)}"
+            f"{bullets(self.constraints)}\n"
+            "## depends_on\n\n"
+            f"{bullets(self.depends_on)}"
         )
 
     @classmethod
@@ -134,6 +146,7 @@ class Contract:
             acceptance_criteria=items("acceptance criteria"),
             interfaces=items("interfaces"),
             constraints=items("inherited constraints"),
+            depends_on=items("depends_on"),
         )
 
 
@@ -148,6 +161,8 @@ class Node:
     status: str = PENDING
     goal: str = ""
     summary: str = ""
+    depends_on: list[str] = field(default_factory=list)
+    dep_fp: str = "{}"
 
     @property
     def contract_path(self) -> Path:
@@ -322,9 +337,17 @@ class Store:
         """
         parent.children_dir.mkdir(parents=True, exist_ok=True)
         existing = len(self._child_dirs(parent.path))
+        model_map: dict[str, str] = {}
+        for offset, contract in enumerate(contracts, start=1):
+            child_id = f"{parent.id}-{existing + offset:02d}"
+            model_id = contract.id.strip() or child_id
+            model_map[model_id] = child_id
         children: list[Node] = []
         for offset, contract in enumerate(contracts, start=1):
             child_id = f"{parent.id}-{existing + offset:02d}"
+            depends_on = [
+                model_map.get(dep.strip(), dep.strip()) for dep in contract.depends_on
+            ]
             child = Node(
                 id=child_id,
                 path=parent.children_dir / child_id,
@@ -332,7 +355,9 @@ class Store:
                 depth=parent.depth + 1,
                 status=PENDING,
                 goal=contract.goal,
+                depends_on=depends_on,
             )
+            contract.depends_on = depends_on
             self._materialise(child, contract)
             children.append(child)
 
@@ -352,8 +377,9 @@ class Store:
         stamp = _now()
         connection.execute(
             "INSERT OR IGNORE INTO nodes"
-            " (id, parent, depth, status, goal, summary, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " (id, parent, depth, status, goal, summary, depends_on, dep_fp,"
+            "  created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 node.id,
                 node.parent,
@@ -361,6 +387,8 @@ class Store:
                 node.status,
                 node.goal,
                 node.summary,
+                json.dumps(node.depends_on),
+                node.dep_fp,
                 stamp,
                 stamp,
             ),
@@ -418,6 +446,56 @@ class Store:
             target.write_text(content, encoding="utf-8")
             written.append(target)
         return written
+
+    # -- dependency fingerprints (stale-flagging, AC1.4) -------------------
+
+    @staticmethod
+    def fingerprint(node: Node) -> str:
+        """A stable digest of everything a node's deliverable comprises."""
+        parts = [node.summary or ""]
+        artifacts = node.artifacts_dir
+        if artifacts.is_dir():
+            for path in sorted(artifacts.rglob("*")):
+                if path.is_file():
+                    parts.append(path.relative_to(artifacts).as_posix())
+                    parts.append(path.read_text(encoding="utf-8", errors="replace"))
+        return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
+
+    def record_dependencies(self, node: Node) -> None:
+        """Snapshot the fingerprints of ``node``'s dependencies at acceptance."""
+        if not node.depends_on:
+            return
+        current: dict[str, str] = {}
+        for dep in node.depends_on:
+            try:
+                current[dep] = self.fingerprint(self.get(dep))
+            except StoreError:
+                current[dep] = ""
+        connection = self._begin()
+        connection.execute(
+            "UPDATE nodes SET dep_fp = ? WHERE id = ?",
+            (json.dumps(current), node.id),
+        )
+        self._commit(connection)
+        node.dep_fp = json.dumps(current)
+
+    def stale_ids(self) -> set[str]:
+        """Complete nodes whose recorded dependency fingerprints no longer
+        match disk (their dependency's deliverable changed after acceptance)."""
+        stale: set[str] = set()
+        for node in self.walk():
+            if node.status != COMPLETE or not node.depends_on:
+                continue
+            recorded = json.loads(node.dep_fp or "{}")
+            for dep in node.depends_on:
+                try:
+                    current = self.fingerprint(self.get(dep))
+                except StoreError:
+                    continue
+                if recorded.get(dep) != current:
+                    stale.add(node.id)
+                    break
+        return stale
 
     # -- memory ------------------------------------------------------------
 
@@ -533,6 +611,8 @@ class Store:
                     status=str(row.get("status") or PENDING),
                     goal=str(row.get("goal") or self._goal_on_disk(path)),
                     summary=str(row.get("summary") or ""),
+                    depends_on=json.loads(str(row.get("depends_on") or "[]") or "[]"),
+                    dep_fp=str(row.get("dep_fp") or "{}"),
                 )
             )
         return nodes

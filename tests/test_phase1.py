@@ -143,6 +143,9 @@ if _LOG:
             a = _subtask("A", "package one [N:A]", ["is complete"], ["B"])
             b = _subtask("B", "package two [N:B]", ["is complete"], ["A"])
             return {"verb": "split", "subtasks": [a, b]}
+        if _MODE == "revise":
+            c = _subtask("C", "module C [N:C]", ["is complete"], [])
+            return {"verb": "split", "subtasks": [c]}
         a = _subtask("A", "module A [N:A]", ["provides a function"], [])
         b = _subtask("B", "module B [N:B]", ["uses module A"], ["A"])
         return {"verb": "split", "subtasks": [a, b]}
@@ -173,15 +176,25 @@ if _LOG:
 
     def _criteria_for(text):
         criteria = [{"name": "a deliverable exists", "pass": bool(text.strip())}]
-        if _MODE == "revise":
+        tags = _TAG_RE.findall(text)
+        judging = max(tags, key=lambda t: _RANK.get(t, 0)) if tags else "ROOT"
+        if _MODE == "revise" and judging == "C":
             criteria.append({"name": "must contain CORRECT", "pass": "CORRECT" in text})
         return criteria
 
-    def _critic(kwargs):
+    def _critic(kwargs, order):
         text = json.dumps(kwargs, default=str)
         criteria = _criteria_for(text)
         ok = all(item["pass"] for item in criteria)
-        _append({"event": "call", "kind": "critic", "ok": ok, "criteria": criteria})
+        _append(
+            {
+                "event": "call",
+                "kind": "critic",
+                "order": order,
+                "ok": ok,
+                "criteria": criteria,
+            }
+        )
         return json.dumps({"verdict": "PASS" if ok else "FAIL", "criteria": criteria})
 
     def _respond(kwargs):
@@ -220,7 +233,7 @@ if _LOG:
                     ),
                 ]
             else:
-                content = [_Block(type="text", text=_critic(kwargs))]
+                content = [_Block(type="text", text=_critic(kwargs, _CALLCNT))]
         return _Message(
             id="msg_fake_%d" % _CALLCNT,
             type="message",
