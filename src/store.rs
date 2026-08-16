@@ -76,8 +76,10 @@ pub struct Contract {
     pub acceptance_criteria: Vec<String>,
     pub interfaces: Vec<String>,
     pub constraints: Vec<String>,
+    #[allow(dead_code)]
     pub id: String,
     pub depends_on: Vec<String>,
+    #[allow(dead_code)]
     pub allocation: i64,
 }
 
@@ -168,18 +170,21 @@ impl Node {
 
 #[derive(Debug, Clone)]
 pub struct GlobalEntry {
-    pub id: String,
     pub entry_type: String,
     pub content: String,
+    #[allow(dead_code)]
+    pub id: String,
+    #[allow(dead_code)]
     pub superseded: bool,
+    #[allow(dead_code)]
     pub supersedes: String,
+    #[allow(dead_code)]
     pub created_at: String,
 }
 
 #[derive(Debug)]
 pub enum StoreError {
     Uninitialised,
-    NotFound(String),
     Sql(rusqlite::Error),
     Io(std::io::Error),
     Other(String),
@@ -189,7 +194,6 @@ impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StoreError::Uninitialised => write!(f, "project not initialised; run `fractal init <goal>` first"),
-            StoreError::NotFound(id) => write!(f, "node {id:?} not found"),
             StoreError::Sql(e) => write!(f, "sqlite: {e}"),
             StoreError::Io(e) => write!(f, "io: {e}"),
             StoreError::Other(s) => write!(f, "{s}"),
@@ -201,7 +205,6 @@ impl From<rusqlite::Error> for StoreError { fn from(e: rusqlite::Error) -> Self 
 impl From<std::io::Error> for StoreError { fn from(e: std::io::Error) -> Self { StoreError::Io(e) } }
 
 pub struct Store {
-    pub project: PathBuf,
     pub tree_dir: PathBuf,
     pub global_dir: PathBuf,
     pub state_dir: PathBuf,
@@ -217,7 +220,6 @@ impl Store {
             global_dir: project.join(GLOBAL_DIRNAME),
             state_dir: project.join(STATE_DIRNAME),
             index_path: project.join(STATE_DIRNAME).join(INDEX_FILENAME),
-            project,
             connection: Mutex::new(None),
         }
     }
@@ -437,8 +439,10 @@ impl Store {
         Ok(nodes)
     }
 
-    pub fn get(&self, node_id: &str) -> Result<Node, StoreError> {
-        self.walk()?.into_iter().find(|n| n.id == node_id).ok_or_else(|| StoreError::NotFound(node_id.into()))
+    #[allow(dead_code)]
+    pub fn get(&self, node_id: &str) -> std::result::Result<Node, StoreError> {
+        self.walk()?.into_iter().find(|n| n.id == node_id)
+            .ok_or_else(|| StoreError::Other(format!("node {node_id:?} not found")))
     }
 
     pub fn children_of(&self, node: &Node) -> Result<Vec<Node>, StoreError> {
@@ -476,6 +480,7 @@ impl Store {
         })
     }
 
+    #[allow(dead_code)]
     pub fn debit_call(&self, node: &Node, tokens: i64) -> Result<(), StoreError> {
         if tokens <= 0 || !self.budget_enabled() { return Ok(()); }
         self.with_conn(|conn| {
@@ -530,6 +535,7 @@ impl Store {
         Ok(top)
     }
 
+    #[allow(dead_code)]
     pub fn has_running(&self) -> Result<bool, StoreError> {
         self.with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM nodes WHERE status=?1", params![RUNNING], |r| r.get::<_,i64>(0))?)).map(|n| n > 0)
     }
