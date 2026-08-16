@@ -29,6 +29,7 @@ from typing import Any, Iterator
 ROOT_ID = "root"
 
 TREE_DIRNAME = "tree"
+GLOBAL_DIRNAME = "global"
 STATE_DIRNAME = ".fractal"
 INDEX_FILENAME = "index.db"
 
@@ -77,6 +78,14 @@ CREATE TABLE IF NOT EXISTS steer_queue (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     command     TEXT NOT NULL,
     payload     TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS global_entries (
+    id          TEXT PRIMARY KEY,
+    type        TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    superseded  INTEGER NOT NULL DEFAULT 0,
+    supersedes  TEXT,
     created_at  TEXT NOT NULL
 );
 """
@@ -240,12 +249,25 @@ def plan_artifacts(
     return planned
 
 
+@dataclass
+class GlobalEntry:
+    """One entry in the global cross-cutting semantic store."""
+
+    id: str
+    type: str
+    content: str
+    superseded: bool = False
+    supersedes: str = ""
+    created_at: str = ""
+
+
 class Store:
     """Create, read and update nodes; keep the SQLite index in step."""
 
     def __init__(self, project: Path | str) -> None:
         self.project = Path(project).resolve()
         self.tree_dir = self.project / TREE_DIRNAME
+        self.global_dir = self.project / GLOBAL_DIRNAME
         self.state_dir = self.project / STATE_DIRNAME
         self.index_path = self.state_dir / INDEX_FILENAME
         self._connection: sqlite3.Connection | None = None
@@ -1028,3 +1050,77 @@ class Store:
         if out is not None:
             out.write_text(text, encoding="utf-8")
         return text
+
+    # -- global store (SPEC.md 4.4 / Phase 4) ------------------------------
+
+    def _next_global_id(self) -> str:
+        row = self.connection.execute(
+            "SELECT COUNT(*) AS cnt FROM global_entries"
+        ).fetchone()
+        return f"global-{row['cnt'] + 1:03d}"
+
+    def note_global(
+        self, entry_type: str, content: str, supersedes: str = ""
+    ) -> str:
+        eid = self._next_global_id()
+        stamp = _now()
+
+        if supersedes:
+            connection = self._begin()
+            connection.execute(
+                "UPDATE global_entries SET superseded = 1 WHERE id = ?",
+                (supersedes,),
+            )
+            self._commit(connection)
+
+        connection = self._begin()
+        connection.execute(
+            "INSERT INTO global_entries (id, type, content, supersedes, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (eid, entry_type, content, supersedes, stamp),
+        )
+        self._commit(connection)
+
+        self.global_dir.mkdir(parents=True, exist_ok=True)
+        (self.global_dir / f"{eid}.md").write_text(
+            f"# {entry_type}: {eid}\n\n{content}\n", encoding="utf-8"
+        )
+        return eid
+
+    def retrieve_global(
+        self, query: str, k: int = 5
+    ) -> list[GlobalEntry]:
+        self.connection.execute("SELECT 1 FROM global_entries LIMIT 1").fetchone()
+        rows = self.connection.execute(
+            "SELECT * FROM global_entries WHERE superseded = 0"
+        ).fetchall()
+        entries = [
+            GlobalEntry(
+                id=row["id"],
+                type=row["type"],
+                content=row["content"],
+                superseded=bool(row["superseded"]),
+                supersedes=row["supersedes"] or "",
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+        if not entries:
+            return []
+
+        query_lower = query.lower()
+        keywords = [w for w in query_lower.split() if len(w) > 1]
+
+        def score(entry: GlobalEntry) -> int:
+            content_lower = entry.content.lower()
+            if not keywords:
+                return 0
+            return sum(1 for kw in keywords if kw in content_lower)
+
+        scored = [(e, score(e)) for e in entries]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        top = scored[:k]
+        if keywords:
+            matched = [e for e, s in top if s > 0]
+            return matched if matched else [e for e, _ in scored[:k]]
+        return [e for e, _ in top]

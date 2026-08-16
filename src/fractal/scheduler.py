@@ -19,6 +19,7 @@ from .runner import (
     COMPLETE,
     ESCALATE,
     ESCALATE_RESOLVE,
+    NOTE_GLOBAL,
     SPLIT,
     Result,
     RunnerError,
@@ -258,6 +259,24 @@ def execute(store: Store, node: Node, *, report: RunReport) -> None:
             store.set_status(node, FAILED)
             report.failed += 1
             return
+        if result.verb == NOTE_GLOBAL:
+            eid = store.note_global(
+                result.entry_type, result.entry_content, result.entry_supersedes
+            )
+            store.append_log(
+                node,
+                {
+                    "event": "note_global",
+                    "entry_id": eid,
+                    "type": result.entry_type,
+                    "supersedes": result.entry_supersedes,
+                },
+            )
+            store.append_decision(
+                node,
+                f"noted globally: [{result.entry_type}] {result.entry_content[:80]}",
+            )
+            continue
 
         applied, new_rejection = _apply_result(
             store, node, result, report, aggregating, pre_remaining, children

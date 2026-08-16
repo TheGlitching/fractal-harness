@@ -29,6 +29,7 @@ SPLIT = "split"
 COMPLETE = "complete"
 ESCALATE = "escalate"
 ESCALATE_RESOLVE = "escalate_resolve"
+NOTE_GLOBAL = "note_global"
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
@@ -59,6 +60,9 @@ escalation.  Choose one resolution: amend (rewrite the offending constraint \
 or a target's interface), overrule (give a rationale the escalating child \
 must address), replan (re-plan the branch), or depends_on (add a dependency \
 edge on the escalating node).
+* note_global — write a lesson, convention, or skill to the global \
+cross-cutting memory store.  The entry will be visible to other branches. \
+Optionally name a superseded entry id to replace a stale entry.
 
 Split only when you must: every split costs a level of depth, and the depth \
 available to you is bounded.  If you are told a split was refused, you must \
@@ -157,6 +161,23 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["resolution"],
         },
     },
+    {
+        "name": NOTE_GLOBAL,
+        "description": "Write a lesson, convention, or skill to the global "
+        "cross-cutting memory store so other branches can learn from it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["lesson", "convention", "skill"],
+                },
+                "content": {"type": "string"},
+                "supersedes": {"type": "string"},
+            },
+            "required": ["type", "content"],
+        },
+    },
 ]
 
 
@@ -181,6 +202,9 @@ class Result:
     rationale: str = ""
     target: str = ""
     dependency: str = ""
+    entry_type: str = ""
+    entry_content: str = ""
+    entry_supersedes: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +248,19 @@ def assemble_context(
             "children.  Propose a per-child ``allocation`` (tokens) such that "
             "the split-fee plus the sum of allocations does not exceed the "
             "remaining allowance above.\n"
+        )
+
+    global_entries = store.retrieve_global(node.goal, k=5)
+    if global_entries:
+        lines: list[str] = []
+        for entry in global_entries:
+            lines.append(f"- {entry.type}: {entry.content}")
+        parts.append(
+            "## Global knowledge\n\n"
+            + "\n".join(lines)
+            + "\n\n"
+            "These entries were written by earlier work in other branches. "
+            "Adhere to conventions they specify; apply lessons they describe.\n"
         )
 
     ancestors = store.ancestors(node)
@@ -347,6 +384,9 @@ itself, a short distilled summary for your parent, and write artifacts.
 contract lacks something a sibling owns.  Name the assumption and the evidence.
 * escalate_resolve — returned only by an ancestor reopened to settle an \
 escalation.  Choose amend | overrule | replan | depends_on.
+* note_global — write a lesson, convention, or skill to the global \
+cross-cutting memory store so other branches can learn from it.  Optionally \
+name a superseded entry id to replace a stale entry.
 
 Split only when you must.
 """
@@ -367,6 +407,7 @@ To SPLIT:  {"verb":"split","subtasks":[{"id":"...","goal":"...","acceptance_crit
 To COMPLETE:  {"verb":"complete","deliverable":"...","summary":"...","artifacts":[{"path":"...","content":"..."}]}
 To ESCALATE:  {"verb":"escalate","assumption":"...","evidence":"..."}
 To RESOLVE:  {"verb":"escalate_resolve","resolution":"amend|overrule|replan|depends_on","amended_constraint":"...","amended_interface":"...","rationale":"...","target":"...","dependency":"..."}
+To NOTE_GLOBAL:  {"verb":"note_global","type":"convention|lesson|skill","content":"...","supersedes":"..."}
 """
 
 
@@ -629,8 +670,16 @@ def result_from_payload(verb: str, payload: dict[str, Any]) -> Result:
             target=str(payload.get("target") or ""),
             dependency=str(payload.get("dependency") or ""),
         )
+    if verb == NOTE_GLOBAL:
+        return Result(
+            verb=NOTE_GLOBAL,
+            entry_type=str(payload.get("type") or "").strip().lower(),
+            entry_content=str(payload.get("content") or ""),
+            entry_supersedes=str(payload.get("supersedes") or ""),
+        )
     raise RunnerError(
-        f"unknown verb {verb!r}; phase 3 knows split, complete, escalate and escalate_resolve"
+        f"unknown verb {verb!r}; knows split, complete, escalate, "
+        "escalate_resolve and note_global"
     )
 
 
@@ -642,7 +691,7 @@ def parse_message(message: Any) -> Result:
         if _field(block, "type") != "tool_use":
             continue
         name = str(_field(block, "name") or "").strip().lower()
-        if name in (SPLIT, COMPLETE, ESCALATE, ESCALATE_RESOLVE):
+        if name in (SPLIT, COMPLETE, ESCALATE, ESCALATE_RESOLVE, NOTE_GLOBAL):
             payload = _field(block, "input")
             if not isinstance(payload, dict):
                 payload = {}
@@ -734,6 +783,8 @@ def run_node(
             "subtasks": [contract.goal for contract in result.subtasks],
             "summary": result.summary,
             "artifacts": [path for path, _ in result.artifacts],
+            "entry_type": result.entry_type,
+            "entry_supersedes": result.entry_supersedes,
         },
     )
     return result
