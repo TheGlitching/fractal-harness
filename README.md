@@ -43,24 +43,25 @@ truth; the index is reconciled from disk on every load.
 Requires Python 3.12.
 
 ```bash
-# 1. Create a virtual environment and install the harness (no runtime deps
-#    beyond the stdlib; anthropic SDK is only needed for FRACTAL_EXECUTOR=anthropic)
+# 1. Clone the repo and install (no runtime deps beyond the stdlib)
+git clone https://github.com/TheGlitching/fractal-harness.git
+cd fractal-harness
 python3 -m venv .venv
 .venv/bin/pip install -e .
 
-# 2. Ensure the leaf executor binary is on your PATH.
-#    opencode (default):
-which opencode            # https://github.com/sst/opencode
-#    or Anthropic SDK for FRACTAL_EXECUTOR=anthropic:
-.venv/bin/pip install anthropic
+# 2. Ensure the leaf executor binary is on your PATH — opencode is the default:
+#    https://github.com/sst/opencode
+
+# 3. Optional: if you want the anthropic SDK executor
+.venv/bin/pip install -e ".[anthropic]"
 ```
 
-No `setup.py`/`pyproject.toml` is committed yet — the package is importable
-straight from `src/`:
+The `fractal` command is now available from anywhere (when the venv is active).
 
 ```bash
-export PYTHONPATH="$PWD/src"
-alias fractal=".venv/bin/python -m fractal.cli"
+source .venv/bin/activate
+fractal init "Build a CLI weather dashboard"
+fractal run
 ```
 
 ## Usage

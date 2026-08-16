@@ -1,0 +1,19 @@
+[project]
+name = "fractal-harness"
+version = "0.1.0"
+description = "A persistent task tree executed by ephemeral agents"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.122"]
+
+[project.scripts]
+fractal = "fractal.cli:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
