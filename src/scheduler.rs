@@ -65,8 +65,11 @@ pub fn run(store: &Store, tui: &mut Tui) -> std::result::Result<RunReport, Store
         let next = next_node(&nodes);
         match next {
             Some(node) => {
+                tui.node_id = node.id.clone();
+                tui.node_goal = node.goal.clone();
                 report.steps += 1;
                 execute(store, &node, &mut report, tui)?;
+                tui.set_stats(0, report.steps, report.completed, report.failed);
             }
             None => break,
         }
