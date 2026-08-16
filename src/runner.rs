@@ -2,7 +2,7 @@ use crate::store::{Contract, Node, Store, StoreError};
 use regex::Regex;
 use serde_json::Value;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
