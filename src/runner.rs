@@ -161,7 +161,7 @@ fn call_via_opencode(prompt: &str, node_path: &Path) -> std::result::Result<Valu
     let timeout_secs: u64 = std::env::var("FRACTAL_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
     let mut child = Command::new(&bin)
         .args(["run", "--auto"])
-        .arg("Execute the contract in CLAUDE.md. Use your tools to deliver the work (write files, run commands, search). When finished, output EXACTLY one JSON decision object as the very last thing, with no wrapping fences and no commentary after it.")
+        .arg("Read CLAUDE.md. Work ONLY in this directory. Do NOT read or run files from parent directories. Build everything from scratch. When finished, output EXACTLY this JSON as the very last thing with nothing after it — no fences, no summary, no commentary: {\"verb\":\"complete\",\"deliverable\":\"built\",\"summary\":\"done\",\"artifacts\":[{\"path\":\"main.py\",\"content\":\"...\"}]}  If the task is too big, split instead.")
         .current_dir(node_path)
         .env("HOME", node_path)
         .env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#)
