@@ -1,4 +1,5 @@
 use crate::store::{Contract, Node, Store, StoreError};
+use crate::tui::Tui;
 use regex::Regex;
 use serde_json::Value;
 use std::fs;
@@ -153,12 +154,12 @@ fn extract_decision(text: &str) -> Option<Value> {
     None
 }
 
-pub type OutputFn = fn(&str);
 
-pub fn call_model(prompt: &str, node_path: &Path, on_output: OutputFn) -> std::result::Result<Value, RunnerError> {
+
+pub fn call_model(prompt: &str, node_path: &Path, tui: &mut Tui) -> std::result::Result<Value, RunnerError> {
     let executor = std::env::var("FRACTAL_EXECUTOR").unwrap_or_else(|_| "opencode".into());
     if executor == "opencode" {
-        call_via_opencode(prompt, node_path, on_output)
+        call_via_opencode(prompt, node_path, tui)
     } else {
         Err(RunnerError::Other("only opencode executor is supported in the Rust harness".into()))
     }
@@ -167,7 +168,7 @@ pub fn call_model(prompt: &str, node_path: &Path, on_output: OutputFn) -> std::r
 fn call_via_opencode(
     prompt: &str,
     node_path: &Path,
-    on_output: OutputFn,
+    tui: &mut Tui,
 ) -> std::result::Result<Value, RunnerError> {
     let claude_md = format!("{OP_SYSTEM}\n\n{prompt}");
     fs::write(node_path.join("CLAUDE.md"), &claude_md)
@@ -206,44 +207,32 @@ fn call_via_opencode(
     });
 
     let reader = BufReader::new(stdout);
-    let mut last_action = String::new();
-    // spinner frames
-    let spin = ["|", "/", "-", "\\"];
-    let mut si = 0usize;
     for line in reader.lines() {
         match line {
             Ok(l) => {
-                let elapsed = start.elapsed().as_secs();
                 all_text.push_str(&l);
                 all_text.push('\n');
 
-                // Always update with the latest non-empty line (trim long lines)
                 let trimmed = l.trim();
                 if !trimmed.is_empty() && !trimmed.starts_with('{') && trimmed.len() > 2 {
-                    last_action = trimmed.chars().take(80).collect::<String>();
-                    if trimmed.len() > 80 { last_action.push_str("..."); }
+                    let action: String = trimmed.chars().take(78).collect();
+                    tui.status_line = action;
                 }
-
-                // Redraw interface in-place
-                let spinner = spin[si % 4]; si += 1;
-                let elapsed = start.elapsed().as_secs();
-                let out = format!(
-                    "\x1b[2J\x1b[H  {spinner} working · {elapsed}s\n\n    {action}\n",
-                    action = if last_action.is_empty() { "thinking..." } else { &last_action }
-                );
-                on_output(&out);
+                tui.set_stats(start.elapsed().as_secs(), 0, 0, 0);
+                tui.add_output(&l);
+                let _ = tui.draw();
             }
             Err(_) => break,
         }
         if start.elapsed().as_secs() > timeout_secs {
             let _ = child.kill();
-            on_output("  -- timed out --\n");
+            tui.status_line = "timed out".into();
+            let _ = tui.draw();
             return Err(RunnerError::Timeout);
         }
     }
-    let elapsed = start.elapsed().as_secs();
-    let out = format!("\x1b[2J\x1b[H  done · {elapsed}s\n\n");
-    on_output(&out);
+    tui.status_line = "done".into();
+    let _ = tui.draw();
 
     // Collect stderr (don't show to user unless there's an error we need)
     let stderr_lines = stderr_reader.join().unwrap_or_default();
@@ -420,8 +409,8 @@ pub fn parse_message(message: &Value) -> std::result::Result<VerbResult, RunnerE
     Err(RunnerError::Other("no usable verb found".into()))
 }
 
-pub fn run_node(store: &Store, node: &Node, on_output: OutputFn) -> std::result::Result<VerbResult, RunnerError> {
+pub fn run_node(store: &Store, node: &Node, tui: &mut Tui) -> std::result::Result<VerbResult, RunnerError> {
     let prompt = assemble_context(store, node).map_err(|e| RunnerError::Other(e.to_string()))?;
-    let message = call_model(&prompt, &node.path, on_output)?;
+    let message = call_model(&prompt, &node.path, tui)?;
     parse_message(&message)
 }

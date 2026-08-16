@@ -1,6 +1,7 @@
 mod store;
 mod runner;
 mod scheduler;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -100,12 +101,15 @@ fn main() {
 fn run_project(store: &store::Store, project: &PathBuf) {
     let _ = ctrlc::set_handler(move || {
         scheduler::INTERRUPTED.store(true, Ordering::SeqCst);
-        eprintln!("\ninterrupted");
     });
 
-    fn output(line: &str) { eprintln!("{line}"); }
+    let root = store.get("root").unwrap();
+    let goal = root.goal.clone();
+    let mut t = tui::Tui::new("root", &goal).unwrap();
+    let result = scheduler::run(store, &mut t);
+    let _ = t.close();
 
-    match scheduler::run(store, output) {
+    match result {
         Ok(report) => {
             eprintln!();
             eprintln!("{} steps · {} completed · {} split · {} failed · verify {}/{}",

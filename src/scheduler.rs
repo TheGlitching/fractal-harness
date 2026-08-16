@@ -1,5 +1,6 @@
-use crate::runner::{OutputFn, RunnerError, COMPLETE_VERB, ESCALATE, NOTE_GLOBAL, SPLIT, run_node, verify_node};
+use crate::runner::{RunnerError, COMPLETE_VERB, ESCALATE, NOTE_GLOBAL, SPLIT, run_node, verify_node};
 use crate::store::{Node, Store, StoreError, COMPLETE, FAILED, PENDING, RUNNING, SPLIT as SPLIT_STATUS};
+use crate::tui::Tui;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -50,14 +51,14 @@ impl RunReport {
     }
 }
 
-pub fn run(store: &Store, on_output: OutputFn) -> std::result::Result<RunReport, StoreError> {
+pub fn run(store: &Store, tui: &mut Tui) -> std::result::Result<RunReport, StoreError> {
     store.reconcile()?;
     let mut report = RunReport::default();
     let limit = std::env::var("FRACTAL_MAX_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(MAX_STEPS);
 
     while report.steps < limit {
         if INTERRUPTED.load(Ordering::SeqCst) {
-            on_output("  -- interrupted --");
+            tui.add_output("  -- interrupted --");
             break;
         }
         let nodes = store.walk()?;
@@ -65,7 +66,7 @@ pub fn run(store: &Store, on_output: OutputFn) -> std::result::Result<RunReport,
         match next {
             Some(node) => {
                 report.steps += 1;
-                execute(store, &node, &mut report, on_output)?;
+                execute(store, &node, &mut report, tui)?;
             }
             None => break,
         }
@@ -108,13 +109,13 @@ fn aggregatable(node: &Node, _by_id: &HashMap<&str, &Node>, nodes: &[Node]) -> b
     !children.is_empty() && children.iter().all(|c| [COMPLETE, FAILED].contains(&c.status.as_str()))
 }
 
-fn execute(store: &Store, node: &Node, report: &mut RunReport, on_output: OutputFn) -> std::result::Result<(), StoreError> {
+fn execute(store: &Store, node: &Node, report: &mut RunReport, tui: &mut Tui) -> std::result::Result<(), StoreError> {
     let children = store.children_of(node)?;
     let aggregating = node.status == SPLIT_STATUS;
     store.set_status(node, RUNNING)?;
 
     for _ in 0..MAX_ATTEMPTS {
-        let result = match run_node(store, node, on_output) {
+        let result = match run_node(store, node, tui) {
             Ok(r) => r,
             Err(RunnerError::Other(e)) => {
                 store.append_log(node, &serde_json::json!({"event":"error","error":e}))?;
