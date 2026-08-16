@@ -12,7 +12,7 @@ the decision that a node is finished.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .runner import (
@@ -61,9 +61,46 @@ class RunReport:
     failed: int = 0
     root_status: str = PENDING
 
+    escalations: int = 0
+    verifications: int = 0
+    verify_failures: int = 0
+    costs: list[dict[str, Any]] = field(default_factory=list)
+    depths: list[int] = field(default_factory=list)
+
     @property
     def ok(self) -> bool:
         return self.root_status not in (FAILED,) and self.root_status in TERMINAL_STATUSES
+
+    def write_trace(self, path: str) -> None:
+        import json
+        from pathlib import Path
+
+        depths_count: dict[int, int] = {}
+        for d in self.depths:
+            depths_count[d] = depths_count.get(d, 0) + 1
+        max_depth = max(self.depths) if self.depths else 1
+
+        record = {
+            "steps": self.steps,
+            "completed": self.completed,
+            "split": self.split,
+            "refused": self.refused,
+            "failed": self.failed,
+            "root_status": self.root_status,
+            "escalations": self.escalations,
+            "verifications": self.verifications,
+            "verify_failures": self.verify_failures,
+            "verify_catch_rate": (
+                self.verify_failures / self.verifications
+                if self.verifications > 0
+                else 0
+            ),
+            "depth_distribution": depths_count,
+            "max_depth": max_depth,
+            "total_cost_tokens": sum(c.get("tokens", 0) for c in self.costs),
+            "per_node_cost": self.costs,
+        }
+        Path(path).write_text(json.dumps(record, indent=2), encoding="utf-8")
 
 
 def _deps_complete(store: Store, node: Node, stale: set[str]) -> bool:
@@ -180,6 +217,7 @@ def _apply_result(
         reason = _reject_complete(result, is_leaf=not children)
         if reason is None:
             criteria = node.contract().acceptance_criteria
+            report.verifications += 1
             verdict, results = verify_node(
                 store, node, result.deliverable, criteria
             )
@@ -188,6 +226,7 @@ def _apply_result(
                     node, {"event": "verify_failed", "criteria": results}
                 )
                 report.refused += 1
+                report.verify_failures += 1
                 return False, _verify_refusal(results)
             store.complete(
                 node,
@@ -201,6 +240,7 @@ def _apply_result(
                 "verified: verdict=PASS; " + _criteria_line(results, criteria),
             )
             report.completed += 1
+            report.depths.append(node.depth)
             return True, None
         store.append_log(node, {"event": "complete_refused", "reason": reason})
         store.append_decision(node, f"completion refused: {reason}")
@@ -245,6 +285,16 @@ def execute(store: Store, node: Node, *, report: RunReport) -> None:
             store.set_status(node, FAILED)
             report.failed += 1
             return
+
+        post_remaining = store.budget_remaining(node.id) if store.budget_enabled() else None
+        tokens_used = (
+            (pre_remaining - post_remaining)
+            if pre_remaining is not None and post_remaining is not None
+            else 0
+        )
+        report.costs.append(
+            {"node": node.id, "depth": node.depth, "tokens": tokens_used}
+        )
 
         if result.verb == ESCALATE:
             handle_escalate(store, node, result, report)
@@ -471,6 +521,7 @@ def handle_escalate(
     evidence, and apply its resolution (AC3.1-AC3.6)."""
     assumption = result.assumption
     evidence = result.evidence
+    report.escalations += 1
     store.append_log(
         node, {"event": "escalate", "assumption": assumption, "evidence": evidence}
     )

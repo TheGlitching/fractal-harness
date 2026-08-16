@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .store import Contract, Node, Store
@@ -437,11 +438,21 @@ def _extract_decision(text: str) -> dict[str, Any] | None:
 def _call_via_opencode(
     prompt: str, *, model: str | None = None, node_path: str | None = None
 ) -> Any:
-    full_prompt = _OP_SYSTEM + "\n\n" + prompt
+    cwd = str(node_path) if node_path else "."
+
+    claude_md = _OP_SYSTEM + "\n\n" + prompt
+    Path(cwd, "CLAUDE.md").write_text(claude_md, encoding="utf-8")
+
     cmd = [shutil.which("opencode") or "opencode", "run", "--auto"]
     if model:
         cmd.extend(["--model", model])
-    cmd.append(full_prompt)
+    cmd.append(
+        "Execute the contract in CLAUDE.md.  Use your tools to deliver the "
+        "work (write files, run commands, search).  When finished, output "
+        "EXACTLY one JSON decision object as the very last thing, with no "
+        "wrapping fences and no commentary after it: "
+        '{"verb":"split|complete|escalate|escalate_resolve|note_global",...}'
+    )
 
     env = dict(os.environ)
     env.setdefault("OPENCODE_CONFIG_CONTENT", '{"permission":{"*":"allow"}}')
@@ -452,7 +463,7 @@ def _call_via_opencode(
             capture_output=True,
             text=True,
             timeout=600,
-            cwd=str(node_path) if node_path else ".",
+            cwd=cwd,
             env=env,
         )
     except subprocess.TimeoutExpired:
@@ -501,9 +512,42 @@ and answer with exactly one JSON object of the form \
 MAX_VERIFY_TOKENS = 4000
 
 
+def _call_critic_via_opencode(prompt: str, *, model: str | None = None) -> Any:
+    full_prompt = VERIFY_SYSTEM_PROMPT + "\n\n" + prompt
+    cmd = [shutil.which("opencode") or "opencode", "run", "--auto"]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.append(full_prompt)
+
+    env = dict(os.environ)
+    env.setdefault("OPENCODE_CONFIG_CONTENT", '{"permission":{"*":"allow"}}')
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        raise RunnerError("critic executor timed out")
+    except FileNotFoundError:
+        raise RunnerError(
+            "opencode executor requested but opencode binary not found on PATH"
+        )
+
+    return {
+        "content": [{"type": "text", "text": (result.stdout or "") + (result.stderr or "")}],
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    }
+
+
 def call_critic(prompt: str, *, model: str | None = None) -> Any:
     """A model call that deliberately carries NO split/complete tools, so it is
     the critic, not a node execution."""
+    if _executor_type() == "opencode":
+        return _call_critic_via_opencode(prompt, model=model)
     client = _client()
     return client.messages.create(
         model=model

@@ -52,6 +52,9 @@ def cmd_run(args: argparse.Namespace, out: TextIO) -> int:
             file=out,
         )
         print(f"root: {report.root_status}", file=out)
+        trace_path = Path(args.project).resolve() / "trace.json"
+        report.write_trace(str(trace_path))
+        print(f"trace written: {trace_path}", file=out)
         return 0 if report.ok else 1
 
 
