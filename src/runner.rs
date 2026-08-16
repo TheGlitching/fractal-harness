@@ -2,9 +2,9 @@ use crate::store::{Contract, Node, Store, StoreError};
 use regex::Regex;
 use serde_json::Value;
 use std::fs;
-// use std::io::Write removed
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 pub const SPLIT: &str = "split";
@@ -32,9 +32,9 @@ pub enum RunnerError {
 impl std::fmt::Display for RunnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunnerError::Timeout => write!(f, "executor timed out"),
+            RunnerError::Timeout => write!(f, "timed out"),
             RunnerError::NotFound(s) => write!(f, "{s}"),
-            RunnerError::NoDecision(s) => write!(f, "no valid decision JSON in output. Last 600 chars:\n{s}"),
+            RunnerError::NoDecision(s) => write!(f, "no JSON decision in output. Last chars:\n{s}"),
             RunnerError::Other(s) => write!(f, "{s}"),
         }
     }
@@ -71,7 +71,9 @@ You have five possible actions:
 * escalate_resolve — settle an escalation: amend | overrule | replan | depends_on.
 * note_global — write a lesson, convention, or skill to the global store.
 
-Split only when you must.";
+SPLIT OFTEN. If the task needs more than ~2 files, has multiple concerns, or \
+would take more than a few minutes — SPLIT. Each subtask should be a single, \
+focused job. Depth is free. Over-large completions waste work.";
 
 fn bullets(items: &[String]) -> String {
     if items.is_empty() { "- (none)\n".into() } else { items.iter().map(|s| format!("- {s}\n")).collect() }
@@ -79,7 +81,11 @@ fn bullets(items: &[String]) -> String {
 
 pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<String, StoreError> {
     let contract_text = fs::read_to_string(node.contract_path()).unwrap_or_default();
-    let mut parts = vec![format!("## Your contract\n\n{contract_text}\n")];
+    let mut parts = vec![format!(
+        "## Your contract\n\n{contract_text}\n\n\
+         IMPORTANT: Write ALL deliverable files into the `artifacts/` \
+         subdirectory of this working directory. It already exists.\n"
+    )];
 
     if store.budget_enabled() {
         if let Ok(rem) = store.budget_remaining(&node.id) {
@@ -90,7 +96,7 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
     let global = store.retrieve_global(&node.goal, 5).unwrap_or_default();
     if !global.is_empty() {
         let lines: Vec<String> = global.iter().map(|e| format!("- {}: {}", e.entry_type, e.content)).collect();
-        parts.push(format!("## Global knowledge\n\n{}\n\nAdhere to conventions; apply lessons.\n", lines.join("\n")));
+        parts.push(format!("## Global knowledge\n\n{}\n", lines.join("\n")));
     }
 
     if let Ok(ancestors) = store.ancestors(node) {
@@ -106,22 +112,24 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
         }
     }
 
-    parts.push(if is_opencode() {
-        "## Now answer\n\nYou have the full tools of a coding agent. Execute your \
-         contract fully — write files into the current directory. When done, output \
-         EXACTLY one JSON decision as the very last thing, no wrapping fences:\n\n\
-         SPLIT: {\"verb\":\"split\",\"subtasks\":[{\"id\":\"...\",\"goal\":\"...\",\"acceptance_criteria\":[\"...\"],\"interfaces\":[],\"constraints\":[],\"depends_on\":[]}]}\n\
-         COMPLETE: {\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\",\"artifacts\":[{\"path\":\"...\",\"content\":\"...\"}]}\n\
-         NOTE_GLOBAL: {\"verb\":\"note_global\",\"type\":\"convention|lesson|skill\",\"content\":\"...\"}\n".into()
-    } else {
-        "## Now answer\n\nUse the split tool or the complete tool. Answer with one tool call and nothing else.\n".into()
-    });
+    parts.push(
+        "## Instructions\n\n\
+         SPLIT AGGRESSIVELY. If the task involves more than one file or \
+         concept, split it. A CLI dashboard should split into: the CLI entry \
+         point, the data model, each data source, the renderer, and tests. \
+         Each split child gets exactly ONE focused job. \
+         Only complete a task when it is truly a single, small unit.\n\n\
+         Write ALL files into the `artifacts/` directory (it already exists). \
+         When finished, output EXACTLY one JSON decision as the very last \
+         thing with nothing after it:\n\n\
+         {\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\"\
+         ,\"artifacts\":[{\"path\":\"artifacts/file.py\",\"content\":\"...\"}]}\n\
+         {\"verb\":\"split\",\"subtasks\":[{\"goal\":\"...\",\
+         \"acceptance_criteria\":[\"...\"]}]}\n\n\
+         Work ONLY in this directory.\n".into()
+    );
 
     Ok(parts.join("\n"))
-}
-
-fn is_opencode() -> bool {
-    std::env::var("FRACTAL_EXECUTOR").unwrap_or_else(|_| "opencode".into()) == "opencode"
 }
 
 fn extract_decision(text: &str) -> Option<Value> {
@@ -145,58 +153,104 @@ fn extract_decision(text: &str) -> Option<Value> {
     None
 }
 
-pub fn call_model(prompt: &str, node_path: &Path) -> std::result::Result<Value, RunnerError> {
-    if is_opencode() {
-        call_via_opencode(prompt, node_path)
+pub type OutputFn = fn(&str);
+
+pub fn call_model(prompt: &str, node_path: &Path, on_output: OutputFn) -> std::result::Result<Value, RunnerError> {
+    let executor = std::env::var("FRACTAL_EXECUTOR").unwrap_or_else(|_| "opencode".into());
+    if executor == "opencode" {
+        call_via_opencode(prompt, node_path, on_output)
     } else {
-        Err(RunnerError::Other("anthropic executor not implemented in Rust harness; set FRACTAL_EXECUTOR=opencode".into()))
+        Err(RunnerError::Other("only opencode executor is supported in the Rust harness".into()))
     }
 }
 
-fn call_via_opencode(prompt: &str, node_path: &Path) -> std::result::Result<Value, RunnerError> {
+fn format_elapsed(secs: u64) -> String {
+    if secs < 60 { format!("{secs}s") }
+    else { format!("{}m{}s", secs / 60, secs % 60) }
+}
+
+fn call_via_opencode(
+    prompt: &str,
+    node_path: &Path,
+    on_output: OutputFn,
+) -> std::result::Result<Value, RunnerError> {
     let claude_md = format!("{OP_SYSTEM}\n\n{prompt}");
-    fs::write(node_path.join("CLAUDE.md"), &claude_md).map_err(|e| RunnerError::Other(format!("write CLAUDE.md: {e}")))?;
+    fs::write(node_path.join("CLAUDE.md"), &claude_md)
+        .map_err(|e| RunnerError::Other(format!("write CLAUDE.md: {e}")))?;
 
     let bin = which::which("opencode").unwrap_or_else(|_| std::path::PathBuf::from("opencode"));
-    let timeout_secs: u64 = std::env::var("FRACTAL_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+    let timeout_secs: u64 = std::env::var("FRACTAL_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
     let mut child = Command::new(&bin)
         .args(["run", "--auto"])
-        .arg("Read CLAUDE.md. Work ONLY in this directory. Do NOT read or run files from parent directories. Build everything from scratch. When finished, output EXACTLY this JSON as the very last thing with nothing after it — no fences, no summary, no commentary: {\"verb\":\"complete\",\"deliverable\":\"built\",\"summary\":\"done\",\"artifacts\":[{\"path\":\"main.py\",\"content\":\"...\"}]}  If the task is too big, split instead.")
+        .arg("Read CLAUDE.md. Execute the contract fully. Work ONLY inside this directory — do NOT read or run files from parent directories. When completely done, output EXACTLY one JSON decision object as the very last line: {\"verb\":\"complete\"|{\"split\"},...}")
         .current_dir(node_path)
         .env("HOME", node_path)
         .env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => RunnerError::NotFound(format!("opencode binary not found: {e}")),
+            std::io::ErrorKind::NotFound => RunnerError::NotFound(format!("opencode not found: {e}")),
             _ => RunnerError::Other(format!("opencode: {e}")),
         })?;
 
+    let stdout = child.stdout.take().expect("no stdout");
+    let stderr_pipe = child.stderr.take().expect("no stderr");
+    let mut all_text = String::new();
     let start = std::time::Instant::now();
-    let out = loop {
-        match child.try_wait() {
-            Ok(Some(_status)) => {
-                break child.wait_with_output()
-                    .map_err(|e| RunnerError::Other(format!("opencode output: {e}")))?;
+
+    // Spawn a thread to read stderr and feed it through on_output
+    let stderr_reader = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr_pipe);
+        let mut lines = Vec::new();
+        for line in reader.lines() {
+            if let Ok(l) = line {
+                lines.push(l);
             }
-            Ok(None) => {
-                if start.elapsed().as_secs() > timeout_secs {
-                    let _ = child.kill();
-                    return Err(RunnerError::Timeout);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(e) => return Err(RunnerError::Other(format!("opencode: {e}"))),
         }
-    };
+        lines
+    });
 
-    let text = format!("{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr));
+    let reader = BufReader::new(stdout);
+    for line in reader.lines() {
+        match line {
+            Ok(l) => {
+                let elapsed = start.elapsed().as_secs();
+                let out = format!("  {} {}", format_elapsed(elapsed), l);
+                on_output(&out);
+                all_text.push_str(&l);
+                all_text.push('\n');
+            }
+            Err(_) => break,
+        }
+        // Check timeout
+        if start.elapsed().as_secs() > timeout_secs {
+            let _ = child.kill();
+            on_output(&format!("  -- timed out after {}s --", format_elapsed(timeout_secs)));
+            return Err(RunnerError::Timeout);
+        }
+    }
 
-    let decision = extract_decision(&text).ok_or_else(|| {
-        let suffix = if text.len() > 600 { &text[text.len() - 600..] } else { &text };
+    // Collect stderr
+    let stderr_lines = stderr_reader.join().unwrap_or_default();
+    for l in &stderr_lines {
+        all_text.push_str(l);
+        all_text.push('\n');
+    }
+    // Also show important stderr
+    for l in &stderr_lines {
+        if !l.is_empty() && (l.starts_with("Error") || l.starts_with("error") || l.contains("error")) {
+            on_output(&format!("  <err> {l}"));
+        }
+    }
+
+    let elapsed = start.elapsed().as_secs();
+    on_output(&format!("  -- finished in {} --", format_elapsed(elapsed)));
+
+    let _ = child.wait();
+
+    let decision = extract_decision(&all_text).ok_or_else(|| {
+        let suffix = if all_text.len() > 400 { &all_text[all_text.len() - 400..] } else { &all_text };
         RunnerError::NoDecision(suffix.to_string())
     })?;
 
@@ -219,21 +273,34 @@ fn call_via_opencode(prompt: &str, node_path: &Path) -> std::result::Result<Valu
 }
 
 pub fn call_critic(prompt: &str) -> std::result::Result<Value, RunnerError> {
-    if !is_opencode() {
-        return Err(RunnerError::Other("critic requires opencode executor".into()));
-    }
     let judge_prompt = format!("\
 You are a verifier. Judge the deliverable against each acceptance criterion \
 and answer with exactly one JSON object: \
 {{\"verdict\":\"PASS\" or \"FAIL\",\"criteria\":[{{\"name\":\"...\",\"pass\":true|false,\"reason\":\"...\"}}]}} \
 No prose outside the JSON.\n\n{prompt}");
 
+    let timeout_secs: u64 = std::env::var("FRACTAL_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
     let bin = which::which("opencode").unwrap_or_else(|_| std::path::PathBuf::from("opencode"));
     let output = Command::new(&bin)
         .args(["run", "--auto"])
         .arg(&judge_prompt)
         .env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            let start = std::time::Instant::now();
+            loop {
+                match c.try_wait() {
+                    Ok(Some(_)) => return c.wait_with_output(),
+                    Ok(None) => {
+                        if start.elapsed().as_secs() > timeout_secs { let _ = c.kill(); }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        })
         .map_err(|e| RunnerError::Other(format!("critic opencode: {e}")))?;
 
     let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
@@ -330,35 +397,26 @@ fn result_from_payload(verb: &str, payload: &Value) -> std::result::Result<VerbR
 
 pub fn parse_message(message: &Value) -> std::result::Result<VerbResult, RunnerError> {
     let blocks = message.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
-
     for block in &blocks {
         let btype = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_lowercase();
         if btype == "tool_use" && [SPLIT, COMPLETE_VERB, ESCALATE, ESCALATE_RESOLVE, NOTE_GLOBAL].contains(&name.as_str()) {
-            if let Some(input) = block.get("input") {
-                return result_from_payload(&name, input);
-            }
+            if let Some(input) = block.get("input") { return result_from_payload(&name, input); }
         }
     }
-
     for block in &blocks {
-        let btype = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if btype == "text" || btype.is_empty() {
-            let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-            if let Ok(payload) = serde_json::from_str::<Value>(text) {
-                if let Some(verb) = payload.get("verb").and_then(|v| v.as_str()) {
-                    return result_from_payload(verb, &payload);
-                }
+        let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+        if let Ok(payload) = serde_json::from_str::<Value>(text) {
+            if let Some(verb) = payload.get("verb").and_then(|v| v.as_str()) {
+                return result_from_payload(verb, &payload);
             }
         }
     }
-
-    Err(RunnerError::Other("no usable verb found in response".into()))
+    Err(RunnerError::Other("no usable verb found".into()))
 }
 
-pub fn run_node(store: &Store, node: &Node) -> std::result::Result<VerbResult, RunnerError> {
+pub fn run_node(store: &Store, node: &Node, on_output: OutputFn) -> std::result::Result<VerbResult, RunnerError> {
     let prompt = assemble_context(store, node).map_err(|e| RunnerError::Other(e.to_string()))?;
-    let message = call_model(&prompt, &node.path)?;
-    let result = parse_message(&message)?;
-    Ok(result)
+    let message = call_model(&prompt, &node.path, on_output)?;
+    parse_message(&message)
 }

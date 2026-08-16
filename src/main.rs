@@ -1,7 +1,6 @@
 mod store;
 mod runner;
 mod scheduler;
-mod animation;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -101,28 +100,66 @@ fn main() {
 fn run_project(store: &store::Store, project: &PathBuf) {
     let _ = ctrlc::set_handler(move || {
         scheduler::INTERRUPTED.store(true, Ordering::SeqCst);
-        eprintln!("\ninterrupted — finishing current step…");
+        eprintln!("\ninterrupted");
     });
 
-    let status_cb: scheduler::StatusFn = Box::new(move |report, nodes| {
-        animation::render(report, nodes);
-        std::thread::sleep(std::time::Duration::from_millis(80));
-    });
+    let banner = "\
+  ╔══════════════════════════════════════════╗
+  ║       ▲     fractal harness     ▲        ║
+  ║      /|\\      persistent tree    /|\\       ║
+  ║     / | \\     ephemeral agents  / | \\      ║
+  ╚══════════════════════════════════════════╝";
+    eprintln!("{banner}");
+    eprintln!();
 
-    match scheduler::run(store, Some(&status_cb)) {
+    fn output(line: &str) { eprintln!("{line}"); }
+
+    match scheduler::run(store, output) {
         Ok(report) => {
-            animation::render(&report, &store.walk().unwrap_or_default());
-            println!();
-            println!("ran {} node(s): {} completed, {} split, {} refused, {} failed",
-                report.steps, report.completed, report.split, report.refused, report.failed);
-            println!("root: {}", report.root_status);
+            eprintln!();
+            eprintln!("═══ done ═══");
+            eprintln!("  {} step(s) · {} completed · {} split · {} failed",
+                report.steps, report.completed, report.split, report.failed);
+            eprintln!("  verification: {}/{} passed",
+                report.verifications - report.verify_failures, report.verifications);
+            eprintln!();
+
+            // Show what was built
+            if let Ok(nodes) = store.walk() {
+                for n in &nodes {
+                    if n.status == "complete" {
+                        let arts = n.artifacts_dir();
+                        if arts.is_dir() {
+                            if let Ok(entries) = std::fs::read_dir(&arts) {
+                                let mut file_names: Vec<String> = Vec::new();
+                                for e in entries.flatten() {
+                                    if e.path().is_file() {
+                                        let name = e.file_name().to_string_lossy().to_string();
+                                        let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
+                                        file_names.push(format!("    {name} ({sz}B)"));
+                                    }
+                                }
+                                if !file_names.is_empty() {
+                                    eprintln!("  {} delivered:", n.id);
+                                    for s in &file_names { eprintln!("{s}"); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            eprintln!();
+
             let trace = project.join("trace.json");
             report.write_trace(&trace.to_string_lossy());
-            println!("trace written: {}", trace.display());
+            eprintln!("  trace → {}", trace.display());
+
+            let root_status = report.root_status.clone();
+            eprintln!("\n  status: {root_status}");
             std::process::exit(if report.ok() { 0 } else { 1 });
         }
         Err(e) => {
-            eprintln!("fractal: {e}");
+            eprintln!("\n  fractal: {e}");
             std::process::exit(1);
         }
     }

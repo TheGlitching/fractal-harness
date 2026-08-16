@@ -1,4 +1,4 @@
-use crate::runner::{RunnerError, COMPLETE_VERB, ESCALATE, NOTE_GLOBAL, SPLIT, run_node, verify_node};
+use crate::runner::{OutputFn, RunnerError, COMPLETE_VERB, ESCALATE, NOTE_GLOBAL, SPLIT, run_node, verify_node};
 use crate::store::{Node, Store, StoreError, COMPLETE, FAILED, PENDING, RUNNING, SPLIT as SPLIT_STATUS};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,29 +50,25 @@ impl RunReport {
     }
 }
 
-pub type StatusFn = Box<dyn Fn(&RunReport, &Vec<Node>)>;
-
-pub fn run(store: &Store, on_status: Option<&StatusFn>) -> std::result::Result<RunReport, StoreError> {
+pub fn run(store: &Store, on_output: OutputFn) -> std::result::Result<RunReport, StoreError> {
     store.reconcile()?;
     let mut report = RunReport::default();
     let limit = std::env::var("FRACTAL_MAX_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(MAX_STEPS);
 
-    // Render immediately so the user sees the tree before any work starts.
-    if let Some(ref f) = on_status { f(&report, &store.walk().unwrap_or_default()); }
-
     while report.steps < limit {
         if INTERRUPTED.load(Ordering::SeqCst) {
+            on_output("  -- interrupted --");
             break;
         }
         let nodes = store.walk()?;
         let next = next_node(&nodes);
         match next {
             Some(node) => {
-                store.set_status(&node, RUNNING)?;
-                if let Some(ref f) = on_status { f(&report, &store.walk().unwrap_or_default()); }
+                let goal_short: String = node.goal.chars().take(60).collect();
+                on_output("");
+                on_output(&format!("═══ node {} ({}) ═══", node.id, goal_short));
                 report.steps += 1;
-                execute(store, &node, &mut report)?;
-                if let Some(ref f) = on_status { f(&report, &store.walk().unwrap_or_default()); }
+                execute(store, &node, &mut report, on_output)?;
             }
             None => break,
         }
@@ -115,14 +111,13 @@ fn aggregatable(node: &Node, _by_id: &HashMap<&str, &Node>, nodes: &[Node]) -> b
     !children.is_empty() && children.iter().all(|c| [COMPLETE, FAILED].contains(&c.status.as_str()))
 }
 
-fn execute(store: &Store, node: &Node, report: &mut RunReport) -> std::result::Result<(), StoreError> {
+fn execute(store: &Store, node: &Node, report: &mut RunReport, on_output: OutputFn) -> std::result::Result<(), StoreError> {
     let children = store.children_of(node)?;
     let aggregating = node.status == SPLIT_STATUS;
     store.set_status(node, RUNNING)?;
 
     for _ in 0..MAX_ATTEMPTS {
-        let pre = if store.budget_enabled() { store.budget_remaining(&node.id).ok() } else { None };
-        let result = match run_node(store, node) {
+        let result = match run_node(store, node, on_output) {
             Ok(r) => r,
             Err(RunnerError::Other(e)) => {
                 store.append_log(node, &serde_json::json!({"event":"error","error":e}))?;
@@ -136,9 +131,6 @@ fn execute(store: &Store, node: &Node, report: &mut RunReport) -> std::result::R
                 return Ok(());
             }
         };
-
-        let post = if store.budget_enabled() { store.budget_remaining(&node.id).ok() } else { None };
-        let _tokens = match (pre, post) { (Some(a), Some(b)) => a - b, _ => 0 };
 
         match result.verb.as_str() {
             NOTE_GLOBAL => {
