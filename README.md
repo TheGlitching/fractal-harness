@@ -6,22 +6,6 @@ context window, the harness grows a tree of nodes, each with its own contract,
 decisions, logs, and artifacts. Agents are stateless workers hydrated from a
 node; the tree is the memory.
 
-The design rationale is fully spelled out in [`docs/SPEC.md`](docs/SPEC.md).
-
-## How it works
-
-A project is a directory tree that mirrors a task tree. Every node holds:
-
-- `contract.md` — goal, acceptance criteria, interfaces, inherited constraints
-- `decisions.md` — append-only semantic memory of the node
-- `log/` — episodic traces (the raw model-call events)
-- `artifacts/` — the deliverables a node produces
-- `children/` — subordinate nodes
-
-A small SQLite index (`.fractal/index.db`) carries what the scheduler needs
-(node id, parent, status, budget ledger). The filesystem is the source of
-truth; the index is reconciled from disk on every load.
-
 Agents answer with one of five verbs, all enforced by orchestrator code, not
 by prompting:
 
@@ -38,8 +22,21 @@ The **leaf executor is pluggable**. It can be:
 - `opencode` (default) — spawns opencode headlessly in the node directory,
   which reads a generated `CLAUDE.md` (the contract + inherited constraints +
   global knowledge) and writes its deliverables as real files.
-- `anthropic` — a bare API call with tool-use parsing (used by the test suite
-  with a deterministic fake model).
+- `anthropic` — a bare API call with tool-use parsing.
+
+## How it works
+
+A project is a directory tree that mirrors a task tree. Every node holds:
+
+- `contract.md` — goal, acceptance criteria, interfaces, inherited constraints
+- `decisions.md` — append-only semantic memory of the node
+- `log/` — episodic traces (the raw model-call events)
+- `artifacts/` — the deliverables a node produces
+- `children/` — subordinate nodes
+
+A small SQLite index (`.fractal/index.db`) carries what the scheduler needs
+(node id, parent, status, budget ledger). The filesystem is the source of
+truth; the index is reconciled from disk on every load.
 
 ## Installation
 
@@ -162,24 +159,6 @@ responds to budget rather than a magic number.
 ```bash
 FRACTAL_BUDGET=100000 FRACTAL_SPLIT_FEE=500 fractal run
 ```
-
-## Development
-
-The authoritative spec is `docs/SPEC.md`; each phase of work is a contract in
-`contracts/`. The acceptance criteria live as tests in `tests/` — one test per
-criterion — and must never be weakened to make them pass.
-
-```bash
-.venv/bin/python -m pytest -x -q
-```
-
-Tests inject a deterministic fake Anthropic module (via `sitecustomize`) and
-force `FRACTAL_EXECUTOR=anthropic`, so the suite runs offline with no real
-model and no network. All 34 tests pass.
-
-The implemented phases are `contracts/phase-0.md` through `contracts/phase-5.md`:
-skeleton, contracts & verification, budgets, escalation, the global
-cross-cutting store, and pluggable executors + instrumentation.
 
 ## License / status
 

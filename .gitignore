@@ -4,3 +4,10 @@ __pycache__/
 .venv/
 .gnhf/
 notes.md
+
+# Development-time artifacts: specs, contracts, acceptance tests, and the
+# agent working-agreement doc are not part of the harness itself.
+AGENTS.md
+docs/
+contracts/
+tests/
