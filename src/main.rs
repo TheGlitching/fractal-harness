@@ -5,6 +5,7 @@ mod animation;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 #[derive(Parser)]
 #[command(name = "fractal", about = "A persistent task tree executed by ephemeral agents")]
@@ -98,6 +99,11 @@ fn main() {
 }
 
 fn run_project(store: &store::Store, project: &PathBuf) {
+    let _ = ctrlc::set_handler(move || {
+        scheduler::INTERRUPTED.store(true, Ordering::SeqCst);
+        eprintln!("\ninterrupted — finishing current step…");
+    });
+
     let status_cb: scheduler::StatusFn = Box::new(move |report, nodes| {
         animation::render(report, nodes);
         std::thread::sleep(std::time::Duration::from_millis(80));

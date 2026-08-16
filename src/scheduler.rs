@@ -1,7 +1,9 @@
-use crate::runner::{self, RunnerError, VerbResult, COMPLETE_VERB, ESCALATE, ESCALATE_RESOLVE, NOTE_GLOBAL, SPLIT, run_node, verify_node};
+use crate::runner::{RunnerError, COMPLETE_VERB, ESCALATE, NOTE_GLOBAL, SPLIT, run_node, verify_node};
 use crate::store::{Node, Store, StoreError, COMPLETE, FAILED, PENDING, RUNNING, SPLIT as SPLIT_STATUS};
-// use serde_json removed
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+pub(crate) static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 const MAX_DEPTH: i64 = 3;
 const MAX_ATTEMPTS: usize = 3;
@@ -56,6 +58,9 @@ pub fn run(store: &Store, on_status: Option<&StatusFn>) -> std::result::Result<R
     let limit = std::env::var("FRACTAL_MAX_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(MAX_STEPS);
 
     while report.steps < limit {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            break;
+        }
         let nodes = store.walk()?;
         let next = next_node(&nodes);
         match next {
