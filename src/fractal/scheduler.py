@@ -586,8 +586,32 @@ def _reject_complete(result: Result, *, is_leaf: bool) -> str | None:
     return None
 
 
+def _drain_steers(store: Store) -> None:
+    """Drain the steering inbox, applying each queued command."""
+    items = store.drain_steer_queue()
+    for item in items:
+        command = item["command"]
+        payload = item["payload"]
+        if command == "amend-root":
+            store.amend_root(payload["old"], payload["new"])
+        elif command == "add":
+            store.add_child(
+                payload["parent_id"],
+                payload["goal"],
+                payload["acceptance_criteria"],
+                interfaces=payload.get("interfaces"),
+                constraints=payload.get("constraints"),
+                depends_on=payload.get("depends_on"),
+                allocation=payload.get("allocation", 0),
+            )
+        elif command == "remove":
+            store.remove_subtree(payload["node_id"])
+
+
 def run(store: Store, *, max_steps: int | None = None) -> RunReport:
     """Drive the tree until the root is terminal or there is nothing to run."""
+    store.reconcile()
+    _drain_steers(store)
     store.reconcile()
     report = RunReport()
     limit = max_steps or int(os.environ.get("FRACTAL_MAX_STEPS", MAX_STEPS))

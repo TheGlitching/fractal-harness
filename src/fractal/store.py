@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -71,6 +72,12 @@ CREATE TABLE IF NOT EXISTS budget (
     fee_paid    INTEGER NOT NULL DEFAULT 0,
     children    INTEGER NOT NULL DEFAULT 0,
     debits      INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS steer_queue (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    command     TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    created_at  TEXT NOT NULL
 );
 """
 
@@ -780,3 +787,244 @@ class Store:
             chain.append(current)
         chain.reverse()
         return chain
+
+    # -- steer inbox (SPEC.md 4.3 / Phase 3.5) ---------------------------
+
+    def has_running(self) -> bool:
+        return bool(
+            self.connection.execute(
+                "SELECT 1 FROM nodes WHERE status = ? LIMIT 1", (RUNNING,)
+            ).fetchone()
+        )
+
+    def enqueue_steer(self, command: str, payload: dict[str, Any]) -> int:
+        connection = self._begin()
+        cursor = connection.execute(
+            "INSERT INTO steer_queue (command, payload, created_at)"
+            " VALUES (?, ?, ?)",
+            (command, json.dumps(payload), _now()),
+        )
+        row_id = cursor.lastrowid
+        self._commit(connection)
+        return row_id
+
+    def drain_steer_queue(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT id, command, payload FROM steer_queue ORDER BY id"
+        ).fetchall()
+        items = [{"id": r["id"], "command": r["command"],
+                  "payload": json.loads(r["payload"])} for r in rows]
+        if not items:
+            return []
+        ids = [item["id"] for item in items]
+        connection = self._begin()
+        connection.executemany(
+            "DELETE FROM steer_queue WHERE id = ?", [(i,) for i in ids]
+        )
+        self._commit(connection)
+        return items
+
+    # -- amend-root (Phase 3.5) -------------------------------------------
+
+    @staticmethod
+    def _contract_constraints_text(text: str) -> list[str]:
+        sections: dict[str, list[str]] = {}
+        current: str | None = None
+        for line in text.splitlines():
+            if line.startswith("## "):
+                current = line[3:].strip().lower()
+                sections[current] = []
+            elif current is not None:
+                sections[current].append(line)
+        out: list[str] = []
+        for line in sections.get("inherited constraints", []):
+            stripped = line.strip()
+            if stripped.startswith("- ") and stripped[2:].strip() and stripped[2:].strip() != "(none stated)":
+                out.append(stripped[2:].strip())
+        return out
+
+    def amend_root(self, old_path: str, new_path: str,
+                   *, dry_run: bool = False) -> list[str]:
+        old_text = Path(old_path).read_text(encoding="utf-8")
+        new_text = Path(new_path).read_text(encoding="utf-8")
+        old_constraints = self._contract_constraints_text(old_text)
+        new_constraints = self._contract_constraints_text(new_text)
+        removed = [c for c in old_constraints if c not in new_constraints]
+        added = [c for c in new_constraints if c not in old_constraints]
+        changed: list[tuple[str, str]] = []
+        while removed and added:
+            changed.append((removed.pop(0), added.pop(0)))
+        for r in removed:
+            changed.append((r, ""))
+        for a in added:
+            changed.append(("", a))
+        if not changed:
+            return []
+
+        affected: list[str] = []
+        for old_val, new_val in changed:
+            for node in self.walk():
+                if node.id == ROOT_ID:
+                    continue
+                text = node.contract_path.read_text(encoding="utf-8")
+                old_line = f"- {old_val}" if old_val else ""
+                if not old_val or old_line not in text:
+                    continue
+                if node.id not in affected:
+                    affected.append(node.id)
+                if not dry_run:
+                    new_line = f"- {new_val}" if new_val else ""
+                    node.contract_path.write_text(text.replace(old_line, new_line))
+                    if node.status == COMPLETE:
+                        new_status = PENDING
+                        if self.children(node):
+                            new_status = SPLIT
+                        self.set_status(node, new_status)
+
+        if not dry_run:
+            (self.tree_dir / ROOT_ID / CONTRACT_FILENAME).write_text(new_text)
+
+        return affected
+
+    # -- add child (Phase 3.5) --------------------------------------------
+
+    def add_child(self, parent_id: str, goal: str,
+                  acceptance_criteria: list[str],
+                  interfaces: list[str] | None = None,
+                  constraints: list[str] | None = None,
+                  depends_on: list[str] | None = None,
+                  allocation: int = 0,
+                  *, dry_run: bool = False) -> str | None:
+        try:
+            parent = self.get(parent_id)
+        except StoreError:
+            return "parent not found"
+
+        allocation = max(0, int(allocation))
+        if self.budget_enabled():
+            remaining = self.budget_remaining(parent_id)
+            if remaining is not None:
+                fee = self.split_fee()
+                if allocation + fee > remaining:
+                    return (
+                        f"rejected: allocation {allocation} + split-fee {fee} "
+                        f"exceeds parent's remaining budget {remaining}"
+                    )
+
+        deps = list(depends_on) if depends_on else []
+        if parent_id in deps:
+            return "rejected: depends_on creates a dependency cycle"
+        if deps:
+            ancestors = {a.id for a in self.ancestors(parent)}
+            for dep in deps:
+                if dep in ancestors:
+                    return "rejected: depends_on creates a dependency cycle"
+
+        if dry_run:
+            return None
+
+        contract = Contract(
+            goal=goal.strip(),
+            acceptance_criteria=list(acceptance_criteria),
+            interfaces=list(interfaces) if interfaces else [],
+            constraints=list(constraints) if constraints else [],
+            depends_on=deps,
+            allocation=allocation,
+        )
+        children = self.add_children(parent, [contract])
+        return children[0].id if children else None
+
+    # -- remove subtree (Phase 3.5) ---------------------------------------
+
+    def remove_subtree(self, node_id: str, *, dry_run: bool = False) -> str | None:
+        try:
+            node = self.get(node_id)
+        except StoreError:
+            return "node not found"
+        if node.id == ROOT_ID:
+            return "rejected: cannot remove root"
+
+        if dry_run:
+            return None
+
+        parent = self.get(node.parent) if node.parent else None
+        if parent is not None:
+            parent.log_dir.mkdir(parents=True, exist_ok=True)
+            lines = [
+                f"# Compacted trace of pruned child {node.id}",
+                f"- goal: {node.goal}",
+                f"- summary: {node.summary or '(none)'}",
+            ]
+            decisions = node.decisions_path
+            if decisions.is_file():
+                lines.append("- decisions:")
+                lines += [
+                    "    " + line
+                    for line in decisions.read_text(encoding="utf-8").splitlines()
+                ]
+            events = node.log_dir / EVENTS_FILENAME
+            if events.is_file():
+                lines.append("- events:")
+                lines += [
+                    "    " + line
+                    for line in events.read_text(encoding="utf-8").splitlines()
+                ]
+            (parent.log_dir / f"compacted-{node.id}.md").write_text(
+                "\n".join(lines) + "\n", encoding="utf-8"
+            )
+
+        dependents = [
+            n for n in self.walk()
+            if node.id in n.depends_on and n.status == COMPLETE
+        ]
+        for dep in dependents:
+            self.set_status(dep, PENDING)
+
+        self.delete_node(node)
+        return None
+
+    # -- digest (Phase 3.5) ------------------------------------------------
+
+    def generate_digest(self, out: Path | None = None) -> str:
+        nodes = self.walk()
+        done: list[str] = []
+        blocked: list[str] = []
+        pending: list[str] = []
+        for node in nodes:
+            goal = node.goal or ""
+            tag = ""
+            for match in re.findall(r"\[N:([A-Za-z0-9_]+)\]", goal):
+                tag = match
+                break
+            label = f"{node.id} [{node.status}]"
+            if tag:
+                label += f" [N:{tag}]"
+            label += f" {goal}"
+            if node.status == COMPLETE:
+                done.append(label)
+            elif node.status in (FAILED, SUSPENDED):
+                blocked.append(label)
+            else:
+                pending.append(label)
+
+        parts: list[str] = ["# Digest\n"]
+        parts.append("## Done\n")
+        if done:
+            parts.extend(f"- {d}\n" for d in done)
+        else:
+            parts.append("- (no completed tasks)\n")
+        parts.append("\n## Blocked\n")
+        if blocked:
+            parts.extend(f"- {b}\n" for b in blocked)
+        else:
+            parts.append("- (no blocked tasks)\n")
+        parts.append("\n## Next\n")
+        if pending:
+            parts.extend(f"- {n}\n" for n in pending)
+        else:
+            parts.append("- All tasks completed. No pending work.\n")
+
+        text = "".join(parts)
+        if out is not None:
+            out.write_text(text, encoding="utf-8")
+        return text
