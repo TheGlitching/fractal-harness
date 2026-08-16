@@ -13,3 +13,4 @@ contracts/
 tests/
 target/
 *.egg-info/
+Cargo.lock
