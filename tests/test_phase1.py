@@ -321,6 +321,7 @@ def _make_project(tmp_path: Path, mode: str) -> dict[str, Any]:
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["ANTHROPIC_API_KEY"] = "fake-key-for-tests"
+    env["FRACTAL_EXECUTOR"] = "anthropic"
     env["FRACTAL_FAKE_LOG"] = str(log)
     env["FRACTAL_FAKE_MODE"] = mode
 

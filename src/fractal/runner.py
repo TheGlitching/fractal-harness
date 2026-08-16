@@ -6,8 +6,8 @@ ancestors, plus the distilled summaries its children rolled up), calls the
 model, and parses a structured result that is either ``split(subtasks)`` or
 ``complete(deliverable, summary)``.
 
-Phase 0's leaf executor is one Anthropic API call; SPEC.md 4.5 makes the
-executor pluggable later.
+SPEC.md 4.5: the leaf executor is pluggable — ``FRACTAL_EXECUTOR`` selects
+``opencode`` (default, headless subprocess) or ``anthropic`` (bare API call).
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -200,6 +202,7 @@ def assemble_context(
     max_depth: int | None = None,
     escalation: tuple[str, str] | None = None,
     rationale: str | None = None,
+    opencode: bool = False,
 ) -> str:
     """Build the prompt for one node: own contract, inherited constraints, and
     whatever its children rolled up.
@@ -286,17 +289,24 @@ def assemble_context(
             "Address it and continue your contract.\n"
         )
 
-    parts.append(
-        "## Now answer\n\n"
-        "Use the split tool or the complete tool.  Answer with one tool call "
-        "and nothing else.\n"
-    )
+    if opencode:
+        parts.append(_OP_ENDING)
+    else:
+        parts.append(
+            "## Now answer\n\n"
+            "Use the split tool or the complete tool.  Answer with one tool call "
+            "and nothing else.\n"
+        )
     return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
 # The model call
 # ---------------------------------------------------------------------------
+
+
+def _executor_type() -> str:
+    return os.environ.get("FRACTAL_EXECUTOR", "opencode").strip().lower()
 
 
 def _client() -> Any:
@@ -308,7 +318,7 @@ def _client() -> Any:
     return anthropic.Anthropic()
 
 
-def call_model(prompt: str, *, model: str | None = None) -> Any:
+def _call_anthropic(prompt: str, *, model: str | None = None) -> Any:
     client = _client()
     return client.messages.create(
         model=model or os.environ.get("FRACTAL_MODEL", DEFAULT_MODEL),
@@ -317,6 +327,122 @@ def call_model(prompt: str, *, model: str | None = None) -> Any:
         tools=TOOLS,
         messages=[{"role": "user", "content": prompt}],
     )
+
+
+_OP_SYSTEM = """\
+You are one node of a fractal task harness.  You have been hydrated from a \
+node of a persistent task tree and you will dissolve when you answer; the \
+tree is the memory, you are not.
+
+You are given a contract: a goal, its acceptance criteria, the interfaces you \
+must respect, and the constraints inherited from every ancestor.  Those \
+constraints are laws — you may not relax them.
+
+You have four possible actions:
+* split — the task is larger than one agent can carry.  Propose subtasks, \
+each a complete contract of its own.
+* complete — the task fits within your competence.  Produce the deliverable \
+itself, a short distilled summary for your parent, and write artifacts.
+* escalate — an inherited constraint you were given is false, or your \
+contract lacks something a sibling owns.  Name the assumption and the evidence.
+* escalate_resolve — returned only by an ancestor reopened to settle an \
+escalation.  Choose amend | overrule | replan | depends_on.
+
+Split only when you must.
+"""
+
+
+_OP_ENDING = """\
+## Now answer
+
+You have the full tools of a coding agent (read, write, edit, run commands, \
+search).  Execute your contract fully using those tools — write deliverable \
+files into the current directory.
+
+When your work is complete, output EXACTLY one JSON decision object as the \
+very last thing.  No wrapping in markdown fences.  No commentary after the \
+JSON:
+
+To SPLIT:  {"verb":"split","subtasks":[{"id":"...","goal":"...","acceptance_criteria":["..."],"interfaces":[],"constraints":[],"depends_on":[]}]}
+To COMPLETE:  {"verb":"complete","deliverable":"...","summary":"...","artifacts":[{"path":"...","content":"..."}]}
+To ESCALATE:  {"verb":"escalate","assumption":"...","evidence":"..."}
+To RESOLVE:  {"verb":"escalate_resolve","resolution":"amend|overrule|replan|depends_on","amended_constraint":"...","amended_interface":"...","rationale":"...","target":"...","dependency":"..."}
+"""
+
+
+def _extract_decision(text: str) -> dict[str, Any] | None:
+    for match in re.finditer(
+        r'\{"verb":\s*"(split|complete|escalate|escalate_resolve)"', text
+    ):
+        start = match.start()
+        depth = 0
+        end = start
+        for i, ch in enumerate(text[start:], start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end > start:
+            try:
+                return json.loads(text[start:end])
+            except (ValueError, json.JSONDecodeError):
+                continue
+    return None
+
+
+def _call_via_opencode(
+    prompt: str, *, model: str | None = None, node_path: str | None = None
+) -> Any:
+    full_prompt = _OP_SYSTEM + "\n\n" + prompt
+    cmd = [shutil.which("opencode") or "opencode", "run", "--auto"]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.append(full_prompt)
+
+    env = dict(os.environ)
+    env.setdefault("OPENCODE_CONFIG_CONTENT", '{"permission":{"*":"allow"}}')
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd=str(node_path) if node_path else ".",
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        raise RunnerError("opencode executor timed out")
+    except FileNotFoundError:
+        raise RunnerError(
+            "opencode executor requested but opencode binary not found on PATH"
+        )
+
+    output = (result.stdout or "") + (result.stderr or "")
+    decision = _extract_decision(output)
+
+    if decision is None:
+        suffix = output[-600:] if len(output) > 600 else output
+        raise RunnerError(
+            f"opencode output contained no valid decision JSON.  "
+            f"Last 600 chars:\n{suffix}"
+        )
+
+    return {
+        "content": [{"type": "text", "text": json.dumps(decision)}],
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+    }
+
+
+def call_model(
+    prompt: str, *, model: str | None = None, node_path: str | None = None
+) -> Any:
+    if _executor_type() == "opencode":
+        return _call_via_opencode(prompt, model=model, node_path=node_path)
+    return _call_anthropic(prompt, model=model)
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +698,7 @@ def run_node(
     model: str | None = None,
 ) -> Result:
     """Hydrate a node, ask the model for one verb, return the parsed result."""
+    use_opencode = _executor_type() == "opencode"
     prompt = assemble_context(
         store,
         node,
@@ -581,6 +708,7 @@ def run_node(
         max_depth=max_depth,
         escalation=escalation,
         rationale=rationale,
+        opencode=use_opencode,
     )
     store.append_log(
         node,
@@ -592,9 +720,10 @@ def run_node(
             "resolving_escalation": escalation is not None,
             "overruled": rationale is not None,
             "prompt_chars": len(prompt),
+            "executor": "opencode" if use_opencode else "anthropic",
         },
     )
-    message = call_model(prompt, model=model)
+    message = call_model(prompt, model=model, node_path=str(node.path))
     store.debit_call(node, _usage_tokens(message))
     result = parse_message(message)
     store.append_log(

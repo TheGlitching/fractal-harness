@@ -7,13 +7,11 @@ All commands operate on the project rooted at the working directory.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Sequence, TextIO
 
 from . import scheduler
-from .runner import call_model
 from .store import Store, StoreError, ROOT_ID
 
 GOAL_WIDTH = 72
@@ -21,19 +19,6 @@ GOAL_WIDTH = 72
 
 def _store(args: argparse.Namespace) -> Store:
     return Store(Path(args.project).resolve())
-
-
-def _text_from_model(message: object) -> str:
-    content = getattr(message, "content", [])
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            block_type = getattr(block, "type", None)
-            text = getattr(block, "text", None)
-            if block_type in (None, "text") and text:
-                parts.append(str(text))
-        return "".join(parts)
-    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -211,39 +196,7 @@ def cmd_digest(args: argparse.Namespace, out: TextIO) -> int:
     with _store(args) as store:
         store.require_initialised()
         store.reconcile()
-        nodes = store.walk()
-
-        # Build a prompt and try the model.
-        status_lines = []
-        for node in nodes:
-            status_lines.append(
-                f"- {node.id} [{node.status}] depth={node.depth}: {node.goal}"
-            )
-        prompt = (
-            "Summarise this fractal project tree into a three-paragraph digest "
-            "with the sections ## Done, ## Blocked, and ## Next.  "
-            "List every node by its exact on-disk id and N-tag (e.g. root-01, "
-            "[N:ROOT]).  Write only the markdown.\n\n"
-            + "\n".join(status_lines)
-        )
-        try:
-            message = call_model(prompt, model="claude-haiku-5")
-        except Exception:
-            message = None
-
-        model_text = _text_from_model(message) if message is not None else ""
-        # Accept model output only if it looks like a narrative.
-        model_lower = model_text.lower()
-        has_narrative = (
-            "done" in model_lower
-            or "blocked" in model_lower
-            or "next" in model_lower
-        )
-        if has_narrative:
-            text = model_text.strip()
-        else:
-            text = store.generate_digest()
-
+        text = store.generate_digest()
         digest_path = Path(args.project).resolve() / "digest.md"
         digest_path.write_text(text, encoding="utf-8")
         print(text, file=out)

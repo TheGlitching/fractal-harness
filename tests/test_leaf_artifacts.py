@@ -89,7 +89,7 @@ def test_leaf_completing_with_nothing_is_refused_and_fails(
     time it is offered, and the node ends failed rather than complete."""
     prompts: list[str] = []
 
-    def empty_completion(prompt: str, *, model: str | None = None) -> Any:
+    def empty_completion(prompt: str, *, model: str | None = None, **_: Any) -> Any:
         prompts.append(prompt)
         return _message(
             {
@@ -126,7 +126,7 @@ def test_leaf_completing_with_only_blank_artifacts_is_refused(
 ) -> None:
     """Artifacts that are present but empty do not count as delivery."""
 
-    def blank_artifacts(prompt: str, *, model: str | None = None) -> Any:
+    def blank_artifacts(prompt: str, *, model: str | None = None, **_: Any) -> Any:
         return _message(
             {
                 "verb": "complete",
@@ -153,7 +153,7 @@ def test_leaf_completing_with_only_a_deliverable_is_accepted(
     """The check is delivery, not shape: a deliverable with no artifacts list
     still leaves a file behind, so it must not be refused."""
 
-    def deliverable_only(prompt: str, *, model: str | None = None) -> Any:
+    def deliverable_only(prompt: str, *, model: str | None = None, **_: Any) -> Any:
         return _message(
             {
                 "verb": "complete",
@@ -182,7 +182,7 @@ def test_a_parent_may_complete_without_artifacts_of_its_own(
     children carries their summary, and the artifacts live below it."""
     split_by: set[str] = set()
 
-    def split_then_aggregate(prompt: str, *, model: str | None = None) -> Any:
+    def split_then_aggregate(prompt: str, *, model: str | None = None, **_: Any) -> Any:
         node_id = _node_of(prompt)
         if node_id == "root" and node_id not in split_by:
             split_by.add(node_id)
