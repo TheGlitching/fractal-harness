@@ -64,9 +64,6 @@ pub fn run(store: &Store, on_output: OutputFn) -> std::result::Result<RunReport,
         let next = next_node(&nodes);
         match next {
             Some(node) => {
-                let goal_short: String = node.goal.chars().take(60).collect();
-                on_output("");
-                on_output(&format!("═══ node {} ({}) ═══", node.id, goal_short));
                 report.steps += 1;
                 execute(store, &node, &mut report, on_output)?;
             }

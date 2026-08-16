@@ -103,59 +103,16 @@ fn run_project(store: &store::Store, project: &PathBuf) {
         eprintln!("\ninterrupted");
     });
 
-    let banner = "\
-  ╔══════════════════════════════════════════╗
-  ║       ▲     fractal harness     ▲        ║
-  ║      /|\\      persistent tree    /|\\       ║
-  ║     / | \\     ephemeral agents  / | \\      ║
-  ╚══════════════════════════════════════════╝";
-    eprintln!("{banner}");
-    eprintln!();
-
     fn output(line: &str) { eprintln!("{line}"); }
 
     match scheduler::run(store, output) {
         Ok(report) => {
             eprintln!();
-            eprintln!("═══ done ═══");
-            eprintln!("  {} step(s) · {} completed · {} split · {} failed",
-                report.steps, report.completed, report.split, report.failed);
-            eprintln!("  verification: {}/{} passed",
+            eprintln!("{} steps · {} completed · {} split · {} failed · verify {}/{}",
+                report.steps, report.completed, report.split, report.failed,
                 report.verifications - report.verify_failures, report.verifications);
-            eprintln!();
-
-            // Show what was built
-            if let Ok(nodes) = store.walk() {
-                for n in &nodes {
-                    if n.status == "complete" {
-                        let arts = n.artifacts_dir();
-                        if arts.is_dir() {
-                            if let Ok(entries) = std::fs::read_dir(&arts) {
-                                let mut file_names: Vec<String> = Vec::new();
-                                for e in entries.flatten() {
-                                    if e.path().is_file() {
-                                        let name = e.file_name().to_string_lossy().to_string();
-                                        let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
-                                        file_names.push(format!("    {name} ({sz}B)"));
-                                    }
-                                }
-                                if !file_names.is_empty() {
-                                    eprintln!("  {} delivered:", n.id);
-                                    for s in &file_names { eprintln!("{s}"); }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            eprintln!();
-
             let trace = project.join("trace.json");
             report.write_trace(&trace.to_string_lossy());
-            eprintln!("  trace → {}", trace.display());
-
-            let root_status = report.root_status.clone();
-            eprintln!("\n  status: {root_status}");
             std::process::exit(if report.ok() { 0 } else { 1 });
         }
         Err(e) => {

@@ -164,11 +164,6 @@ pub fn call_model(prompt: &str, node_path: &Path, on_output: OutputFn) -> std::r
     }
 }
 
-fn format_elapsed(secs: u64) -> String {
-    if secs < 60 { format!("{secs}s") }
-    else { format!("{}m{}s", secs / 60, secs % 60) }
-}
-
 fn call_via_opencode(
     prompt: &str,
     node_path: &Path,
@@ -184,7 +179,6 @@ fn call_via_opencode(
         .args(["run", "--auto"])
         .arg("Read CLAUDE.md. Execute the contract fully. Work ONLY inside this directory — do NOT read or run files from parent directories. When completely done, output EXACTLY one JSON decision object as the very last line: {\"verb\":\"complete\"|{\"split\"},...}")
         .current_dir(node_path)
-        .env("HOME", node_path)
         .env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -212,40 +206,51 @@ fn call_via_opencode(
     });
 
     let reader = BufReader::new(stdout);
+    let mut last_action = String::new();
+    // spinner frames
+    let spin = ["|", "/", "-", "\\"];
+    let mut si = 0usize;
     for line in reader.lines() {
         match line {
             Ok(l) => {
                 let elapsed = start.elapsed().as_secs();
-                let out = format!("  {} {}", format_elapsed(elapsed), l);
-                on_output(&out);
                 all_text.push_str(&l);
                 all_text.push('\n');
+
+                // Always update with the latest non-empty line (trim long lines)
+                let trimmed = l.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with('{') && trimmed.len() > 2 {
+                    last_action = trimmed.chars().take(80).collect::<String>();
+                    if trimmed.len() > 80 { last_action.push_str("..."); }
+                }
+
+                // Redraw interface in-place
+                let spinner = spin[si % 4]; si += 1;
+                let elapsed = start.elapsed().as_secs();
+                let out = format!(
+                    "\x1b[2J\x1b[H  {spinner} working · {elapsed}s\n\n    {action}\n",
+                    action = if last_action.is_empty() { "thinking..." } else { &last_action }
+                );
+                on_output(&out);
             }
             Err(_) => break,
         }
-        // Check timeout
         if start.elapsed().as_secs() > timeout_secs {
             let _ = child.kill();
-            on_output(&format!("  -- timed out after {}s --", format_elapsed(timeout_secs)));
+            on_output("  -- timed out --\n");
             return Err(RunnerError::Timeout);
         }
     }
+    let elapsed = start.elapsed().as_secs();
+    let out = format!("\x1b[2J\x1b[H  done · {elapsed}s\n\n");
+    on_output(&out);
 
-    // Collect stderr
+    // Collect stderr (don't show to user unless there's an error we need)
     let stderr_lines = stderr_reader.join().unwrap_or_default();
     for l in &stderr_lines {
         all_text.push_str(l);
         all_text.push('\n');
     }
-    // Also show important stderr
-    for l in &stderr_lines {
-        if !l.is_empty() && (l.starts_with("Error") || l.starts_with("error") || l.contains("error")) {
-            on_output(&format!("  <err> {l}"));
-        }
-    }
-
-    let elapsed = start.elapsed().as_secs();
-    on_output(&format!("  -- finished in {} --", format_elapsed(elapsed)));
 
     let _ = child.wait();
 
