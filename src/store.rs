@@ -94,6 +94,7 @@ impl Contract {
         };
         format!(
             "# Contract: {nid}\n\n- node: {nid}\n- parent: {p}\n- depth: {depth}\n\n\
+             ## id\n\n{model_id}\n\
              ## Goal\n\n{goal}\n\n\
              ## Acceptance criteria\n\n{ac}\
              ## Interfaces\n\n{iface}\
@@ -101,6 +102,7 @@ impl Contract {
              ## depends_on\n\n{deps}",
             nid = node_id,
             p = parent.unwrap_or("(none)"),
+            model_id = &self.id,
             goal = self.goal.trim(),
             ac = bullets(&self.acceptance_criteria),
             iface = bullets(&self.interfaces),
@@ -135,7 +137,7 @@ impl Contract {
             interfaces: items("interfaces"),
             constraints: items("inherited constraints"),
             depends_on: items("depends_on"),
-            id: String::new(),
+            id: body("id").trim().to_string(),
             allocation: 0,
         }
     }
@@ -230,7 +232,7 @@ impl Store {
         if guard.is_none() {
             fs::create_dir_all(&self.state_dir)?;
             let conn = Connection::open(&self.index_path)?;
-            conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")?;
+            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
             conn.execute_batch(SCHEMA)?;
             *guard = Some(conn);
         }
@@ -294,11 +296,33 @@ impl Store {
         fs::create_dir_all(parent.children_dir())?;
         let existing = Self::child_dirs(&parent.path).len();
         let mut children = Vec::new();
+
+        let mut id_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Ok(siblings) = self.children_of(parent) {
+            for s in &siblings {
+                let cid = s.contract().id;
+                if !cid.is_empty() { id_map.insert(cid, s.id.clone()); }
+            }
+        }
         for (i, c) in contracts.iter().enumerate() {
             let cid = format!("{}-{:02}", parent.id, existing + i + 1);
+            if !c.id.is_empty() { id_map.insert(c.id.clone(), cid.clone()); }
+        }
+
+        for (i, c) in contracts.iter().enumerate() {
+            let cid = format!("{}-{:02}", parent.id, existing + i + 1);
+            let resolved_deps: Vec<String> = c.depends_on.iter()
+                .filter_map(|dep| {
+                    let resolved = id_map.get(dep).cloned();
+                    if resolved.is_none() {
+                        eprintln!("  fractal: warning — depends_on '{}' for {} does not match any known id, stripping", dep, cid);
+                    }
+                    resolved
+                })
+                .collect();
             let cnode = Node { id: cid.clone(), path: parent.children_dir().join(&cid), parent: Some(parent.id.clone()),
                 depth: parent.depth + 1, status: PENDING.to_string(), goal: c.goal.clone(), summary: String::new(),
-                depends_on: c.depends_on.clone(), dep_fp: "{}".into() };
+                depends_on: resolved_deps, dep_fp: "{}".into() };
             Self::materialise_node(&cnode, c)?;
             children.push(cnode);
         }
@@ -469,6 +493,23 @@ impl Store {
 
     pub fn split_fee(&self) -> i64 {
         std::env::var("FRACTAL_SPLIT_FEE").ok().and_then(|s| s.parse().ok()).unwrap_or(200)
+    }
+
+    pub fn retry(&self, node_id: &str) -> Result<usize, StoreError> {
+        let nodes = self.walk()?;
+        let target = nodes.iter().find(|n| n.id == node_id)
+            .ok_or_else(|| StoreError::Other(format!("node {node_id:?} not found")))?;
+        let prefix = format!("{}/", target.path.to_string_lossy());
+        let descendants: Vec<&Node> = nodes.iter()
+            .filter(|n| n.id == node_id || n.path.to_string_lossy().starts_with(&prefix))
+            .collect();
+        let mut count = 0;
+        for d in &descendants {
+            if d.status == PENDING { continue; }
+            self.set_status(d, PENDING)?;
+            count += 1;
+        }
+        Ok(count)
     }
 
     pub fn budget_remaining(&self, node_id: &str) -> Result<i64, StoreError> {

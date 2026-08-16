@@ -1,5 +1,4 @@
 use crate::store::{Contract, Node, Store, StoreError};
-use crate::tui::Tui;
 use regex::Regex;
 use serde_json::Value;
 use std::fs;
@@ -15,27 +14,20 @@ pub const ESCALATE_RESOLVE: &str = "escalate_resolve";
 pub const NOTE_GLOBAL: &str = "note_global";
 
 static DECISION_RE: OnceLock<Regex> = OnceLock::new();
-
 fn decision_re() -> &'static Regex {
-    DECISION_RE.get_or_init(|| {
-        Regex::new(r#"\{"verb":\s*"(split|complete|escalate|escalate_resolve|note_global)""#).unwrap()
-    })
+    DECISION_RE.get_or_init(|| Regex::new(r#"\{"verb":\s*"(split|complete|escalate|escalate_resolve|note_global)""#).unwrap())
 }
 
 #[derive(Debug)]
 pub enum RunnerError {
-    Timeout,
-    NotFound(String),
-    NoDecision(String),
-    Other(String),
+    Timeout, NotFound(String), NoDecision(String), Other(String),
 }
-
 impl std::fmt::Display for RunnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RunnerError::Timeout => write!(f, "timed out"),
             RunnerError::NotFound(s) => write!(f, "{s}"),
-            RunnerError::NoDecision(s) => write!(f, "no JSON decision in output. Last chars:\n{s}"),
+            RunnerError::NoDecision(s) => write!(f, "no JSON decision. last:\n{s}"),
             RunnerError::Other(s) => write!(f, "{s}"),
         }
     }
@@ -43,38 +35,37 @@ impl std::fmt::Display for RunnerError {
 
 #[derive(Debug, Default)]
 pub struct VerbResult {
-    pub verb: String,
-    pub subtasks: Vec<Contract>,
-    pub deliverable: String,
-    pub summary: String,
-    pub artifacts: Vec<(String, String)>,
-    pub assumption: String,
-    pub evidence: String,
-    pub resolution: String,
-    pub entry_type: String,
-    pub entry_content: String,
-    pub entry_supersedes: String,
+    pub verb: String, pub subtasks: Vec<Contract>, pub deliverable: String,
+    pub summary: String, pub artifacts: Vec<(String, String)>,
+    pub assumption: String, pub evidence: String, pub resolution: String,
+    pub entry_type: String, pub entry_content: String, pub entry_supersedes: String,
 }
 
 const OP_SYSTEM: &str = "\
-You are one node of a fractal task harness. You have been hydrated from a \
-node of a persistent task tree and you will dissolve when you answer; the \
-tree is the memory, you are not.
+You are one node of a fractal task tree. You are hydrated to make exactly \
+one decision, then you dissolve — the tree is the memory, you are not.
 
-You are given a contract: a goal, its acceptance criteria, the interfaces you \
-must respect, and the constraints inherited from every ancestor. Those \
-constraints are laws — you may not relax them.
+Your SOLE JOB: read the contract you are given and decide immediately — \
+SPLIT or COMPLETE?
 
-You have five possible actions:
-* split — the task is larger than one agent can carry. Propose subtasks.
-* complete — the task fits within your competence. Produce the deliverable.
-* escalate — an inherited constraint is false. Name the assumption + evidence.
-* escalate_resolve — settle an escalation: amend | overrule | replan | depends_on.
-* note_global — write a lesson, convention, or skill to the global store.
+SPLIT if the contract asks for more than ONE file, spans multiple concerns, \
+or would take more than a couple of minutes. If you split, your ONLY output \
+is the subtask list. Do NOT implement anything — you dissolve and the tree \
+will run each subtask through its own node. Each subtask must be a single, \
+focused job that another agent can complete in one shot.
 
-SPLIT OFTEN. If the task needs more than ~2 files, has multiple concerns, or \
-would take more than a few minutes — SPLIT. Each subtask should be a single, \
-focused job. Depth is free. Over-large completions waste work.";
+COMPLETE only if the contract is a single small unit of work — one file, \
+one concern, implementable in a single pass. Only then do you write code.
+
+This decision recurs at every level. A large task arrives, the root splits \
+it into N subtasks, each child receives one and makes the same choice. A \
+child that can do its job in one pass completes; a child that cannot splits \
+again. That recursion is the fractal — every node is a decomposer first, \
+an implementer second.
+
+Verbs: split (break into subtasks), complete (deliver the contract), \
+escalate (flag an assumption that blocks you), escalate_resolve (answer \
+an escalation from a child), note_global (record knowledge for the tree).";
 
 fn bullets(items: &[String]) -> String {
     if items.is_empty() { "- (none)\n".into() } else { items.iter().map(|s| format!("- {s}\n")).collect() }
@@ -84,167 +75,164 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
     let contract_text = fs::read_to_string(node.contract_path()).unwrap_or_default();
     let mut parts = vec![format!(
         "## Your contract\n\n{contract_text}\n\n\
-         IMPORTANT: Write ALL deliverable files into the `artifacts/` \
-         subdirectory of this working directory. It already exists.\n"
+         Write ALL deliverable files into the `artifacts/` directory (it exists).\n"
     )];
-
-    if store.budget_enabled() {
-        if let Ok(rem) = store.budget_remaining(&node.id) {
-            parts.push(format!("## Budget\n- remaining token allowance: {rem}\n"));
-        }
-    }
-
-    let global = store.retrieve_global(&node.goal, 5).unwrap_or_default();
-    if !global.is_empty() {
-        let lines: Vec<String> = global.iter().map(|e| format!("- {}: {}", e.entry_type, e.content)).collect();
-        parts.push(format!("## Global knowledge\n\n{}\n", lines.join("\n")));
-    }
 
     if let Ok(ancestors) = store.ancestors(node) {
         if !ancestors.is_empty() {
             let mut lines = Vec::new();
             for a in &ancestors {
-                lines.push(format!("- {} pursues: {}", a.id, a.goal));
-                for c in &a.contract().constraints {
-                    lines.push(format!("  - constraint: {c}"));
-                }
+                lines.push(format!("- {}: {}", a.id, a.goal));
+                for c in &a.contract().constraints { lines.push(format!("  - constraint: {c}")); }
             }
-            parts.push(format!("## Inherited from your ancestors\n\n{}\n", lines.join("\n")));
+            parts.push(format!("## Inherited\n{}\n", lines.join("\n")));
+
+            let parent = ancestors.last().unwrap();
+            let siblings = store.children_of(parent).unwrap_or_default();
+            if !siblings.is_empty() {
+                let mut slines = Vec::new();
+                for s in &siblings {
+                    if s.id == node.id { continue; }
+                    slines.push(format!("- {} [{}]: {}", s.id, s.status, s.goal));
+                }
+                if !slines.is_empty() {
+                    parts.push(format!(
+                        "## Siblings (parent: {})\n\
+                         Your parent split {} into these subtasks. \
+                         YOU are {}. Handle ONLY your own contract.\n\
+                         {}\n", parent.id, parent.goal, node.id, slines.join("\n")));
+                }
+                parts.push(format!(
+                    "You are a SUBTASK of \"{}\". Your parent already decomposed \
+                     the problem — do NOT repeat its split. Your only job is the \
+                     contract above. Keep your work small and focused.\n", parent.goal));
+            }
         }
     }
 
-    parts.push(
-        "## Instructions\n\n\
-         SPLIT AGGRESSIVELY. If the task involves more than one file or \
-         concept, split it. A CLI dashboard should split into: the CLI entry \
-         point, the data model, each data source, the renderer, and tests. \
-         Each split child gets exactly ONE focused job. \
-         Only complete a task when it is truly a single, small unit.\n\n\
-         Write ALL files into the `artifacts/` directory (it already exists). \
-         When finished, output EXACTLY one JSON decision as the very last \
-         thing with nothing after it:\n\n\
-         {\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\"\
-         ,\"artifacts\":[{\"path\":\"artifacts/file.py\",\"content\":\"...\"}]}\n\
-         {\"verb\":\"split\",\"subtasks\":[{\"goal\":\"...\",\
-         \"acceptance_criteria\":[\"...\"]}]}\n\n\
-         Work ONLY in this directory.\n".into()
-    );
-
+    if store.budget_enabled() {
+        if let Ok(rem) = store.budget_remaining(&node.id) {
+            parts.push(format!("## Budget\n- remaining: {rem}\n"));
+        }
+    }
+    let global = store.retrieve_global(&node.goal, 5).unwrap_or_default();
+    if !global.is_empty() {
+        let lines: Vec<String> = global.iter().map(|e| format!("- {}: {}", e.entry_type, e.content)).collect();
+        parts.push(format!("## Global knowledge\n{}\n", lines.join("\n")));
+    }
+    parts.push("\
+## Instructions\n\n\
+This is a TWO-PHASE process. Do Phase 1 FIRST:\n\n\
+PHASE 1 — DECIDE (do this before any implementation):\n\
+- Read your contract. Assess: is this one small atomic job, or does it need \
+decomposition?\n\
+- If it needs decomposition: output a split JSON and STOP. Do NOT write any \
+code, do NOT plan implementation — just name the subtasks.\n\
+- If it is small enough: move to Phase 2.\n\
+- RULE: if the contract mentions multiple features, files, layers, or \
+components → SPLIT. Only a truly single-file, single-concern contract \
+should reach Phase 2.\n\n\
+PHASE 2 — EXECUTE (only if Phase 1 decided COMPLETE):\n\
+- Implement the contract.\n\
+- Write ALL deliverable files into the `artifacts/` directory.\n\
+- When done, output EXACTLY one JSON decision as the very last line with \
+nothing after it:\n\n\
+{\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\",\
+\"artifacts\":[{\"path\":\"artifacts/file.py\",\"content\":\"...\"}]}\n\n\
+{\"verb\":\"split\",\"subtasks\":[{\"goal\":\"install deps\",\"acceptance_criteria\":[\"package.json exists\"],\"id\":\"setup\"},{\"goal\":\"build CLI\",\"acceptance_criteria\":[\"accepts args\"],\"id\":\"cli\",\"depends_on\":[\"setup\"]}]}\n\n\
+Work ONLY in this directory.\n".into());
     Ok(parts.join("\n"))
 }
 
 fn extract_decision(text: &str) -> Option<Value> {
     for m in decision_re().find_iter(text) {
-        let start = m.start();
-        let mut depth = 0;
-        let mut end = start;
+        let start = m.start(); let mut depth = 0; let mut end = start;
         for (i, ch) in text[start..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => { depth -= 1; if depth == 0 { end = start + i + 1; break; } }
-                _ => {}
-            }
+            match ch { '{' => depth += 1, '}' => { depth -= 1; if depth == 0 { end = start + i + 1; break; } } _ => {} }
         }
-        if end > start {
-            if let Ok(v) = serde_json::from_str(&text[start..end]) {
-                return Some(v);
-            }
-        }
+        if end > start { if let Ok(v) = serde_json::from_str(&text[start..end]) { return Some(v); } }
     }
     None
 }
 
+pub type OutputFn = std::sync::Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
-
-pub fn call_model(prompt: &str, node_path: &Path, tui: &mut Tui) -> std::result::Result<Value, RunnerError> {
-    let executor = std::env::var("FRACTAL_EXECUTOR").unwrap_or_else(|_| "opencode".into());
-    if executor == "opencode" {
-        call_via_opencode(prompt, node_path, tui)
-    } else {
-        Err(RunnerError::Other("only opencode executor is supported in the Rust harness".into()))
-    }
+pub fn call_model(prompt: &str, node_path: &Path, model: &str, on_output: OutputFn) -> std::result::Result<Value, RunnerError> {
+    call_via_opencode(prompt, node_path, model, on_output)
 }
 
-fn call_via_opencode(
-    prompt: &str,
-    node_path: &Path,
-    tui: &mut Tui,
-) -> std::result::Result<Value, RunnerError> {
+fn call_via_opencode(prompt: &str, node_path: &Path, model: &str, on_output: OutputFn) -> std::result::Result<Value, RunnerError> {
     let claude_md = format!("{OP_SYSTEM}\n\n{prompt}");
-    fs::write(node_path.join("CLAUDE.md"), &claude_md)
-        .map_err(|e| RunnerError::Other(format!("write CLAUDE.md: {e}")))?;
+    fs::write(node_path.join("CLAUDE.md"), &claude_md).map_err(|e| RunnerError::Other(format!("write: {e}")))?;
 
-    let bin = which::which("opencode").unwrap_or_else(|_| std::path::PathBuf::from("opencode"));
+    let iso_home = std::env::temp_dir().join(format!("fractal-home-{}", std::process::id()));
+    let _ = fs::create_dir_all(&iso_home);
+
+    let bin = which::which("opencode").unwrap_or_else(|_| Path::new("opencode").to_path_buf());
     let timeout_secs: u64 = std::env::var("FRACTAL_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(1200);
-    let mut child = Command::new(&bin)
-        .args(["run", "--auto"])
-        .arg("Read CLAUDE.md. Execute the contract fully. Work ONLY inside this directory — do NOT read or run files from parent directories. When completely done, output EXACTLY one JSON decision object as the very last line: {\"verb\":\"complete\"|{\"split\"},...}")
-        .current_dir(node_path)
-        .env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let real_home = std::env::var("HOME").unwrap_or_default();
+    let msg = "Read CLAUDE.md. Execute fully. Write files into artifacts/. When done, output exactly one JSON decision as the last line.";
+    let cmd_line = format!("cd '{}' && '{}' run --auto --model '{}' '{}'",
+        node_path.display(),
+        bin.display(),
+        model,
+        msg,
+    );
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", &cmd_line])
+        .env("HOME", &iso_home)
+        .env("XDG_CONFIG_HOME", format!("{real_home}/.config"))
+        .env("XDG_DATA_HOME", format!("{real_home}/.local/share"))
+        .stdout(Stdio::piped()).stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => RunnerError::NotFound(format!("opencode not found: {e}")),
-            _ => RunnerError::Other(format!("opencode: {e}")),
-        })?;
+        .map_err(|e| { let _ = fs::remove_dir_all(&iso_home); match e.kind() {
+            std::io::ErrorKind::NotFound => RunnerError::NotFound(format!("sh: {e}")),
+            _ => RunnerError::Other(format!("sh: {e}")),
+        }})?;
 
-    let stdout = child.stdout.take().expect("no stdout");
-    let stderr_pipe = child.stderr.take().expect("no stderr");
-    let mut all_text = String::new();
+    let stdout = child.stdout.take().unwrap();
+    let stderr_pipe = child.stderr.take().unwrap();
+    let node_name = node_path.file_name().unwrap_or_default().to_string_lossy().to_string();
     let start = std::time::Instant::now();
+    on_output(&format!("  [{}] started", &node_name));
 
-    // Spawn a thread to read stderr and feed it through on_output
+    let stdout_reader = std::thread::spawn(move || {
+        BufReader::new(stdout).lines().filter_map(|l| l.ok()).collect::<Vec<_>>()
+    });
     let stderr_reader = std::thread::spawn(move || {
-        let reader = BufReader::new(stderr_pipe);
-        let mut lines = Vec::new();
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                lines.push(l);
-            }
-        }
-        lines
+        BufReader::new(stderr_pipe).lines().filter_map(|l| l.ok()).collect::<Vec<_>>()
     });
 
-    let reader = BufReader::new(stdout);
-    for line in reader.lines() {
-        match line {
-            Ok(l) => {
-                all_text.push_str(&l);
-                all_text.push('\n');
-
-                let trimmed = l.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('{') && trimmed.len() > 2 {
-                    let action: String = trimmed.chars().take(78).collect();
-                    tui.status_line = action;
-                }
-                tui.set_stats(start.elapsed().as_secs(), 0, 0, 0);
-                tui.add_output(&l);
-                let _ = tui.draw();
-            }
-            Err(_) => break,
-        }
-        if start.elapsed().as_secs() > timeout_secs {
+    loop {
+        let elapsed = start.elapsed().as_secs();
+        if elapsed > timeout_secs {
             let _ = child.kill();
-            tui.status_line = "timed out".into();
-            let _ = tui.draw();
+            let _ = fs::remove_dir_all(&iso_home);
+            on_output(&format!("  -- timed out after {elapsed}s --"));
             return Err(RunnerError::Timeout);
         }
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => { std::thread::sleep(std::time::Duration::from_millis(100)); continue; }
+            Err(e) => return Err(RunnerError::Other(format!("wait: {e}"))),
+        }
     }
-    tui.status_line = "done".into();
-    let _ = tui.draw();
 
-    // Collect stderr (don't show to user unless there's an error we need)
+    let stdout_lines = stdout_reader.join().unwrap_or_default();
     let stderr_lines = stderr_reader.join().unwrap_or_default();
-    for l in &stderr_lines {
-        all_text.push_str(l);
-        all_text.push('\n');
+    let _ = fs::remove_dir_all(&iso_home);
+    let mut all_text = String::new();
+    for l in &stdout_lines {
+        all_text.push_str(l); all_text.push('\n');
+        let out = format!("  [{}] {}", &node_name, l.trim());
+        on_output(&out);
     }
-
-    let _ = child.wait();
+    for l in &stderr_lines { all_text.push_str(l); all_text.push('\n'); }
+    let done_msg = format!("  done ({}s)", start.elapsed().as_secs());
+    on_output(&done_msg);
 
     let decision = extract_decision(&all_text).ok_or_else(|| {
-        let suffix = if all_text.len() > 400 { &all_text[all_text.len() - 400..] } else { &all_text };
+        let suffix = if all_text.len() > 400 { &all_text[all_text.len()-400..] } else { &all_text };
         RunnerError::NoDecision(suffix.to_string())
     })?;
 
@@ -266,54 +254,25 @@ fn call_via_opencode(
     }))
 }
 
-pub fn call_critic(prompt: &str) -> std::result::Result<Value, RunnerError> {
+pub fn call_critic(prompt: &str, model: &str) -> std::result::Result<Value, RunnerError> {
     let judge_prompt = format!("\
-You are a verifier. Judge the deliverable against each acceptance criterion \
-and answer with exactly one JSON object: \
-{{\"verdict\":\"PASS\" or \"FAIL\",\"criteria\":[{{\"name\":\"...\",\"pass\":true|false,\"reason\":\"...\"}}]}} \
-No prose outside the JSON.\n\n{prompt}");
-
+You are a verifier. Judge the deliverable against each acceptance criterion and \
+answer with exactly: {{\"verdict\":\"PASS\"|\"FAIL\",\"criteria\":[{{\"name\":\"...\",\
+\"pass\":true|false,\"reason\":\"...\"}}]}}\n\n{prompt}");
+    let bin = which::which("opencode").unwrap_or_else(|_| Path::new("opencode").to_path_buf());
     let timeout_secs: u64 = std::env::var("FRACTAL_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
-    let bin = which::which("opencode").unwrap_or_else(|_| std::path::PathBuf::from("opencode"));
-    let output = Command::new(&bin)
-        .args(["run", "--auto"])
-        .arg(&judge_prompt)
-        .env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|mut c| {
+    let output = Command::new(&bin).args(["run", "--auto", "--model", model]).arg(&judge_prompt)
+        .stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().and_then(|mut c| {
             let start = std::time::Instant::now();
-            loop {
-                match c.try_wait() {
-                    Ok(Some(_)) => return c.wait_with_output(),
-                    Ok(None) => {
-                        if start.elapsed().as_secs() > timeout_secs { let _ = c.kill(); }
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        })
-        .map_err(|e| RunnerError::Other(format!("critic opencode: {e}")))?;
-
+            loop { match c.try_wait() {
+                Ok(Some(_)) => return c.wait_with_output(),
+                Ok(None) => { if start.elapsed().as_secs() > timeout_secs { let _ = c.kill(); } std::thread::sleep(std::time::Duration::from_millis(50)); }
+                Err(e) => return Err(e),
+            }}
+        }).map_err(|e| RunnerError::Other(format!("critic: {e}")))?;
     let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-    Ok(Value::Object({
-        let mut m = serde_json::Map::new();
-        m.insert("content".into(), Value::Array(vec![Value::Object({
-            let mut t = serde_json::Map::new();
-            t.insert("type".into(), Value::String("text".into()));
-            t.insert("text".into(), Value::String(text));
-            t
-        })]));
-        m.insert("usage".into(), Value::Object({
-            let mut u = serde_json::Map::new();
-            u.insert("input_tokens".into(), Value::Number(0.into()));
-            u.insert("output_tokens".into(), Value::Number(0.into()));
-            u
-        }));
-        m
-    }))
+    Ok(serde_json::json!({"content":[{"type":"text","text":text}],"usage":{"input_tokens":0,"output_tokens":0}}))
 }
 
 fn parse_verdict(message: &Value) -> std::result::Result<(String, Vec<Value>), RunnerError> {
@@ -322,25 +281,19 @@ fn parse_verdict(message: &Value) -> std::result::Result<(String, Vec<Value>), R
         let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
         if let Ok(data) = serde_json::from_str::<Value>(text) {
             if let Some(v) = data.get("verdict").and_then(|v| v.as_str()) {
-                let criteria = data.get("criteria").and_then(|c| c.as_array()).cloned().unwrap_or_default();
-                return Ok((v.to_uppercase(), criteria));
+                return Ok((v.to_uppercase(), data.get("criteria").and_then(|c| c.as_array()).cloned().unwrap_or_default()));
             }
         }
     }
     if !blocks.is_empty() { return Ok(("PASS".into(), vec![])); }
-    Err(RunnerError::Other("verifier returned no usable verdict".into()))
+    Err(RunnerError::Other("no verdict".into()))
 }
 
-pub fn verify_node(store: &Store, node: &Node, deliverable: &str, criteria: &[String]) -> std::result::Result<(String, Vec<Value>), RunnerError> {
-    let prompt = format!(
-        "Contract goal: {}\nAcceptance criteria:\n{}\nDeliverable:\n{}\n",
-        node.goal, bullets(criteria), if deliverable.is_empty() { "(no textual deliverable)" } else { deliverable }
-    );
-    let _ = store.append_log(node, &serde_json::json!({"event":"verify_request","criteria":criteria}));
-    let message = call_critic(&prompt)?;
-    let (verdict, results) = parse_verdict(&message)?;
-    let _ = store.append_log(node, &serde_json::json!({"event":"verify_result","verdict":verdict}));
-    Ok((verdict, results))
+pub fn verify_node(_store: &Store, node: &Node, deliverable: &str, criteria: &[String], model: &str) -> std::result::Result<(String, Vec<Value>), RunnerError> {
+    let prompt = format!("Contract goal: {}\nAcceptance criteria:\n{}\nDeliverable:\n{}",
+        node.goal, bullets(criteria), if deliverable.is_empty() { "(no text)" } else { deliverable });
+    let message = call_critic(&prompt, model)?;
+    parse_verdict(&message)
 }
 
 fn result_from_payload(verb: &str, payload: &Value) -> std::result::Result<VerbResult, RunnerError> {
@@ -348,17 +301,15 @@ fn result_from_payload(verb: &str, payload: &Value) -> std::result::Result<VerbR
     match verb {
         SPLIT => {
             if let Some(arr) = payload.get("subtasks").and_then(|s| s.as_array()) {
-                r.subtasks = arr.iter().map(|item| {
-                    let ac: Vec<String> = item.get("acceptance_criteria").and_then(|a| a.as_array())
-                        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()).unwrap_or_default();
-                    Contract {
-                        goal: item.get("goal").and_then(|g| g.as_str()).unwrap_or("").to_string(),
-                        acceptance_criteria: ac, interfaces: vec![], constraints: vec![],
-                        id: item.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
-                        depends_on: item.get("depends_on").and_then(|d| d.as_array())
-                            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()).unwrap_or_default(),
-                        allocation: item.get("allocation").and_then(|a| a.as_i64()).unwrap_or(0),
-                    }
+                r.subtasks = arr.iter().map(|item| Contract {
+                    goal: item.get("goal").and_then(|g| g.as_str()).unwrap_or("").to_string(),
+                    acceptance_criteria: item.get("acceptance_criteria").and_then(|a| a.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()).unwrap_or_default(),
+                    interfaces: vec![], constraints: vec![],
+                    id: item.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string(),
+                    depends_on: item.get("depends_on").and_then(|d| d.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()).unwrap_or_default(),
+                    allocation: item.get("allocation").and_then(|a| a.as_i64()).unwrap_or(0),
                 }).collect();
             }
         }
@@ -366,23 +317,23 @@ fn result_from_payload(verb: &str, payload: &Value) -> std::result::Result<VerbR
             r.deliverable = payload.get("deliverable").and_then(|d| d.as_str()).unwrap_or("").to_string();
             r.summary = payload.get("summary").and_then(|s| s.as_str()).unwrap_or("").to_string();
             if let Some(arr) = payload.get("artifacts").and_then(|a| a.as_array()) {
-                r.artifacts = arr.iter().map(|item| {
-                    (item.get("path").and_then(|p| p.as_str()).unwrap_or("out.txt").to_string(),
-                     item.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string())
-                }).collect();
+                r.artifacts = arr.iter().map(|item| (
+                    item.get("path").and_then(|p| p.as_str()).unwrap_or("out.txt").to_string(),
+                    item.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                )).collect();
             }
+        }
+        NOTE_GLOBAL => {
+            r.entry_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            r.entry_content = payload.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+            r.entry_supersedes = payload.get("supersedes").and_then(|s| s.as_str()).unwrap_or("").to_string();
         }
         ESCALATE => {
             r.assumption = payload.get("assumption").and_then(|a| a.as_str()).unwrap_or("").to_string();
             r.evidence = payload.get("evidence").and_then(|e| e.as_str()).unwrap_or("").to_string();
         }
         ESCALATE_RESOLVE => {
-            r.resolution = payload.get("resolution").and_then(|r| r.as_str()).unwrap_or("").to_lowercase();
-        }
-        NOTE_GLOBAL => {
-            r.entry_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
-            r.entry_content = payload.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
-            r.entry_supersedes = payload.get("supersedes").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            r.resolution = payload.get("resolution").and_then(|r| r.as_str()).unwrap_or("").to_string();
         }
         _ => return Err(RunnerError::Other(format!("unknown verb {verb:?}"))),
     }
@@ -392,9 +343,10 @@ fn result_from_payload(verb: &str, payload: &Value) -> std::result::Result<VerbR
 pub fn parse_message(message: &Value) -> std::result::Result<VerbResult, RunnerError> {
     let blocks = message.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
     for block in &blocks {
-        let btype = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
         let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_lowercase();
-        if btype == "tool_use" && [SPLIT, COMPLETE_VERB, ESCALATE, ESCALATE_RESOLVE, NOTE_GLOBAL].contains(&name.as_str()) {
+        if block.get("type").and_then(|t| t.as_str()).unwrap_or("") == "tool_use"
+            && [SPLIT, COMPLETE_VERB, ESCALATE, ESCALATE_RESOLVE, NOTE_GLOBAL].contains(&name.as_str())
+        {
             if let Some(input) = block.get("input") { return result_from_payload(&name, input); }
         }
     }
@@ -406,11 +358,64 @@ pub fn parse_message(message: &Value) -> std::result::Result<VerbResult, RunnerE
             }
         }
     }
-    Err(RunnerError::Other("no usable verb found".into()))
+    Err(RunnerError::Other("no usable verb".into()))
 }
 
-pub fn run_node(store: &Store, node: &Node, tui: &mut Tui) -> std::result::Result<VerbResult, RunnerError> {
+pub fn run_node(store: &Store, node: &Node, model: &str, on_output: OutputFn) -> std::result::Result<VerbResult, RunnerError> {
     let prompt = assemble_context(store, node).map_err(|e| RunnerError::Other(e.to_string()))?;
-    let message = call_model(&prompt, &node.path, tui)?;
+    let message = call_model(&prompt, &node.path, model, on_output)?;
     parse_message(&message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Store, Contract};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_store() -> (Store, std::path::PathBuf) {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("fractal-test-{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = Store::new(&dir);
+        s.init("build a CLI tool").unwrap();
+        (s, dir)
+    }
+
+    #[test]
+    fn child_context_has_sibling_info() {
+        let (store, dir) = temp_store();
+        let root = store.walk().unwrap().into_iter().find(|n| n.id == "root").unwrap();
+        store.set_status(&root, "running").unwrap();
+
+        let subtasks = vec![
+            Contract { goal: "write parser".into(), acceptance_criteria: vec!["test".into()], interfaces: vec![], constraints: vec![], id: String::new(), depends_on: vec![], allocation: 0 },
+            Contract { goal: "write CLI".into(), acceptance_criteria: vec!["test".into()], interfaces: vec![], constraints: vec![], id: String::new(), depends_on: vec![], allocation: 0 },
+        ];
+        let children = store.add_children(&root, &subtasks).unwrap();
+        assert_eq!(children.len(), 2);
+
+        let child = &children[0];
+        let ctx = assemble_context(&store, child).unwrap();
+
+        assert!(ctx.contains("SUBTASK"), "must mention it's a subtask");
+        assert!(ctx.contains("write CLI"), "must show sibling goal");
+        assert!(ctx.contains("root-01"), "must identify itself");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn root_context_has_no_sibling_section() {
+        let (store, dir) = temp_store();
+        let root = store.walk().unwrap().into_iter().find(|n| n.id == "root").unwrap();
+        let ctx = assemble_context(&store, &root).unwrap();
+
+        assert!(!ctx.contains("SUBTASK"), "root must not mention SUBTASK");
+        assert!(!ctx.contains("Siblings"), "root must not have Siblings section");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

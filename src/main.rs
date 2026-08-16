@@ -6,11 +6,12 @@ mod tui;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::thread;
 
 #[derive(Parser)]
 #[command(name = "fractal", about = "A persistent task tree executed by ephemeral agents")]
 struct Cli {
-    #[arg(short, long, default_value = ".")]
+    #[arg(short, long, default_value = ".", global = true)]
     project: PathBuf,
     #[command(subcommand)]
     command: Commands,
@@ -29,12 +30,29 @@ enum Commands {
     Status,
     /// Generate a digest (done / blocked / next)
     Digest,
+    /// Reset a node and its children back to pending
+    Retry {
+        /// Node id to retry
+        node_id: String,
+    },
+}
+
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use crossterm::execute;
+        use crossterm::cursor::Show;
+        use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
+        let _ = execute!(std::io::stderr(), LeaveAlternateScreen, Show);
+        let _ = disable_raw_mode();
+        original(info);
+    }));
 }
 
 fn main() {
+    install_panic_hook();
     let cli = Cli::parse();
     let project = cli.project.canonicalize().unwrap_or_else(|_| cli.project.clone());
-    let s = store::Store::new(&project);
 
     match cli.command {
         Commands::Init { goal } => {
@@ -43,11 +61,12 @@ fn main() {
                 eprintln!("fractal: a goal is required: fractal init <goal>");
                 std::process::exit(2);
             }
+            let s = store::Store::new(&project);
             match s.init(&goal) {
                 Ok(node) => {
                     println!("initialised tree/root ({})", node.status);
                     println!("goal: {goal}");
-                    run_project(&s, &project);
+                    run_project(&project, &goal);
                 }
                 Err(e) => {
                     eprintln!("fractal: {e}");
@@ -56,13 +75,16 @@ fn main() {
             }
         }
         Commands::Run => {
+            let s = store::Store::new(&project);
             if let Err(e) = s.require_initialised() {
                 eprintln!("fractal: {e}");
                 std::process::exit(2);
             }
-            run_project(&s, &project);
+            let goal = s.get("root").map(|n| n.goal).unwrap_or_default();
+            run_project(&project, &goal);
         }
         Commands::Status => {
+            let s = store::Store::new(&project);
             if let Err(e) = s.require_initialised() {
                 eprintln!("fractal: {e}");
                 std::process::exit(2);
@@ -81,6 +103,7 @@ fn main() {
             }
         }
         Commands::Digest => {
+            let s = store::Store::new(&project);
             if let Err(e) = s.require_initialised() {
                 eprintln!("fractal: {e}");
                 std::process::exit(2);
@@ -95,33 +118,306 @@ fn main() {
                 Err(e) => { eprintln!("fractal: {e}"); std::process::exit(1); }
             }
         }
+        Commands::Retry { node_id } => {
+            let s = store::Store::new(&project);
+            if let Err(e) = s.require_initialised() {
+                eprintln!("fractal: {e}");
+                std::process::exit(2);
+            }
+            match s.retry(&node_id) {
+                Ok(n) => {
+                    println!("retried {} nodes from '{}' and below — run `fractal run -p {}` to resume",
+                        n, node_id, project.display());
+                }
+                Err(e) => { eprintln!("fractal: {e}"); std::process::exit(1); }
+            }
+        }
     }
 }
 
-fn run_project(store: &store::Store, project: &PathBuf) {
+fn pick_model() -> String {
+    let default = "opencode/claude-sonnet-5";
+    if let Ok(m) = std::env::var("FRACTAL_MODEL") { if !m.is_empty() { return m; } }
+
+    let models = list_opencode_models(default);
+    if models.is_empty() { return default.to_string(); }
+
+    let default_idx = models.iter().position(|m| m == default).unwrap_or(0);
+
+    use crossterm::{
+        cursor::{Hide, Show},
+        event::{self, Event, KeyCode, KeyEventKind},
+        execute,
+        terminal::{Clear, ClearType},
+    };
+
+    let mut stdout = std::io::stdout();
+    if crossterm::terminal::enable_raw_mode().is_err() {
+        eprintln!("Model [{default}]: (non-TTY, using default)");
+        return default.to_string();
+    }
+    let _ = execute!(stdout, Hide);
+
+    let term_h = crossterm::terminal::size().unwrap_or((80, 40)).1 as usize;
+    let view_h = term_h.saturating_sub(4);
+    let mut selected = default_idx;
+    let mut scroll = selected.saturating_sub(view_h / 2);
+    let header = format!(" Choose model (↑↓ move, enter/space confirm, q quit)  [{} models] ", models.len());
+
+    // Draw initial view
+    draw_picker_view(&mut stdout, &header, &models, selected, scroll, view_h, None);
+
+    loop {
+        if let Ok(Event::Key(key)) = event::read() {
+            if key.kind != KeyEventKind::Press { continue; }
+            let old = selected;
+            let mut redraw = false;
+            match key.code {
+                KeyCode::Up if selected > 0 => { selected -= 1; }
+                KeyCode::Down if selected + 1 < models.len() => { selected += 1; }
+                KeyCode::PageUp => { selected = selected.saturating_sub(view_h); }
+                KeyCode::PageDown => { selected = (selected + view_h).min(models.len() - 1); }
+                KeyCode::Home => { selected = 0; }
+                KeyCode::End => { selected = models.len() - 1; }
+                KeyCode::Enter | KeyCode::Char(' ') => {
+                    let _ = execute!(stdout, Clear(ClearType::All), Show);
+                    let _ = crossterm::terminal::disable_raw_mode();
+                    return models[selected].clone();
+                }
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    let _ = execute!(stdout, Clear(ClearType::All), Show);
+                    let _ = crossterm::terminal::disable_raw_mode();
+                    return models[default_idx].clone();
+                }
+                _ => {}
+            }
+            if selected < scroll { scroll = selected; redraw = true; }
+            if selected >= scroll + view_h { scroll = selected.saturating_sub(view_h - 1); redraw = true; }
+            let old_scroll = if old >= scroll && old < scroll + view_h { Some(old) } else { None };
+            let new_scroll = if selected >= scroll && selected < scroll + view_h { Some(selected) } else { None };
+            if new_scroll != old_scroll { redraw = true; }
+
+            if selected != old || redraw {
+                if redraw || old_scroll.is_none() || new_scroll.is_none() {
+                    draw_picker_view(&mut stdout, &header, &models, selected, scroll, view_h, Some(old));
+                } else {
+                    patch_picker_lines(&mut stdout, &models, old, selected, scroll, view_h);
+                }
+            }
+        }
+    }
+}
+
+fn draw_picker_view(stdout: &mut std::io::Stdout, header: &str, models: &[String], selected: usize, scroll: usize, view_h: usize, old_scroll_off: Option<usize>) {
+    use crossterm::{
+        execute,
+        style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor, ResetColor},
+        terminal::{Clear, ClearType},
+    };
+    let redraw_header = old_scroll_off.map_or(true, |os| os < scroll || os >= scroll + view_h);
+    if redraw_header {
+        let _ = execute!(stdout, Clear(ClearType::All),
+            SetForegroundColor(Color::Cyan), SetAttribute(Attribute::Bold),
+            Print(header), ResetColor, SetAttribute(Attribute::Reset), Print("\n\n"));
+    }
+    let end = (scroll + view_h).min(models.len());
+    for i in scroll..end {
+        let marker = if i == selected { ">" } else { " " };
+        let _ = execute!(stdout, Clear(ClearType::CurrentLine));
+        if i == selected {
+            let _ = execute!(stdout, SetForegroundColor(Color::White), SetBackgroundColor(Color::DarkGrey), Print(format!("{marker} {}", models[i])), ResetColor, Print("\r\n"));
+        } else {
+            let _ = execute!(stdout, SetForegroundColor(Color::White), Print(format!("{marker} {}", models[i])), ResetColor, Print("\r\n"));
+        }
+    }
+    let _ = std::io::Write::flush(stdout);
+}
+
+fn patch_picker_lines(stdout: &mut std::io::Stdout, models: &[String], old: usize, selected: usize, scroll: usize, view_h: usize) {
+    use crossterm::{cursor::MoveTo, execute, style::{Color, Print, SetBackgroundColor, SetForegroundColor, ResetColor}, terminal::{Clear, ClearType}};
+    let line_row = |idx: usize| (idx.wrapping_sub(scroll) + 2) as u16;
+    let end = (scroll + view_h).min(models.len());
+    if old >= scroll && old < end {
+        let _ = execute!(stdout, MoveTo(0, line_row(old)), Clear(ClearType::CurrentLine),
+            SetForegroundColor(Color::White), Print(format!("  {}", models[old])), ResetColor, Print("\r\n"));
+    }
+    if selected >= scroll && selected < end {
+        let _ = execute!(stdout, MoveTo(0, line_row(selected)), Clear(ClearType::CurrentLine),
+            SetForegroundColor(Color::White), SetBackgroundColor(Color::DarkGrey), Print(format!("> {}", models[selected])), ResetColor, Print("\r\n"));
+    }
+    let _ = std::io::Write::flush(stdout);
+}
+
+fn list_opencode_models(default: &str) -> Vec<String> {
+    let bin = which::which("opencode").unwrap_or_else(|_| std::path::Path::new("opencode").to_path_buf());
+    let output = std::process::Command::new(&bin)
+        .args(["models"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let models: Vec<String> = text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+            if !models.is_empty() { return models; }
+        }
+        _ => {}
+    }
+    // Fallback — can't reach opencode, return default + common ones
+    vec![
+        default.to_string(),
+        "opencode/claude-opus-5".into(),
+        "opencode/claude-sonnet-4-5".into(),
+        "opencode/gpt-5.2-codex".into(),
+        "opencode/gemini-3.7-flash".into(),
+    ]
+}
+
+fn run_scheduler(project: &PathBuf, state: &std::sync::Arc<std::sync::Mutex<tui::TuiState>>, model: &str) {
+    let s = store::Store::new(project);
+    match scheduler::run(&s, state, model) {
+        Ok(report) => {
+            let mut s = state.lock().unwrap();
+            s.done = true;
+            if !report.ok() {
+                s.status_line = format!("failed — root: {}", report.root_status);
+            }
+        }
+        Err(e) => {
+            let mut s = state.lock().unwrap();
+            s.done = true;
+            s.error = Some(format!("{}", e));
+            s.status_line = format!("error: {}", e);
+        }
+    }
+}
+
+fn run_project(project: &PathBuf, goal: &str) {
+    let model = pick_model();
+
     let _ = ctrlc::set_handler(move || {
         scheduler::INTERRUPTED.store(true, Ordering::SeqCst);
     });
 
-    let root = store.get("root").unwrap();
-    let goal = root.goal.clone();
-    let mut t = tui::Tui::new("root", &goal).unwrap();
-    let result = scheduler::run(store, &mut t);
-    let _ = t.close();
+    let state = std::sync::Arc::new(std::sync::Mutex::new(tui::TuiState {
+        nodes: vec![],
+        stats: tui::StatsSnapshot { steps: 0, completed: 0, split: 0, failed: 0, refused: 0, refused_goals: vec![], failed_goals: vec![] },
+        log_lines: vec![],
+        status_line: String::new(),
+        node_id: "root".into(),
+        node_goal: goal.to_string(),
+        node_started_at: std::time::Instant::now(),
+        last_activity: String::new(),
+        node_activities: std::collections::HashMap::new(),
+        done: false,
+        error: None,
+        model: model.clone(),
+    }));
 
-    match result {
-        Ok(report) => {
-            eprintln!();
-            eprintln!("{} steps · {} completed · {} split · {} failed · verify {}/{}",
-                report.steps, report.completed, report.split, report.failed,
-                report.verifications - report.verify_failures, report.verifications);
-            let trace = project.join("trace.json");
-            report.write_trace(&trace.to_string_lossy());
-            std::process::exit(if report.ok() { 0 } else { 1 });
+    let project_path = project.clone();
+
+    if let Ok(mut tui) = tui::Tui::with_state(goal, &model, state.clone()) {
+        let state2 = state.clone();
+        thread::spawn(move || run_scheduler(&project_path, &state2, &model));
+        match tui.run() {
+            Ok(()) => {}
+            Err(e) => eprintln!("\nfractal: TUI error: {e}"),
         }
-        Err(e) => {
-            eprintln!("\n  fractal: {e}");
-            std::process::exit(1);
+    } else {
+        eprintln!("(no TUI — running headless)");
+        run_scheduler(&project_path, &state, &model);
+    }
+
+    let final_state = state.lock().unwrap();
+    if let Some(ref err) = final_state.error {
+        eprintln!("\n  fractal: {err}");
+    }
+    let s = store::Store::new(project);
+    let nodes = match s.walk() {
+        Ok(n) => n,
+        Err(e) => { eprintln!("\n  fractal: {e}"); std::process::exit(1); }
+    };
+    let root_status = nodes.first().map(|n| n.status.as_str()).unwrap_or("pending");
+    let model = final_state.model.clone();
+    drop(final_state);
+
+    let summary = if root_status == store::COMPLETE {
+        generate_summary(project, &s, &nodes, &model)
+    } else {
+        String::new()
+    };
+
+    let completed = nodes.iter().filter(|n| n.status == store::COMPLETE).count();
+    let failed = nodes.iter().filter(|n| n.status == store::FAILED).count();
+    let pending = nodes.iter().filter(|n| n.status == "pending" || n.status == store::RUNNING).count();
+
+    eprintln!("\n Summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    if let Some(root) = nodes.first() {
+        let g = root.goal.lines().next().unwrap_or(&root.goal);
+        let g = if g.len() > 68 { format!("{}…", &g[..67]) } else { g.to_string() };
+        eprintln!("  goal:    {g}");
+    }
+    if !summary.is_empty() {
+        for line in summary.lines() {
+            eprintln!("  {line}");
         }
     }
+    eprintln!("  result:  root {root_status}");
+    eprintln!("  {completed} completed · {failed} failed · {pending} pending · {} total",
+        nodes.len());
+    eprintln!("  artifacts: {}/artifacts/", project.join("tree/root").display());
+    eprintln!("  trace:     {}/trace.json", project.display());
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    let code = if root_status == store::COMPLETE { 0 } else { 1 };
+    std::process::exit(code);
+}
+
+fn generate_summary(project: &PathBuf, _store: &store::Store, nodes: &[store::Node], model: &str) -> String {
+    let mut ctx = String::from("You are generating a final project summary. Below is a task tree with node goals, statuses, and what each completed node delivered.\n\n");
+    if let Some(root) = nodes.first() {
+        ctx.push_str(&format!("## Project goal\n{}\n\n", root.goal));
+    }
+    ctx.push_str("## Nodes\n\n");
+    for n in nodes {
+        let indent = "  ".repeat((n.depth - 1) as usize);
+        let g = n.goal.lines().next().unwrap_or(&n.goal);
+        let g = if g.len() > 72 { format!("{}…", &g[..71]) } else { g.to_string() };
+        ctx.push_str(&format!("{indent}[{id}] [{status}] {goal}\n", indent = indent, id = n.id, status = n.status, goal = g));
+        if n.status == store::COMPLETE {
+            if let Ok(decisions) = std::fs::read_to_string(n.decisions_path()) {
+                for line in decisions.lines().rev().take(2) {
+                    if line.starts_with('-') && line.contains("completed") {
+                        ctx.push_str(&format!("{indent}  → {}\n", line.trim_start_matches("- ")));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    ctx.push_str("\n## Instructions\nWrite a concise, specific summary of what was delivered. Mention key files/artifacts created. One paragraph. No markdown formatting — plain text only.\n");
+
+    let bin = which::which("opencode").unwrap_or_else(|_| std::path::Path::new("opencode").to_path_buf());
+    let iso_home = std::env::temp_dir().join(format!("fractal-summary-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&iso_home);
+    let real_home = std::env::var("HOME").unwrap_or_default();
+    let cmd_line = format!("cd '{}' && '{}' run --auto --model '{}' '{}'",
+        project.display(),
+        bin.display(),
+        model,
+        ctx.replace('\'', "'\\''"),
+    );
+
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", &cmd_line])
+        .env("HOME", &iso_home)
+        .env("XDG_CONFIG_HOME", format!("{real_home}/.config"))
+        .env("XDG_DATA_HOME", format!("{real_home}/.local/share"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+
+    let result = match output {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Err(_) => String::new(),
+    };
+    let _ = std::fs::remove_dir_all(&iso_home);
+    result
 }
