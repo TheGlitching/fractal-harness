@@ -92,6 +92,7 @@ Writes `digest.md` with three sections (done / blocked / next).
 | `FRACTAL_BUDGET` | unset | Token allowance at the root; enables budget scaling |
 | `FRACTAL_SPLIT_FEE` | `200` | Token cost charged per split |
 | `FRACTAL_MAX_STEPS` | `500` | Backstop loop bound for a single run |
+| `FRACTAL_TIMEOUT` | `600` | Seconds before a stuck node is killed |
 
 With `FRACTAL_BUDGET`, recursion is bounded by economics: every split debits a
 split-fee and divides the remaining allowance across children.

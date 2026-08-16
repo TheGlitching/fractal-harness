@@ -57,6 +57,9 @@ pub fn run(store: &Store, on_status: Option<&StatusFn>) -> std::result::Result<R
     let mut report = RunReport::default();
     let limit = std::env::var("FRACTAL_MAX_STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(MAX_STEPS);
 
+    // Render immediately so the user sees the tree before any work starts.
+    if let Some(ref f) = on_status { f(&report, &store.walk().unwrap_or_default()); }
+
     while report.steps < limit {
         if INTERRUPTED.load(Ordering::SeqCst) {
             break;
@@ -65,6 +68,8 @@ pub fn run(store: &Store, on_status: Option<&StatusFn>) -> std::result::Result<R
         let next = next_node(&nodes);
         match next {
             Some(node) => {
+                store.set_status(&node, RUNNING)?;
+                if let Some(ref f) = on_status { f(&report, &store.walk().unwrap_or_default()); }
                 report.steps += 1;
                 execute(store, &node, &mut report)?;
                 if let Some(ref f) = on_status { f(&report, &store.walk().unwrap_or_default()); }

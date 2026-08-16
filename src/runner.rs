@@ -158,19 +158,45 @@ fn call_via_opencode(prompt: &str, node_path: &Path) -> std::result::Result<Valu
     fs::write(node_path.join("CLAUDE.md"), &claude_md).map_err(|e| RunnerError::Other(format!("write CLAUDE.md: {e}")))?;
 
     let bin = which::which("opencode").unwrap_or_else(|_| std::path::PathBuf::from("opencode"));
-    let output = Command::new(&bin)
+    let timeout_secs: u64 = std::env::var("FRACTAL_TIMEOUT").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+    let mut child = Command::new(&bin)
         .args(["run", "--auto"])
         .arg("Execute the contract in CLAUDE.md. Use your tools to deliver the work (write files, run commands, search). When finished, output EXACTLY one JSON decision object as the very last thing, with no wrapping fences and no commentary after it.")
         .current_dir(node_path)
         .env("HOME", node_path)
         .env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => RunnerError::NotFound(format!("opencode binary not found: {e}")),
             _ => RunnerError::Other(format!("opencode: {e}")),
         })?;
 
-    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    let mut output = None;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                output = Some(child.wait_with_output()
+                    .map_err(|e| RunnerError::Other(format!("opencode output: {e}")))?);
+                break;
+            }
+            Ok(None) => {
+                if start.elapsed().as_secs() > timeout_secs {
+                    let _ = child.kill();
+                    return Err(RunnerError::Timeout);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(RunnerError::Other(format!("opencode: {e}"))),
+        }
+    }
+
+    let out = output.unwrap();
+    let text = format!("{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr));
 
     let decision = extract_decision(&text).ok_or_else(|| {
         let suffix = if text.len() > 600 { &text[text.len() - 600..] } else { &text };
