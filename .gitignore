@@ -11,3 +11,5 @@ AGENTS.md
 docs/
 contracts/
 tests/
+target/
+*.egg-info/

@@ -14,15 +14,12 @@ by prompting:
 | `split(subtasks)` | the task is too big for one agent; propose child contracts |
 | `complete(deliverable, summary)` | submit work for verification against the contract |
 | `escalate(assumption, evidence)` | an inherited constraint is false; reopen the owner |
-| `escalate_resolve(resolution)` | settle an escalation: amend / overrule / replan / depends_on |
-| `note_global(type, content, supersedes?)` | write a lesson, convention, or skill to the shared global store |
+| `escalate_resolve(resolution)` | settle an escalation |
+| `note_global(type, content)` | write a lesson, convention, or skill to the shared global store |
 
-The **leaf executor is pluggable**. It can be:
-
-- `opencode` (default) — spawns opencode headlessly in the node directory,
-  which reads a generated `CLAUDE.md` (the contract + inherited constraints +
-  global knowledge) and writes its deliverables as real files.
-- `anthropic` — a bare API call with tool-use parsing.
+The **leaf executor** spawns opencode headlessly in each node directory.
+opencode reads a generated `CLAUDE.md` (the contract + inherited constraints
++ global knowledge) and writes deliverables as real files.
 
 ## How it works
 
@@ -30,86 +27,41 @@ A project is a directory tree that mirrors a task tree. Every node holds:
 
 - `contract.md` — goal, acceptance criteria, interfaces, inherited constraints
 - `decisions.md` — append-only semantic memory of the node
-- `log/` — episodic traces (the raw model-call events)
+- `log/` — episodic traces
 - `artifacts/` — the deliverables a node produces
 - `children/` — subordinate nodes
 
-A small SQLite index (`.fractal/index.db`) carries what the scheduler needs
-(node id, parent, status, budget ledger). The filesystem is the source of
-truth; the index is reconciled from disk on every load.
+A SQLite index (`.fractal/index.db`) carries what the scheduler needs; the
+filesystem is the source of truth.
 
 ## Installation
 
-Requires Python 3.12.
+Requires [Rust](https://rustup.rs) and [opencode](https://github.com/sst/opencode) on your PATH.
 
 ```bash
 git clone https://github.com/TheGlitching/fractal-harness.git
 cd fractal-harness
-python3 -m venv .venv
-.venv/bin/python -m ensurepip
-.venv/bin/python -m pip install -e .
+cargo install --path .
 ```
 
-If you use uv:
-
-```bash
-uv venv && uv pip install -e .
-```
-
-Ensure the leaf executor binary is on your `PATH` — **opencode** is the
-default (https://github.com/sst/opencode).  The anthropic SDK is optional and
-only needed for `FRACTAL_EXECUTOR=anthropic`:
-
-```bash
-.venv/bin/pip install -e ".[anthropic]"
-```
-
-The `fractal` command is available from any directory once the venv is
-activated:
-
-```bash
-source .venv/bin/activate
-fractal init "Build a CLI weather dashboard"
-fractal run
-```
-
-Or directly without activating:
-
-```bash
-.venv/bin/fractal init "Build a CLI weather dashboard"
-```
+After installation, the `fractal` command is available globally.
 
 ## Usage
 
-### Start a project
+### Start a project (init + run)
 
 ```bash
 fractal init "Build a CLI weather dashboard with tests"
 ```
 
-This creates `tree/root/` with a pending root node and the SQLite index.
+This creates the tree, starts the scheduler, and shows a real-time animated
+tree view. No separate `run` command is needed.
 
-### Run it
+### Resume a paused project
 
 ```bash
+cd my-project
 fractal run
-```
-
-The scheduler picks runnable nodes, hydrates each from its contract, invokes
-the executor, and applies the structured result — splitting when a task is too
-big, completing leaves, escalating conflicts — until the root is finished.
-Every `run` writes `trace.json` to the project root with the research dataset:
-
-```jsonc
-{
-  "steps": 1, "completed": 1, "split": 0, "refused": 0, "failed": 0,
-  "root_status": "complete",
-  "escalations": 0,
-  "verifications": 1, "verify_failures": 0, "verify_catch_rate": 0.0,
-  "depth_distribution": {"1": 1}, "max_depth": 1,
-  "total_cost_tokens": 0,
-  "per_node_cost": [{"node": "root", "depth": 1, "tokens": 0}]
-}
 ```
 
 ### Inspect the tree
@@ -124,58 +76,46 @@ root  [complete]  Build a CLI weather dashboard with tests
   root-02  [complete]  Write the CLI entry point
 ```
 
-### Steer a running project
-
-Redirect, extend, or prune a project without reading the tree by hand. Every
-command prints an impact preview and requires `--confirm` before applying.
-
-```bash
-# Amend the root contract (propagates to inheritors)
-fractal steer amend-root --old old.md --new new.md --confirm
-
-# Splice a new child under a node
-fractal steer add root-01 --goal "Add caching" \
-  --acceptance-criteria "reads cache first" --confirm
-
-# Prune a subtree (compacts its logs into the parent first)
-fractal steer remove root-02 --confirm
-```
-
 ### Summarize
 
 ```bash
 fractal digest
 ```
 
-Writes a three-paragraph narrative (done / blocked / next) to `digest.md`,
-referencing only real node ids and statuses present on disk.
+Writes `digest.md` with three sections (done / blocked / next).
 
 ## Configuration
 
-Behaviour is driven by environment variables:
-
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `FRACTAL_EXECUTOR` | `opencode` | Leaf executor: `opencode` or `anthropic` |
-| `FRACTAL_MODEL` | `claude-opus-5` | Model for node calls (both executors) |
-| `FRACTAL_MAX_TOKENS` | `8192` | Max output tokens for a node call |
-| `FRACTAL_BUDGET` | unset | Token allowance at the root; enables the budget ledger |
+| `FRACTAL_EXECUTOR` | `opencode` | Leaf executor (only opencode in the Rust binary) |
+| `FRACTAL_BUDGET` | unset | Token allowance at the root; enables budget scaling |
 | `FRACTAL_SPLIT_FEE` | `200` | Token cost charged per split |
 | `FRACTAL_MAX_STEPS` | `500` | Backstop loop bound for a single run |
-| `FRACTAL_VERIFY_MODEL` | `FRACTAL_MODEL` | Model for the critic/verifier |
-| `FRACTAL_VERIFY_MAX_TOKENS` | `4000` | Max output tokens for the verifier |
 
-### Using the budget to bound recursion
-
-Without a budget the tree is capped at `MAX_DEPTH` (3 levels). With
-`FRACTAL_BUDGET`, recursion is bounded by economics: every split debits a
-split-fee and divides the remaining allowance across its children, so depth
-responds to budget rather than a magic number.
+With `FRACTAL_BUDGET`, recursion is bounded by economics: every split debits a
+split-fee and divides the remaining allowance across children.
 
 ```bash
-FRACTAL_BUDGET=100000 FRACTAL_SPLIT_FEE=500 fractal run
+FRACTAL_BUDGET=100000 FRACTAL_SPLIT_FEE=500 fractal init "Large task"
 ```
+
+## What the animation looks like
+
+```
+┌─ fractal ──────────────────────────────
+  ● root  Write a CLI weather dashboard with tests
+  ├─ ◉ root-01  Write the weather fetch module...
+  ├─ ○ root-02  Write the CLI entry point...
+  └─ ● root-03  Write the README
+├─────────────────────────────────────
+  steps: 4  ✓3  ◇1  ✗0  ⤴0  verify: 4/4
+└─────────────────────────────────────
+```
+
+Every `init` and `run` writes `trace.json` to the project root with
+per-node status, depth distribution, escalation count, and verification stats.
 
 ## License / status
 
-Research-grade prototype (`__version__ = "0.1.0"`). No license declared yet.
+Single-binary Rust rewrite. Licensed under MIT.
