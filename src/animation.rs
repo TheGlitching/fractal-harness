@@ -60,7 +60,7 @@ fn print_tree(node: &Node, nodes: &[Node], prefix: &str, is_last: bool, utf8: bo
     let _ = writeln!(io::stderr(), "{}", tree_line(node, prefix, is_last, utf8));
     let children: Vec<&Node> = nodes.iter().filter(|n| n.parent.as_deref() == Some(&node.id)).collect();
     for (i, child) in children.iter().enumerate() {
-        let sep = if utf8 { (if is_last { "   " } else { "│  " }) } else { "   " };
+        let sep = if utf8 { if is_last { "   " } else { "│  " } } else { "   " };
         let child_prefix = format!("{prefix}{sep}");
         print_tree(child, nodes, &child_prefix, i == children.len() - 1, utf8);
     }

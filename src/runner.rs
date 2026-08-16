@@ -173,14 +173,12 @@ fn call_via_opencode(prompt: &str, node_path: &Path) -> std::result::Result<Valu
             _ => RunnerError::Other(format!("opencode: {e}")),
         })?;
 
-    let mut output = None;
     let start = std::time::Instant::now();
-    loop {
+    let out = loop {
         match child.try_wait() {
             Ok(Some(_status)) => {
-                output = Some(child.wait_with_output()
-                    .map_err(|e| RunnerError::Other(format!("opencode output: {e}")))?);
-                break;
+                break child.wait_with_output()
+                    .map_err(|e| RunnerError::Other(format!("opencode output: {e}")))?;
             }
             Ok(None) => {
                 if start.elapsed().as_secs() > timeout_secs {
@@ -191,9 +189,8 @@ fn call_via_opencode(prompt: &str, node_path: &Path) -> std::result::Result<Valu
             }
             Err(e) => return Err(RunnerError::Other(format!("opencode: {e}"))),
         }
-    }
+    };
 
-    let out = output.unwrap();
     let text = format!("{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr));

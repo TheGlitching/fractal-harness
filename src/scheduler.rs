@@ -110,7 +110,7 @@ fn deps_satisfied(node: &Node, by_id: &HashMap<&str, &Node>) -> bool {
     node.depends_on.iter().all(|dep| by_id.get(dep.as_str()).map_or(false, |n| n.status == COMPLETE))
 }
 
-fn aggregatable(node: &Node, by_id: &HashMap<&str, &Node>, nodes: &[Node]) -> bool {
+fn aggregatable(node: &Node, _by_id: &HashMap<&str, &Node>, nodes: &[Node]) -> bool {
     let children: Vec<&Node> = nodes.iter().filter(|n| n.parent.as_deref() == Some(&node.id)).collect();
     !children.is_empty() && children.iter().all(|c| [COMPLETE, FAILED].contains(&c.status.as_str()))
 }
@@ -138,7 +138,7 @@ fn execute(store: &Store, node: &Node, report: &mut RunReport) -> std::result::R
         };
 
         let post = if store.budget_enabled() { store.budget_remaining(&node.id).ok() } else { None };
-        let tokens = match (pre, post) { (Some(a), Some(b)) => a - b, _ => 0 };
+        let _tokens = match (pre, post) { (Some(a), Some(b)) => a - b, _ => 0 };
 
         match result.verb.as_str() {
             NOTE_GLOBAL => {
