@@ -13,6 +13,8 @@ use std::thread;
 struct Cli {
     #[arg(short, long, default_value = ".", global = true)]
     project: PathBuf,
+    #[arg(short, long, global = true)]
+    executor: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -53,6 +55,10 @@ fn main() {
     install_panic_hook();
     let cli = Cli::parse();
     let project = cli.project.canonicalize().unwrap_or_else(|_| cli.project.clone());
+
+    if let Some(exec) = cli.executor {
+        std::env::set_var("FRACTAL_EXECUTOR", exec);
+    }
 
     match cli.command {
         Commands::Init { goal } => {
@@ -136,10 +142,10 @@ fn main() {
 }
 
 fn pick_model() -> String {
-    let default = "opencode/claude-sonnet-5";
+    let default = "default";
     if let Ok(m) = std::env::var("FRACTAL_MODEL") { if !m.is_empty() { return m; } }
 
-    let models = list_opencode_models(default);
+    let models = list_models(default);
     if models.is_empty() { return default.to_string(); }
 
     let default_idx = models.iter().position(|m| m == default).unwrap_or(0);
@@ -164,7 +170,6 @@ fn pick_model() -> String {
     let mut scroll = selected.saturating_sub(view_h / 2);
     let header = format!(" Choose model (↑↓ move, enter/space confirm, q quit)  [{} models] ", models.len());
 
-    // Draw initial view
     draw_picker_view(&mut stdout, &header, &models, selected, scroll, view_h, None);
 
     loop {
@@ -248,26 +253,25 @@ fn patch_picker_lines(stdout: &mut std::io::Stdout, models: &[String], old: usiz
     let _ = std::io::Write::flush(stdout);
 }
 
-fn list_opencode_models(default: &str) -> Vec<String> {
-    let bin = which::which("opencode").unwrap_or_else(|_| std::path::Path::new("opencode").to_path_buf());
-    let output = std::process::Command::new(&bin)
-        .args(["models"])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            let models: Vec<String> = text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-            if !models.is_empty() { return models; }
+fn list_models(default: &str) -> Vec<String> {
+    let executor = runner::get_executor();
+    if executor == "opencode" {
+        let bin = which::which("opencode").unwrap_or_else(|_| std::path::Path::new("opencode").to_path_buf());
+        if let Ok(o) = std::process::Command::new(&bin).args(["models"]).output() {
+            if o.status.success() {
+                let text = String::from_utf8_lossy(&o.stdout);
+                let models: Vec<String> = text.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+                if !models.is_empty() { return models; }
+            }
         }
-        _ => {}
     }
-    // Fallback — can't reach opencode, return default + common ones
     vec![
         default.to_string(),
-        "opencode/claude-opus-5".into(),
-        "opencode/claude-sonnet-4-5".into(),
-        "opencode/gpt-5.2-codex".into(),
-        "opencode/gemini-3.7-flash".into(),
+        "smol".into(),
+        "slow".into(),
+        "openrouter/google/gemini-3.7-flash".into(),
+        "anthropic/claude-3-7-sonnet".into(),
+        "openai/gpt-4o-mini".into(),
     ]
 }
 
@@ -310,14 +314,18 @@ fn run_project(project: &PathBuf, goal: &str) {
         done: false,
         error: None,
         model: model.clone(),
+        selected_idx: 0,
+        mode: tui::TuiMode::Normal,
+        prompt_message: None,
     }));
 
     let project_path = project.clone();
+    let s = store::Store::new(project);
 
     if let Ok(mut tui) = tui::Tui::with_state(goal, &model, state.clone()) {
         let state2 = state.clone();
         thread::spawn(move || run_scheduler(&project_path, &state2, &model));
-        match tui.run() {
+        match tui.run(&s) {
             Ok(()) => {}
             Err(e) => eprintln!("\nfractal: TUI error: {e}"),
         }
@@ -330,7 +338,6 @@ fn run_project(project: &PathBuf, goal: &str) {
     if let Some(ref err) = final_state.error {
         eprintln!("\n  fractal: {err}");
     }
-    let s = store::Store::new(project);
     let nodes = match s.walk() {
         Ok(n) => n,
         Err(e) => { eprintln!("\n  fractal: {e}"); std::process::exit(1); }
@@ -394,30 +401,50 @@ fn generate_summary(project: &PathBuf, _store: &store::Store, nodes: &[store::No
     }
     ctx.push_str("\n## Instructions\nWrite a concise, specific summary of what was delivered. Mention key files/artifacts created. One paragraph. No markdown formatting — plain text only.\n");
 
-    let bin = which::which("opencode").unwrap_or_else(|_| std::path::Path::new("opencode").to_path_buf());
-    let iso_home = std::env::temp_dir().join(format!("fractal-summary-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&iso_home);
-    let real_home = std::env::var("HOME").unwrap_or_default();
-    let cmd_line = format!("cd '{}' && '{}' run --auto --model '{}' '{}'",
-        project.display(),
-        bin.display(),
-        model,
-        ctx.replace('\'', "'\\''"),
-    );
+    let executor = runner::get_executor();
+    if executor == "opencode" {
+        let bin = which::which("opencode").unwrap_or_else(|_| std::path::Path::new("opencode").to_path_buf());
+        let iso_home = std::env::temp_dir().join(format!("fractal-summary-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&iso_home);
+        let real_home = std::env::var("HOME").unwrap_or_default();
+        let cmd_line = format!("cd '{}' && '{}' run --auto --model '{}' '{}'",
+            project.display(),
+            bin.display(),
+            model,
+            ctx.replace('\'', "'\\''"),
+        );
 
-    let output = std::process::Command::new("/bin/sh")
-        .args(["-c", &cmd_line])
-        .env("HOME", &iso_home)
-        .env("XDG_CONFIG_HOME", format!("{real_home}/.config"))
-        .env("XDG_DATA_HOME", format!("{real_home}/.local/share"))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output();
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &cmd_line])
+            .env("HOME", &iso_home)
+            .env("XDG_CONFIG_HOME", format!("{real_home}/.config"))
+            .env("XDG_DATA_HOME", format!("{real_home}/.local/share"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
 
-    let result = match output {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        Err(_) => String::new(),
-    };
-    let _ = std::fs::remove_dir_all(&iso_home);
-    result
+        let result = match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            Err(_) => String::new(),
+        };
+        let _ = std::fs::remove_dir_all(&iso_home);
+        result
+    } else {
+        let bin = which::which("omp")
+            .or_else(|_| which::which("pi"))
+            .unwrap_or_else(|_| PathBuf::from("omp"));
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.arg("-p");
+        cmd.arg("--cwd").arg(project);
+        if !model.is_empty() && model != "default" {
+            cmd.arg(format!("--model={model}"));
+        }
+        cmd.arg(&ctx);
+        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let output = cmd.output();
+        match output {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            Err(_) => String::new(),
+        }
+    }
 }
