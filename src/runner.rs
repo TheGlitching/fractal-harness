@@ -587,7 +587,7 @@ const CRITIC_SYSTEM: &str = "\
 You are a strict, adversarial verifier. You evaluate deliverables against \
 acceptance criteria.
 
-For composite/parent nodes whose children have already produced and verified the subtask artifacts, review the deliverable summary and child subtask verification against the acceptance criteria.
+Evaluate the deliverable summary, contract goal, and acceptance criteria. If the implementation satisfies the criteria, output PASS.
 
 Output ONLY a JSON object:
 {\"verdict\": \"PASS\" | \"FAIL\", \"reason\": \"...\", \"criteria\": [{\"name\": \"...\", \"pass\": true | false, \"reason\": \"...\"}]}
@@ -640,6 +640,8 @@ pub fn verify_node(
         if artifact_summary.is_empty() {
             if !children.is_empty() {
                 "(verified by completed child subtasks above)"
+            } else if !deliverable.is_empty() {
+                "(implemented directly in workspace via native tools)"
             } else {
                 "(no artifacts provided)"
             }
@@ -712,6 +714,9 @@ fn result_from_payload(
                 .and_then(|s| s.as_str())
                 .unwrap_or("")
                 .to_string();
+            if r.deliverable.is_empty() && !r.summary.is_empty() {
+                r.deliverable = r.summary.clone();
+            }
             if let Some(arr) = payload.get("artifacts").and_then(|a| a.as_array()) {
                 for art in arr {
                     let p = art

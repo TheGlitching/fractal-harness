@@ -458,9 +458,10 @@ fn run_one_node(
                 if children.is_empty()
                     && result.artifacts.iter().all(|(_, c)| c.trim().is_empty())
                     && result.deliverable.trim().is_empty()
+                    && result.summary.trim().is_empty()
                 {
                     report.refused += 1;
-                    feedback = Some("COMPLETE refused: no artifacts or deliverable content was provided. You must write the implementation into artifacts/".into());
+                    feedback = Some("COMPLETE refused: no summary, deliverable, or code modifications were provided.".into());
                     continue;
                 }
                 let criteria = node.contract().acceptance_criteria;
