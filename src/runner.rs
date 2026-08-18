@@ -217,25 +217,24 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
 
 This is a TWO-PHASE process. Do Phase 1 FIRST:
 
-PHASE 1 — DECIDE (do this before any implementation):
+PHASE 1 — DECIDE (before any implementation):
 - Read your contract. Assess: is this one small atomic job, or does it need decomposition?
-- If it needs decomposition: output a split JSON and STOP. Do NOT write any code, do NOT plan implementation — just name the subtasks.
-- If it is small enough: move to Phase 2.
-- RULE: if the contract mentions multiple features, files, layers, or components -> SPLIT. Only a truly single-file, single-concern contract should reach Phase 2.
+- If it needs decomposition: output a `split` JSON and STOP immediately. Do NOT create or edit any files.
+- If it is small enough for a single pass: move to Phase 2.
+- RULE: if the contract mentions multiple distinct modules, screens, or components -> SPLIT. Only a truly single-file/single-concern contract should reach Phase 2.
 
 PHASE 2 — EXECUTE (only if Phase 1 decided COMPLETE):
-- Implement or modify the contract directly for the repository.
-- Place all source files in `src/` (e.g. `src/components/CategoryFilterBar.tsx`) and test files in `tests/` (e.g. `tests/CategoryFilterBar.test.tsx`).
-- When done, output EXACTLY one JSON decision as the very last line with relative project file paths and their contents:
+- You have full access to your tools (`write`, `edit`, `read`, `bash`) directly in the project workspace.
+- Create, modify, and test the required files in their proper directories (e.g. `src/...`, `tests/...`).
+- Run tests or verification commands via `bash` if applicable to confirm your code works.
+- When done, output EXACTLY one JSON decision as the very last line with a concise summary:
 
-{\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\",\"artifacts\":[{\"path\":\"src/components/MyComponent.tsx\",\"content\":\"...\"}]}
+{\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\"}
 
 Or if decomposing (Phase 1):
 {\"verb\":\"split\",\"subtasks\":[{\"goal\":\"setup\",\"acceptance_criteria\":[\"has config\"],\"id\":\"setup\"},{\"goal\":\"cli\",\"acceptance_criteria\":[\"accepts args\"],\"id\":\"cli\",\"depends_on\":[\"setup\"]}]}
 
 {\"verb\":\"escalate\",\"assumption\":\"...\",\"evidence\":\"...\"}
-
-Always use fully qualified relative paths (`src/...`, `tests/...`, `package.json`).
 "
         .into(),
     );
@@ -400,15 +399,17 @@ pub fn run_node(
     }
 
     let executor = get_executor();
+    let project_root = store.tree_dir.parent().unwrap_or(&store.tree_dir);
     match executor.as_str() {
-        "omp" | "pi" => call_via_omp(&prompt, node.path.as_path(), model, on_output),
-        _ => call_via_omp(&prompt, node.path.as_path(), model, on_output),
+        "omp" | "pi" => call_via_omp(&prompt, node.path.as_path(), project_root, model, on_output),
+        _ => call_via_omp(&prompt, node.path.as_path(), project_root, model, on_output),
     }
 }
 
 pub fn call_via_omp(
     prompt: &str,
     node_path: &Path,
+    project_root: &Path,
     model: &str,
     on_output: OutputFn,
 ) -> std::result::Result<VerbResult, RunnerError> {
@@ -422,17 +423,19 @@ pub fn call_via_omp(
 
     let mut cmd = Command::new(&bin);
     cmd.arg("-p");
-    cmd.arg("--cwd").arg(node_path);
+    cmd.arg("--cwd").arg(project_root);
+    cmd.arg("--auto-approve");
+    cmd.arg("--approval-mode=yolo");
     if !model.is_empty() && model != "default" {
         cmd.arg(format!("--model={model}"));
     }
-    cmd.arg("Read CLAUDE.md. You are a node in a fractal task tree. Execute fully or split. Output your decision JSON as the last line.");
+    let node_instructions = format!("Read @{}. You are a node in a fractal task tree. Use your tools (write, edit, bash, read) directly in the project. Execute fully or split. Output your decision JSON as the very last line.", claude_path.display());
+    cmd.arg(node_instructions);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd
         .spawn()
         .map_err(|e| RunnerError::Other(format!("spawn: {e}")))?;
-
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let node_name = node_path
