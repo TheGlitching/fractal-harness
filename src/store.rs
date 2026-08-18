@@ -157,7 +157,7 @@ impl Contract {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Node {
     pub id: String,
     pub path: PathBuf,
