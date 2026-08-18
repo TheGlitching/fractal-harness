@@ -288,7 +288,8 @@ fn aggregatable(node: &Node, _by_id: &HashMap<&str, &Node>, nodes: &[Node]) -> b
         .iter()
         .filter(|n| n.parent.as_deref() == Some(&node.id))
         .collect();
-    !children.is_empty() && children.iter().all(|c| [COMPLETE, FAILED].contains(&c.status.as_str()))
+    // Only aggregate if all children are COMPLETE
+    !children.is_empty() && children.iter().all(|c| c.status == COMPLETE)
 }
 
 fn run_one_node(

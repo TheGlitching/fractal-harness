@@ -83,12 +83,30 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
     let disk_artifacts = node.find_artifacts();
     if !disk_artifacts.is_empty() {
         parts.push(format!(
-            "## Available artifacts on disk\n{}\n",
+            "## Available artifacts on disk in this node\n{}\n",
             disk_artifacts
                 .iter()
                 .map(|p| format!("- {}", p.display()))
                 .collect::<Vec<_>>()
                 .join("\n")
+        ));
+    }
+
+    // If node has children (aggregating mode), list children's statuses and summaries
+    let children = store.children_of(node).unwrap_or_default();
+    if !children.is_empty() {
+        let mut child_sections = Vec::new();
+        for c in &children {
+            let sum = if c.summary.is_empty() {
+                c.goal.clone()
+            } else {
+                c.summary.clone()
+            };
+            child_sections.push(format!("- **{}** (status: {}): {}", c.id, c.status, sum));
+        }
+        parts.push(format!(
+            "## Subtasks Completed by Children\n{}\n\nAll child subtasks have been executed. Your job is now to verify and AGGREGATE the results into a final deliverable summary for this milestone.\nOutput a COMPLETE JSON decision with a summary of the overall milestone deliverable.\n",
+            child_sections.join("\n")
         ));
     }
 
@@ -156,9 +174,9 @@ PHASE 1 — DECIDE (do this before any implementation):
 - If it is small enough: move to Phase 2.
 - RULE: if the contract mentions multiple features, files, layers, or components -> SPLIT. Only a truly single-file, single-concern contract should reach Phase 2.
 
-PHASE 2 — EXECUTE (only if Phase 1 decided COMPLETE):
-- Implement the contract.
-- Write ALL deliverable files into the `artifacts/` directory.
+PHASE 2 — EXECUTE (only if Phase 1 decided COMPLETE, or if aggregating completed children):
+- Implement the contract or synthesize completed subtasks.
+- Write deliverable files into the `artifacts/` directory if creating new code.
 - When done, output EXACTLY one JSON decision as the very last line with nothing after it:
 
 {\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\",\"artifacts\":[{\"path\":\"artifacts/file.py\",\"content\":\"...\"}]}
