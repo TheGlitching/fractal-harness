@@ -1,6 +1,6 @@
 use chrono::Utc;
 use regex::Regex;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,41 +28,40 @@ pub const FAILED: &str = "failed";
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS nodes (
-    id          TEXT PRIMARY KEY,
-    parent      TEXT,
-    depth       INTEGER NOT NULL,
-    status      TEXT NOT NULL,
-    goal        TEXT NOT NULL DEFAULT '',
-    summary     TEXT NOT NULL DEFAULT '',
-    depends_on  TEXT NOT NULL DEFAULT '[]',
-    dep_fp      TEXT NOT NULL DEFAULT '{}',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    id TEXT PRIMARY KEY,
+    parent TEXT,
+    depth INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    goal TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    depends_on TEXT NOT NULL DEFAULT '[]',
+    dep_fp TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS nodes_parent ON nodes(parent);
-CREATE INDEX IF NOT EXISTS nodes_status ON nodes(status);
-CREATE TABLE IF NOT EXISTS budget (
-    node_id     TEXT PRIMARY KEY,
-    parent      TEXT,
-    allowance   INTEGER NOT NULL DEFAULT 0,
-    calls       INTEGER NOT NULL DEFAULT 0,
-    fee_paid    INTEGER NOT NULL DEFAULT 0,
-    children    INTEGER NOT NULL DEFAULT 0,
-    debits      INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS steer_queue (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    command     TEXT NOT NULL,
-    payload     TEXT NOT NULL,
-    created_at  TEXT NOT NULL
-);
+
 CREATE TABLE IF NOT EXISTS global_entries (
-    id          TEXT PRIMARY KEY,
-    type        TEXT NOT NULL,
-    content     TEXT NOT NULL,
-    superseded  INTEGER NOT NULL DEFAULT 0,
-    supersedes  TEXT,
-    created_at  TEXT NOT NULL
+    id TEXT PRIMARY KEY,
+    entry_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    superseded INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS budget (
+    node_id TEXT PRIMARY KEY,
+    allowance INTEGER NOT NULL,
+    calls INTEGER NOT NULL DEFAULT 0,
+    debits INTEGER NOT NULL DEFAULT 0,
+    fee_paid INTEGER NOT NULL DEFAULT 0,
+    children INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS steer_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 "#;
 
@@ -70,7 +69,7 @@ fn now() -> String {
     Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Contract {
     pub goal: String,
     pub acceptance_criteria: Vec<String>,
@@ -102,7 +101,8 @@ impl Contract {
              ## depends_on\n\n{deps}",
             nid = node_id,
             p = parent.unwrap_or("(none)"),
-            model_id = &self.id,
+            depth = depth,
+            model_id = self.id,
             goal = self.goal.trim(),
             ac = bullets(&self.acceptance_criteria),
             iface = bullets(&self.interfaces),
@@ -117,50 +117,44 @@ impl Contract {
         for line in text.lines() {
             if line.starts_with("## ") {
                 current = Some(line[3..].trim().to_lowercase());
-                sections
-                    .entry(current.clone().unwrap_or_default())
-                    .or_default();
+                sections.entry(current.clone().unwrap_or_default()).or_default();
             } else if let Some(ref cur) = current {
-                sections
-                    .entry(cur.clone())
-                    .or_default()
-                    .push(line.to_string());
+                sections.entry(cur.clone()).or_default().push(line.to_string());
             }
         }
-        let body = |name: &str| -> String {
+        let unbullet = |key: &str| -> Vec<String> {
             sections
-                .get(name)
-                .map(|v| v.join("\n"))
-                .unwrap_or_default()
-                .trim()
-                .to_string()
-        };
-        let items = |name: &str| -> Vec<String> {
-            sections
-                .get(name)
-                .map(|v| {
-                    v.iter()
-                        .filter_map(|l| {
-                            let s = l.trim();
-                            if s.starts_with("- ") {
-                                Some(s[2..].trim().to_string())
-                            } else {
-                                None
-                            }
-                        })
+                .get(key)
+                .map(|lines| {
+                    lines
+                        .iter()
+                        .map(|l| l.trim())
+                        .filter(|l| l.starts_with('-'))
+                        .map(|l| l[1..].trim().to_string())
+                        .filter(|l| !l.is_empty() && l != "(none stated)")
                         .collect()
                 })
                 .unwrap_or_default()
         };
-        Contract {
+        let body = |key: &str| -> String {
+            sections
+                .get(key)
+                .map(|lines| lines.join("\n").trim().to_string())
+                .unwrap_or_default()
+        };
+        let mut c = Contract {
             goal: body("goal"),
-            acceptance_criteria: items("acceptance criteria"),
-            interfaces: items("interfaces"),
-            constraints: items("inherited constraints"),
-            depends_on: items("depends_on"),
-            id: body("id").trim().to_string(),
+            acceptance_criteria: unbullet("acceptance criteria"),
+            interfaces: unbullet("interfaces"),
+            constraints: unbullet("inherited constraints"),
+            id: body("id"),
+            depends_on: unbullet("depends_on"),
             allocation: 0,
+        };
+        if c.goal.is_empty() {
+            c.goal = body("goal");
         }
+        c
     }
 }
 
@@ -174,6 +168,7 @@ pub struct Node {
     pub goal: String,
     pub summary: String,
     pub depends_on: Vec<String>,
+    #[allow(dead_code)]
     pub dep_fp: String,
 }
 
@@ -184,8 +179,8 @@ impl Node {
     pub fn decisions_path(&self) -> PathBuf {
         self.path.join(DECISIONS_FILENAME)
     }
-    pub fn log_dir(&self) -> PathBuf {
-        self.path.join(LOG_DIRNAME)
+    pub fn log_path(&self) -> PathBuf {
+        self.path.join(LOG_DIRNAME).join(EVENTS_FILENAME)
     }
     pub fn artifacts_dir(&self) -> PathBuf {
         self.path.join(ARTIFACTS_DIRNAME)
@@ -194,50 +189,53 @@ impl Node {
         self.path.join(CHILDREN_DIRNAME)
     }
     pub fn contract(&self) -> Contract {
-        fs::read_to_string(self.contract_path())
-            .map(|t| Contract::parse(&t))
-            .unwrap_or_else(|_| Contract {
-                goal: String::new(),
+        if let Ok(text) = fs::read_to_string(self.contract_path()) {
+            Contract::parse(&text)
+        } else {
+            Contract {
+                goal: self.goal.clone(),
                 acceptance_criteria: vec![],
                 interfaces: vec![],
                 constraints: vec![],
-                id: String::new(),
-                depends_on: vec![],
+                id: self.id.clone(),
+                depends_on: self.depends_on.clone(),
                 allocation: 0,
-            })
+            }
+        }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct GlobalEntry {
-    pub entry_type: String,
-    pub content: String,
-    #[allow(dead_code)]
-    pub id: String,
-    #[allow(dead_code)]
-    pub superseded: bool,
-    #[allow(dead_code)]
-    pub supersedes: String,
-    #[allow(dead_code)]
-    pub created_at: String,
+    pub fn find_artifacts(&self) -> Vec<PathBuf> {
+        let mut results = Vec::new();
+        let dir = self.artifacts_dir();
+        if dir.exists() {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() {
+                        results.push(p);
+                    }
+                }
+            }
+        }
+        results
+    }
 }
 
 #[derive(Debug)]
 pub enum StoreError {
-    Uninitialised,
-    Sql(rusqlite::Error),
+    Sqlite(rusqlite::Error),
     Io(std::io::Error),
+    NotInitialised,
+    Json(serde_json::Error),
     Other(String),
 }
 
 impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StoreError::Uninitialised => {
-                write!(f, "project not initialised; run `fractal init <goal>` first")
-            }
-            StoreError::Sql(e) => write!(f, "sqlite: {e}"),
+            StoreError::Sqlite(e) => write!(f, "sqlite: {e}"),
             StoreError::Io(e) => write!(f, "io: {e}"),
+            StoreError::NotInitialised => write!(f, "project not initialised"),
+            StoreError::Json(e) => write!(f, "json: {e}"),
             StoreError::Other(s) => write!(f, "{s}"),
         }
     }
@@ -245,7 +243,7 @@ impl std::fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 impl From<rusqlite::Error> for StoreError {
     fn from(e: rusqlite::Error) -> Self {
-        StoreError::Sql(e)
+        StoreError::Sqlite(e)
     }
 }
 impl From<std::io::Error> for StoreError {
@@ -253,74 +251,98 @@ impl From<std::io::Error> for StoreError {
         StoreError::Io(e)
     }
 }
+impl From<serde_json::Error> for StoreError {
+    fn from(e: serde_json::Error) -> Self {
+        StoreError::Json(e)
+    }
+}
 
 pub struct Store {
+    pub root: PathBuf,
     pub tree_dir: PathBuf,
     pub global_dir: PathBuf,
     pub state_dir: PathBuf,
-    pub index_path: PathBuf,
-    connection: Mutex<Option<Connection>>,
+    db_path: PathBuf,
+    conn: Mutex<Option<Connection>>,
 }
 
 impl Store {
-    pub fn new(project: &Path) -> Self {
-        let project = project
-            .canonicalize()
-            .unwrap_or_else(|_| project.to_path_buf());
+    pub fn new(project_root: &Path) -> Self {
+        let root = project_root.to_path_buf();
+        let tree_dir = root.join(TREE_DIRNAME);
+        let global_dir = root.join(GLOBAL_DIRNAME);
+        let state_dir = root.join(STATE_DIRNAME);
+        let db_path = state_dir.join(INDEX_FILENAME);
         Store {
-            tree_dir: project.join(TREE_DIRNAME),
-            global_dir: project.join(GLOBAL_DIRNAME),
-            state_dir: project.join(STATE_DIRNAME),
-            index_path: project.join(STATE_DIRNAME).join(INDEX_FILENAME),
-            connection: Mutex::new(None),
+            root,
+            tree_dir,
+            global_dir,
+            state_dir,
+            db_path,
+            conn: Mutex::new(None),
         }
     }
 
-    fn with_conn<F, T>(&self, f: F) -> Result<T, StoreError>
+    fn with_conn<F, R>(&self, f: F) -> Result<R, StoreError>
     where
-        F: FnOnce(&Connection) -> Result<T, StoreError>,
+        F: FnOnce(&Connection) -> Result<R, StoreError>,
     {
-        let mut guard = self.connection.lock().unwrap();
+        let mut guard = self.conn.lock().unwrap();
         if guard.is_none() {
-            fs::create_dir_all(&self.state_dir)?;
-            let conn = Connection::open(&self.index_path)?;
-            conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-            conn.execute_batch(SCHEMA)?;
+            let conn = Connection::open(&self.db_path)?;
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+            )?;
             *guard = Some(conn);
         }
         f(guard.as_ref().unwrap())
     }
 
-    pub fn close(&self) {
-        if let Some(conn) = self.connection.lock().unwrap().take() {
-            let _ = conn.close();
-        }
-    }
-
-    pub fn initialised(&self) -> bool {
-        self.tree_dir
-            .join(ROOT_ID)
-            .join(CONTRACT_FILENAME)
-            .is_file()
-    }
-
     pub fn require_initialised(&self) -> Result<(), StoreError> {
-        if !self.initialised() {
-            Err(StoreError::Uninitialised)
-        } else {
-            Ok(())
+        if !self.db_path.exists() {
+            return Err(StoreError::NotInitialised);
         }
+        Ok(())
+    }
+
+    pub fn budget_enabled(&self) -> bool {
+        std::env::var("FRACTAL_BUDGET").is_ok()
+    }
+
+    pub fn split_fee(&self) -> i64 {
+        std::env::var("FRACTAL_SPLIT_FEE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(200)
     }
 
     pub fn init(&self, goal: &str) -> Result<Node, StoreError> {
-        if self.initialised() {
-            return Err(StoreError::Other("project already initialised".into()));
-        }
+        fs::create_dir_all(&self.tree_dir)?;
+        fs::create_dir_all(&self.global_dir)?;
+        fs::create_dir_all(&self.state_dir)?;
+
+        self.with_conn(|conn| {
+            conn.execute_batch(SCHEMA)?;
+            Ok(())
+        })?;
+
+        let root_node = Node {
+            id: ROOT_ID.to_string(),
+            path: self.tree_dir.join(ROOT_ID),
+            parent: None,
+            depth: 1,
+            status: PENDING.to_string(),
+            goal: goal.to_string(),
+            summary: String::new(),
+            depends_on: vec![],
+            dep_fp: "{}".into(),
+        };
+
         let contract = Contract {
-            goal: goal.trim().to_string(),
+            goal: goal.to_string(),
             acceptance_criteria: vec![
-                "the goal is delivered in full".into(),
-                "every leaf leaves an artifact behind".into(),
+                "the goal is delivered in full".to_string(),
+                "every leaf leaves an artifact behind".to_string(),
             ],
             interfaces: vec![],
             constraints: vec![],
@@ -328,59 +350,60 @@ impl Store {
             depends_on: vec![],
             allocation: 0,
         };
-        let node = Node {
-            id: ROOT_ID.to_string(),
-            path: self.tree_dir.join(ROOT_ID),
-            parent: None,
-            depth: 1,
-            status: PENDING.to_string(),
-            goal: contract.goal.clone(),
-            summary: String::new(),
-            depends_on: vec![],
-            dep_fp: "{}".into(),
-        };
-        Self::materialise_node(&node, &contract)?;
+
+        Self::materialise_node(&root_node, &contract)?;
+
+        let stamp = now();
         self.with_conn(|conn| {
-            Self::insert_node(conn, &node)?;
-            if let Ok(b) = std::env::var("FRACTAL_BUDGET") {
-                if let Ok(a) = b.parse::<i64>() {
-                    conn.execute(
-                        "INSERT OR IGNORE INTO budget(node_id,parent,allowance) VALUES(?1,NULL,?2)",
-                        params![ROOT_ID, a],
-                    )?;
-                }
+            Self::insert_node(conn, &root_node)?;
+            if self.budget_enabled() {
+                let initial_budget: i64 = std::env::var("FRACTAL_BUDGET")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(100_000);
+                conn.execute(
+                    "INSERT OR REPLACE INTO budget (node_id, allowance, calls, debits, fee_paid, children) VALUES (?1, ?2, 0, 0, 0, 0)",
+                    params![ROOT_ID, initial_budget],
+                )?;
             }
+            conn.execute(
+                "INSERT INTO nodes(id, parent, depth, status, goal, summary, depends_on, dep_fp, created_at, updated_at) \
+                 VALUES(?1, NULL, 1, ?2, ?3, '', '[]', '{}', ?4, ?4) \
+                 ON CONFLICT(id) DO UPDATE SET status=?2, goal=?3, updated_at=?4",
+                params![ROOT_ID, PENDING, goal, stamp],
+            )?;
             Ok(())
         })?;
-        Ok(node)
+
+        self.append_decision(&root_node, "node created")?;
+        Ok(root_node)
     }
 
     fn materialise_node(node: &Node, contract: &Contract) -> Result<(), StoreError> {
         fs::create_dir_all(&node.path)?;
-        for sd in &[LOG_DIRNAME, ARTIFACTS_DIRNAME, CHILDREN_DIRNAME] {
-            fs::create_dir_all(node.path.join(sd))?;
-        }
-        fs::write(
-            node.contract_path(),
-            contract.render(&node.id, node.depth, node.parent.as_deref()),
-        )?;
+        fs::create_dir_all(node.log_path().parent().unwrap())?;
+        fs::create_dir_all(node.artifacts_dir())?;
+        fs::create_dir_all(node.children_dir())?;
+
+        let contract_content = contract.render(&node.id, node.depth, node.parent.as_deref());
+        fs::write(node.contract_path(), contract_content)?;
+
         if !node.decisions_path().exists() {
-            fs::write(
-                node.decisions_path(),
-                format!(
-                    "# Decisions: {}\n\nAppend-only semantic memory of this node.\n\n- {} node created\n",
-                    node.id,
-                    now()
-                ),
-            )?;
+            let header = format!(
+                "# Decisions: {}\n\nAppend-only semantic memory of this node.\n\n",
+                node.id
+            );
+            fs::write(node.decisions_path(), header)?;
         }
         Ok(())
     }
 
     fn insert_node(conn: &Connection, node: &Node) -> Result<(), StoreError> {
         let stamp = now();
+        let deps = serde_json::to_string(&node.depends_on)?;
         conn.execute(
-            "INSERT OR IGNORE INTO nodes (id,parent,depth,status,goal,summary,depends_on,dep_fp,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            "INSERT OR IGNORE INTO nodes(id, parent, depth, status, goal, summary, depends_on, dep_fp, created_at, updated_at) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
             params![
                 node.id,
                 node.parent,
@@ -388,10 +411,9 @@ impl Store {
                 node.status,
                 node.goal,
                 node.summary,
-                serde_json::to_string(&node.depends_on).unwrap_or_default(),
+                deps,
                 node.dep_fp,
-                &stamp,
-                &stamp
+                stamp,
             ],
         )?;
         Ok(())
@@ -402,30 +424,25 @@ impl Store {
         parent: &Node,
         contracts: &[Contract],
     ) -> Result<Vec<Node>, StoreError> {
-        fs::create_dir_all(parent.children_dir())?;
-        let existing = Self::child_dirs(&parent.path).len();
+        if contracts.is_empty() {
+            return Ok(vec![]);
+        }
+        let existing = self.children_of(parent)?.len();
         let mut children = Vec::new();
-
         let mut id_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        if let Ok(siblings) = self.children_of(parent) {
-            for s in &siblings {
-                let cid = s.contract().id;
-                if !cid.is_empty() {
-                    id_map.insert(cid, s.id.clone());
-                }
-            }
-        }
+
         for (i, c) in contracts.iter().enumerate() {
             let cid = format!("{}-{:02}", parent.id, existing + i + 1);
             if !c.id.is_empty() {
                 id_map.insert(c.id.clone(), cid.clone());
             }
+            id_map.insert(format!("{}", i + 1), cid.clone());
+            id_map.insert(format!("{:02}", i + 1), cid.clone());
+            id_map.insert(cid.clone(), cid.clone());
         }
 
-        // Parent constraints are automatically inherited down
-        let parent_contract = parent.contract();
-        let inherited_constraints = parent_contract.constraints.clone();
+        let inherited_constraints = parent.contract().constraints;
 
         for (i, c) in contracts.iter().enumerate() {
             let cid = format!("{}-{:02}", parent.id, existing + i + 1);
@@ -487,12 +504,6 @@ impl Store {
         artifacts: &[(String, String)],
     ) -> Result<(), StoreError> {
         self.write_artifacts(node, artifacts, deliverable)?;
-        let smr = if summary.is_empty() {
-            "(no summary given)"
-        } else {
-            summary
-        };
-        self.append_decision(node, &format!("completed: {smr}"))?;
         let stamp = now();
         self.with_conn(|conn| {
             conn.execute(
@@ -500,7 +511,8 @@ impl Store {
                 params![COMPLETE, summary.trim(), &stamp, node.id],
             )?;
             Ok(())
-        })
+        })?;
+        Ok(())
     }
 
     pub fn set_status(&self, node: &Node, status: &str) -> Result<(), StoreError> {
@@ -510,7 +522,8 @@ impl Store {
                 params![status, &now(), node.id],
             )?;
             Ok(())
-        })
+        })?;
+        Ok(())
     }
 
     pub fn write_artifacts(
@@ -539,45 +552,38 @@ impl Store {
         Ok(())
     }
 
-    fn safe_path(raw: &str) -> PathBuf {
-        let cleaned = raw.trim().replace('\\', "/");
-        let parts: Vec<&str> = cleaned
-            .split('/')
-            .filter(|p| !p.is_empty() && *p != "." && *p != ".." && !p.contains(':'))
-            .collect();
-        if parts.is_empty() {
-            return PathBuf::from("artifact.txt");
+    fn safe_path(p: &str) -> PathBuf {
+        let p = p.strip_prefix("artifacts/").unwrap_or(p);
+        let mut out = PathBuf::new();
+        for comp in Path::new(p).components() {
+            if let std::path::Component::Normal(c) = comp {
+                out.push(c);
+            }
         }
-        parts.iter().collect()
+        out
     }
 
-    pub fn append_decision(&self, node: &Node, entry: &str) -> Result<(), StoreError> {
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(node.decisions_path())?;
-        writeln!(f, "- {} {}", now(), entry.trim())?;
+    pub fn append_decision(&self, node: &Node, text: &str) -> Result<(), StoreError> {
+        let line = format!("- {} {}\n", now(), text.trim());
+        let path = node.decisions_path();
+        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        file.write_all(line.as_bytes())?;
         Ok(())
     }
 
-    pub fn append_log(
-        &self,
-        node: &Node,
-        record: &serde_json::Value,
-    ) -> Result<(), StoreError> {
-        fs::create_dir_all(node.log_dir())?;
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(node.log_dir().join(EVENTS_FILENAME))?;
-        let mut rec = record.clone();
-        if let serde_json::Value::Object(ref mut m) = rec {
-            m.entry("at")
-                .or_insert_with(|| serde_json::Value::String(now()));
-            m.entry("node")
-                .or_insert_with(|| serde_json::Value::String(node.id.clone()));
+    pub fn append_log(&self, node: &Node, record: &serde_json::Value) -> Result<(), StoreError> {
+        let mut obj = record.clone();
+        if let Some(m) = obj.as_object_mut() {
+            m.insert("node".into(), serde_json::Value::String(node.id.clone()));
+            m.insert("at".into(), serde_json::Value::String(now()));
         }
-        writeln!(f, "{}", serde_json::to_string(&rec).unwrap_or_default())?;
+        let line = serde_json::to_string(&obj)?;
+        let path = node.log_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        file.write_all(format!("{line}\n").as_bytes())?;
         Ok(())
     }
 
@@ -634,7 +640,8 @@ impl Store {
                 params![command, payload, &stamp],
             )?;
             Ok(())
-        })
+        })?;
+        Ok(())
     }
 
     pub fn drain_steer_queue(&self) -> Result<Vec<(i64, String, String)>, StoreError> {
@@ -651,58 +658,51 @@ impl Store {
         })
     }
 
-    fn child_dirs(path: &Path) -> Vec<PathBuf> {
-        let cdir = path.join(CHILDREN_DIRNAME);
-        if !cdir.is_dir() {
-            return vec![];
-        }
-        let mut dirs: Vec<PathBuf> = fs::read_dir(&cdir)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.path())
-            .collect();
-        dirs.sort();
-        dirs
-    }
-
     fn walk_disk(&self) -> Vec<(PathBuf, String, Option<String>, i64)> {
+        let mut results = Vec::new();
         let root = self.tree_dir.join(ROOT_ID);
-        if !root.is_dir() {
-            return vec![];
+        if root.exists() {
+            Self::walk_disk_rec(&root, ROOT_ID, None, 1, &mut results);
         }
-        let mut result = Vec::new();
-        Self::visit_disk(&root, None, 1, &mut result);
-        result
+        results
     }
 
-    fn visit_disk(
-        path: &Path,
-        parent: Option<String>,
+    fn walk_disk_rec(
+        dir: &Path,
+        node_id: &str,
+        parent: Option<&str>,
         depth: i64,
         out: &mut Vec<(PathBuf, String, Option<String>, i64)>,
     ) {
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-        out.push((path.to_path_buf(), name.clone(), parent, depth));
-        for child in Self::child_dirs(path) {
-            Self::visit_disk(&child, Some(name.clone()), depth + 1, out);
+        out.push((dir.to_path_buf(), node_id.to_string(), parent.map(|s| s.to_string()), depth));
+        let cdir = dir.join(CHILDREN_DIRNAME);
+        for child_dir in Self::child_dirs(&cdir) {
+            let cid = child_dir.file_name().unwrap().to_string_lossy().to_string();
+            Self::walk_disk_rec(&child_dir, &cid, Some(node_id), depth + 1, out);
         }
     }
 
-    fn goal_on_disk(path: &Path) -> String {
-        let cf = path.join(CONTRACT_FILENAME);
-        if !cf.is_file() {
-            return String::new();
+    fn child_dirs(dir: &Path) -> Vec<PathBuf> {
+        let mut list = Vec::new();
+        if let Ok(entries) = fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    list.push(p);
+                }
+            }
         }
-        fs::read_to_string(&cf)
-            .ok()
-            .map(|t| Contract::parse(&t).goal)
-            .unwrap_or_default()
+        list.sort();
+        list
+    }
+
+    fn goal_on_disk(node_dir: &Path) -> String {
+        let cp = node_dir.join(CONTRACT_FILENAME);
+        if let Ok(text) = fs::read_to_string(&cp) {
+            Contract::parse(&text).goal
+        } else {
+            String::new()
+        }
     }
 
     pub fn reconcile(&self) -> Result<(), StoreError> {
@@ -805,51 +805,25 @@ impl Store {
     }
 
     pub fn children_of(&self, node: &Node) -> Result<Vec<Node>, StoreError> {
-        Ok(self
-            .walk()?
-            .into_iter()
-            .filter(|n| n.parent.as_deref() == Some(&node.id))
-            .collect())
+        let all = self.walk()?;
+        Ok(all.into_iter().filter(|n| n.parent.as_deref() == Some(&node.id)).collect())
     }
 
-    pub fn ancestors(&self, node: &Node) -> Result<Vec<Node>, StoreError> {
-        let by_id: std::collections::HashMap<_, _> =
-            self.walk()?.into_iter().map(|n| (n.id.clone(), n)).collect();
-        let mut chain = Vec::new();
-        let mut cur = by_id.get(&node.id);
-        while let Some(n) = cur {
-            if let Some(ref pid) = n.parent {
-                if let Some(p) = by_id.get(pid) {
-                    chain.push(p.clone());
-                    cur = Some(p);
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
+    pub fn generate_digest(&self) -> Result<String, StoreError> {
+        let nodes = self.walk()?;
+        let mut out = String::from("# Digest\n\n## Done\n");
+        for d in nodes.iter().filter(|n| n.status == COMPLETE) {
+            out.push_str(&format!("- **{}**: {}\n", d.id, d.goal.lines().next().unwrap_or(&d.goal)));
         }
-        chain.reverse();
-        Ok(chain)
-    }
-
-    pub fn budget_enabled(&self) -> bool {
-        self.with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT COUNT(*) FROM budget WHERE node_id=?1",
-                params![ROOT_ID],
-                |r| r.get::<_, i64>(0),
-            )?)
-        })
-        .map(|n| n > 0)
-        .unwrap_or(false)
-    }
-
-    pub fn split_fee(&self) -> i64 {
-        std::env::var("FRACTAL_SPLIT_FEE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(200)
+        out.push_str("\n## Blocked\n");
+        for b in nodes.iter().filter(|n| n.status == SUSPENDED || n.status == FAILED) {
+            out.push_str(&format!("- **{}** ({}): {}\n", b.id, b.status, b.goal.lines().next().unwrap_or(&b.goal)));
+        }
+        out.push_str("\n## Next\n");
+        for p in nodes.iter().filter(|n| n.status == PENDING) {
+            out.push_str(&format!("- **{}**: {}\n", p.id, p.goal.lines().next().unwrap_or(&p.goal)));
+        }
+        Ok(out)
     }
 
     pub fn retry(&self, node_id: &str) -> Result<usize, StoreError> {
@@ -910,128 +884,70 @@ impl Store {
         &self,
         entry_type: &str,
         content: &str,
-        supersedes: &str,
+        supersedes: &Option<String>,
     ) -> Result<String, StoreError> {
         let eid = self.next_global_id()?;
         let stamp = now();
-        if !supersedes.is_empty() {
-            self.with_conn(|conn| {
-                conn.execute(
-                    "UPDATE global_entries SET superseded=1 WHERE id=?1",
-                    params![supersedes],
-                )?;
-                Ok(())
-            })?;
+        if let Some(sup) = supersedes {
+            if !sup.is_empty() {
+                self.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE global_entries SET superseded=1 WHERE id=?1",
+                        params![sup],
+                    )?;
+                    Ok(())
+                })?;
+            }
         }
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO global_entries(id,type,content,supersedes,created_at) VALUES(?1,?2,?3,?4,?5)",
-                params![eid, entry_type, content, supersedes, &stamp],
+                "INSERT INTO global_entries(id, entry_type, content, superseded, created_at) VALUES(?1, ?2, ?3, 0, ?4)",
+                params![eid, entry_type, content, stamp],
             )?;
             Ok(())
         })?;
-        fs::create_dir_all(&self.global_dir)?;
-        fs::write(
-            self.global_dir.join(format!("{eid}.md")),
-            format!("# {entry_type}: {eid}\n\n{content}\n"),
-        )?;
+        let entry_dir = self.global_dir.join(&eid);
+        fs::create_dir_all(&entry_dir)?;
+        let header = format!("# Global Entry: {eid}\n\ntype: {entry_type}\ncreated: {stamp}\n\n");
+        fs::write(entry_dir.join("entry.md"), format!("{header}{content}\n"))?;
         Ok(eid)
     }
 
-    pub fn retrieve_global(&self, query: &str, k: usize) -> Result<Vec<GlobalEntry>, StoreError> {
-        let entries: Vec<GlobalEntry> = self.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT * FROM global_entries WHERE superseded=0")?;
+    pub fn retrieve_global(&self, query: &str, limit: usize) -> Result<Vec<GlobalEntry>, StoreError> {
+        let terms: Vec<String> = query
+            .split_whitespace()
+            .map(|s| s.to_lowercase())
+            .filter(|s| s.len() > 2)
+            .collect();
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, entry_type, content FROM global_entries WHERE superseded=0 ORDER BY created_at DESC",
+            )?;
             let rows = stmt.query_map([], |row| {
                 Ok(GlobalEntry {
                     id: row.get(0)?,
                     entry_type: row.get(1)?,
                     content: row.get(2)?,
-                    superseded: row.get::<_, i64>(3)? != 0,
-                    supersedes: row.get::<_, String>(4).unwrap_or_default(),
-                    created_at: row.get(5)?,
                 })
             })?;
-            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-        })?;
-        if entries.is_empty() {
-            return Ok(vec![]);
-        }
-        let ql = query.to_lowercase();
-        let keywords: Vec<&str> = ql
-            .split_whitespace()
-            .filter(|w| w.len() > 1)
-            .collect();
-        let mut scored: Vec<(i64, GlobalEntry)> = entries
-            .into_iter()
-            .map(|e| {
-                let cl = e.content.to_lowercase();
-                let s = keywords.iter().filter(|kw| cl.contains(*kw)).count() as i64;
-                (s, e)
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-        let top: Vec<GlobalEntry> = scored.into_iter().take(k).map(|(_, e)| e).collect();
-        Ok(top)
-    }
-
-    #[allow(dead_code)]
-    pub fn has_running(&self) -> Result<bool, StoreError> {
-        self.with_conn(|c| {
-            Ok(c.query_row(
-                "SELECT COUNT(*) FROM nodes WHERE status=?1",
-                params![RUNNING],
-                |r| r.get::<_, i64>(0),
-            )?)
+            let mut scored: Vec<(usize, GlobalEntry)> = Vec::new();
+            for r in rows {
+                let entry = r?;
+                let lower = entry.content.to_lowercase();
+                let score = terms.iter().filter(|t| lower.contains(t.as_str())).count();
+                if score > 0 || terms.is_empty() {
+                    scored.push((score, entry));
+                }
+            }
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            Ok(scored.into_iter().take(limit).map(|s| s.1).collect())
         })
-        .map(|n| n > 0)
-    }
-
-    pub fn generate_digest(&self) -> Result<String, StoreError> {
-        self.reconcile()?;
-        let nodes = self.walk()?;
-        let tag_re = Regex::new(r"\[N:([A-Za-z0-9_]+)\]").unwrap();
-        let mut done = Vec::new();
-        let mut blocked = Vec::new();
-        let mut pending = Vec::new();
-        for n in &nodes {
-            let tag = tag_re.find(&n.goal).map(|m| format!(" [N:{}]", m.as_str()));
-            let label = format!("{} [{}]{} {}", n.id, n.status, tag.unwrap_or_default(), n.goal);
-            match n.status.as_str() {
-                COMPLETE => done.push(label),
-                FAILED | SUSPENDED => blocked.push(label),
-                _ => pending.push(label),
-            }
-        }
-        let mut out = String::from("# Digest\n\n## Done\n");
-        if done.is_empty() {
-            out.push_str("- (no completed tasks)\n");
-        } else {
-            for d in &done {
-                out.push_str(&format!("- {d}\n"));
-            }
-        }
-        out.push_str("\n## Blocked\n");
-        if blocked.is_empty() {
-            out.push_str("- (no blocked tasks)\n");
-        } else {
-            for b in &blocked {
-                out.push_str(&format!("- {b}\n"));
-            }
-        }
-        out.push_str("\n## Next\n");
-        if pending.is_empty() {
-            out.push_str("- All tasks completed. No pending work.\n");
-        } else {
-            for n in &pending {
-                out.push_str(&format!("- {n}\n"));
-            }
-        }
-        Ok(out)
     }
 }
 
-impl Drop for Store {
-    fn drop(&mut self) {
-        self.close();
-    }
+#[derive(Debug, Clone)]
+pub struct GlobalEntry {
+    pub id: String,
+    pub entry_type: String,
+    pub content: String,
 }
