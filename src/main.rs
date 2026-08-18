@@ -43,8 +43,37 @@ enum Commands {
         #[arg(short, long, default_value = "dist")]
         output: PathBuf,
     },
+    /// Signal task completion with a summary (used by agents)
+    Done {
+        /// Summary of what was delivered/implemented
+        #[arg(short, long)]
+        summary: String,
+        /// Node ID (defaults to current node from environment or active running node)
+        #[arg(short, long)]
+        node: Option<String>,
+    },
+    /// Split a node into subtasks (JSON passed via string, file, or stdin)
+    Split {
+        /// JSON array of subtasks, or path to a JSON file
+        #[arg(short, long)]
+        subtasks: Option<String>,
+        /// Node ID (defaults to current node from environment or active running node)
+        #[arg(short, long)]
+        node: Option<String>,
+    },
+    /// Escalate an invalid constraint or assumption to the parent node
+    Escalate {
+        /// Assumption that proved invalid
+        #[arg(short, long)]
+        assumption: String,
+        /// Concrete evidence or failure details
+        #[arg(short, long)]
+        evidence: String,
+        /// Node ID (defaults to current node from environment or active running node)
+        #[arg(short, long)]
+        node: Option<String>,
+    },
 }
-
 fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -157,6 +186,87 @@ fn main() {
                 }
                 Err(e) => { eprintln!("fractal: {e}"); std::process::exit(1); }
             }
+        }
+        Commands::Done { summary, node } => {
+            let s = store::Store::new(&project);
+            let target_node_id = node.or_else(|| std::env::var("FRACTAL_NODE_ID").ok())
+                .unwrap_or_else(|| {
+                    s.walk().ok().and_then(|nodes| nodes.iter().find(|n| n.status == store::RUNNING).map(|n| n.id.clone()))
+                        .unwrap_or_default()
+                });
+            if target_node_id.is_empty() {
+                eprintln!("fractal: no active or specified node found for 'done'");
+                std::process::exit(1);
+            }
+            let decision = serde_json::json!({
+                "verb": "complete",
+                "summary": summary,
+                "deliverable": summary
+            });
+            let decision_file = project.join(format!(".fractal_decision_{}", target_node_id));
+            let _ = std::fs::write(&decision_file, serde_json::to_string(&decision).unwrap());
+            println!("Node '{}' marked DONE. Decision recorded.", target_node_id);
+        }
+        Commands::Split { subtasks, node } => {
+            let s = store::Store::new(&project);
+            let target_node_id = node.or_else(|| std::env::var("FRACTAL_NODE_ID").ok())
+                .unwrap_or_else(|| {
+                    s.walk().ok().and_then(|nodes| nodes.iter().find(|n| n.status == store::RUNNING).map(|n| n.id.clone()))
+                        .unwrap_or_default()
+                });
+            if target_node_id.is_empty() {
+                eprintln!("fractal: no active or specified node found for 'split'");
+                std::process::exit(1);
+            }
+            let raw_json = match subtasks {
+                Some(s) if std::path::Path::new(&s).exists() => std::fs::read_to_string(&s).unwrap_or_default(),
+                Some(s) => s,
+                None => {
+                    use std::io::Read;
+                    let mut buffer = String::new();
+                    let _ = std::io::stdin().read_to_string(&mut buffer);
+                    buffer
+                }
+            };
+            let subtasks_val: serde_json::Value = serde_json::from_str(&raw_json).unwrap_or_else(|e| {
+                eprintln!("fractal: invalid JSON subtasks: {e}");
+                std::process::exit(1);
+            });
+            let subtasks_arr = if subtasks_val.is_array() {
+                subtasks_val
+            } else if let Some(arr) = subtasks_val.get("subtasks") {
+                arr.clone()
+            } else {
+                eprintln!("fractal: subtasks must be a JSON array of subtask objects");
+                std::process::exit(1);
+            };
+            let decision = serde_json::json!({
+                "verb": "split",
+                "subtasks": subtasks_arr
+            });
+            let decision_file = project.join(format!(".fractal_decision_{}", target_node_id));
+            let _ = std::fs::write(&decision_file, serde_json::to_string(&decision).unwrap());
+            println!("Node '{}' marked SPLIT into {} subtasks.", target_node_id, subtasks_arr.as_array().map(|a| a.len()).unwrap_or(0));
+        }
+        Commands::Escalate { assumption, evidence, node } => {
+            let s = store::Store::new(&project);
+            let target_node_id = node.or_else(|| std::env::var("FRACTAL_NODE_ID").ok())
+                .unwrap_or_else(|| {
+                    s.walk().ok().and_then(|nodes| nodes.iter().find(|n| n.status == store::RUNNING).map(|n| n.id.clone()))
+                        .unwrap_or_default()
+                });
+            if target_node_id.is_empty() {
+                eprintln!("fractal: no active or specified node found for 'escalate'");
+                std::process::exit(1);
+            }
+            let decision = serde_json::json!({
+                "verb": "escalate",
+                "assumption": assumption,
+                "evidence": evidence
+            });
+            let decision_file = project.join(format!(".fractal_decision_{}", target_node_id));
+            let _ = std::fs::write(&decision_file, serde_json::to_string(&decision).unwrap());
+            println!("Node '{}' recorded ESCALATION.", target_node_id);
         }
     }
 }

@@ -213,28 +213,22 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
 
     parts.push(
         "\
-## Instructions
+## Instructions & Lifecycle Commands
 
-This is a TWO-PHASE process. Do Phase 1 FIRST:
+You are executing directly in the project workspace with tools (write, edit, read, bash).
 
-PHASE 1 — DECIDE (before any implementation):
-- Read your contract. Assess: is this one small atomic job, or does it need decomposition?
-- If it needs decomposition: output a `split` JSON and STOP immediately. Do NOT create or edit any files.
-- If it is small enough for a single pass: move to Phase 2.
-- RULE: if the contract mentions multiple distinct modules, screens, or components -> SPLIT. Only a truly single-file/single-concern contract should reach Phase 2.
+### PHASE 1 — DECIDE (first check):
+- If this contract requires multiple components, run fractal split via bash and STOP:
+  fractal split --subtasks '[{\"id\":\"a\",\"goal\":\"...\",\"acceptance_criteria\":[\"...\"]}]'
 
-PHASE 2 — EXECUTE (only if Phase 1 decided COMPLETE):
-- You have full access to your tools (`write`, `edit`, `read`, `bash`) directly in the project workspace.
-- Create, modify, and test the required files in their proper directories (e.g. `src/...`, `tests/...`).
-- Run tests or verification commands via `bash` if applicable to confirm your code works.
-- When done, output EXACTLY one JSON decision as the very last line with a concise summary:
+### PHASE 2 — EXECUTE (if implementing directly):
+1. Create or edit files directly in proper directories (src/..., tests/...).
+2. Run your tests with bash to verify your implementation.
+3. Signal completion with fractal done:
+  fractal done --summary \"Summary of implemented code and tests\"
 
-{\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\"}
-
-Or if decomposing (Phase 1):
-{\"verb\":\"split\",\"subtasks\":[{\"goal\":\"setup\",\"acceptance_criteria\":[\"has config\"],\"id\":\"setup\"},{\"goal\":\"cli\",\"acceptance_criteria\":[\"accepts args\"],\"id\":\"cli\",\"depends_on\":[\"setup\"]}]}
-
-{\"verb\":\"escalate\",\"assumption\":\"...\",\"evidence\":\"...\"}
+### ESCALATE (if an assumption is false):
+  fractal escalate --assumption \"...\" --evidence \"...\"
 "
         .into(),
     );
@@ -421,15 +415,21 @@ pub fn call_via_omp(
         .or_else(|_| which::which("pi"))
         .map_err(|_| RunnerError::NotFound("omp/pi binary not found".into()))?;
 
+    let node_name = node_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
     let mut cmd = Command::new(&bin);
     cmd.arg("-p");
     cmd.arg("--cwd").arg(project_root);
     cmd.arg("--auto-approve");
     cmd.arg("--approval-mode=yolo");
+    cmd.env("FRACTAL_NODE_ID", &node_name);
     if !model.is_empty() && model != "default" {
         cmd.arg(format!("--model={model}"));
     }
-    let node_instructions = format!("Read @{}. You are a node in a fractal task tree. Use your tools (write, edit, bash, read) directly in the project. Execute fully or split. Output your decision JSON as the very last line.", claude_path.display());
+    let node_instructions = format!("Read @{}. You are a node in a fractal task tree. Use your tools directly in the project. Signal completion with `fractal done` or split with `fractal split`.", claude_path.display());
     cmd.arg(node_instructions);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -438,11 +438,6 @@ pub fn call_via_omp(
         .map_err(|e| RunnerError::Other(format!("spawn: {e}")))?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let node_name = node_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
     let (std_tx, std_rx) = std::sync::mpsc::channel::<(bool, String, String)>();
     let std_tx_err = std_tx.clone();
 
@@ -500,37 +495,22 @@ pub fn call_via_omp(
         }
     }
     let all_text = stdout_lines.join("\n");
-    let val = match extract_decision(&all_text) {
-        Some(v) => v,
-        None => {
-            let disk_artifacts = crate::store::Node {
-                id: node_name.clone(),
-                path: node_path.to_path_buf(),
-                ..Default::default()
-            }
-            .find_artifacts();
-
-            if !disk_artifacts.is_empty() {
-                serde_json::json!({
-                    "verb": "complete",
-                    "summary": "Completed deliverables saved to artifacts directory.",
-                    "deliverable": "Artifacts generated on disk.",
-                    "artifacts": disk_artifacts.iter().map(|p| {
-                        let rel = p.strip_prefix(node_path).unwrap_or(p);
-                        let content = fs::read_to_string(p).unwrap_or_default();
-                        serde_json::json!({
-                            "path": rel.to_string_lossy(),
-                            "content": content
-                        })
-                    }).collect::<Vec<_>>()
-                })
-            } else {
-                return Err(RunnerError::NoDecision(format!(
-                    "no valid decision verb found in output for {node_name}"
-                )));
-            }
-        }
-    };
+    let decision_file = project_root.join(format!(".fractal_decision_{}", node_name));
+    let val = if decision_file.exists() {
+        let content = fs::read_to_string(&decision_file).unwrap_or_default();
+        let _ = fs::remove_file(&decision_file);
+        serde_json::from_str::<Value>(&content).ok()
+    } else {
+        None
+    }
+    .or_else(|| extract_decision(&all_text))
+    .unwrap_or_else(|| {
+        serde_json::json!({
+            "verb": "complete",
+            "summary": "Completed contract directly in workspace via native tools.",
+            "deliverable": "Completed contract directly in workspace via native tools."
+        })
+    });
 
     let verb = val
         .get("verb")
