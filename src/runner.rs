@@ -225,16 +225,17 @@ PHASE 1 — DECIDE (do this before any implementation):
 
 PHASE 2 — EXECUTE (only if Phase 1 decided COMPLETE):
 - Implement or modify the contract directly for the repository.
+- Place all source files in `src/` (e.g. `src/components/CategoryFilterBar.tsx`) and test files in `tests/` (e.g. `tests/CategoryFilterBar.test.tsx`).
 - When done, output EXACTLY one JSON decision as the very last line with relative project file paths and their contents:
 
-{\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\",\"artifacts\":[{\"path\":\"src/file.ts\",\"content\":\"...\"}]}
+{\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\",\"artifacts\":[{\"path\":\"src/components/MyComponent.tsx\",\"content\":\"...\"}]}
 
 Or if decomposing (Phase 1):
 {\"verb\":\"split\",\"subtasks\":[{\"goal\":\"setup\",\"acceptance_criteria\":[\"has config\"],\"id\":\"setup\"},{\"goal\":\"cli\",\"acceptance_criteria\":[\"accepts args\"],\"id\":\"cli\",\"depends_on\":[\"setup\"]}]}
 
 {\"verb\":\"escalate\",\"assumption\":\"...\",\"evidence\":\"...\"}
 
-Modify or create files directly with relative paths from the project root.
+Always use fully qualified relative paths (`src/...`, `tests/...`, `package.json`).
 "
         .into(),
     );

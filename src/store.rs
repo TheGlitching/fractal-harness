@@ -572,6 +572,19 @@ impl Store {
                 out.push(c);
             }
         }
+        // If a leaf gave a bare file (e.g. "CategoryFilterBar.tsx" or "Component.test.tsx")
+        // route it automatically into src/ or tests/ if not already qualified
+        if out.components().count() == 1 {
+            let name = out.to_string_lossy().to_string();
+            if name.ends_with(".test.ts") || name.ends_with(".test.tsx") || name.ends_with(".spec.ts") || name.ends_with(".spec.tsx") {
+                return PathBuf::from("tests").join(&name);
+            } else if name.ends_with(".ts") || name.ends_with(".tsx") || name.ends_with(".css") || name.ends_with(".html") {
+                // Keep root configs at root
+                if !["vite.config.ts", "tailwind.config.ts", "postcss.config.js", "tsconfig.json", "package.json"].contains(&name.as_str()) {
+                    return PathBuf::from("src").join(&name);
+                }
+            }
+        }
         out
     }
     pub fn unified_dir(&self) -> PathBuf {
