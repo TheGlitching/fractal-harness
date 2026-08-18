@@ -317,6 +317,7 @@ fn run_project(project: &PathBuf, goal: &str) {
         selected_idx: 0,
         mode: tui::TuiMode::Normal,
         prompt_message: None,
+        inspect_scroll: 0,
     }));
 
     let project_path = project.clone();

@@ -1,5 +1,4 @@
 use chrono::Utc;
-use regex::Regex;
 use rusqlite::{params, Connection};
 use std::fs;
 use std::io::Write;

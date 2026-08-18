@@ -83,6 +83,7 @@ pub struct TuiState {
     pub selected_idx: usize,
     pub mode: TuiMode,
     pub prompt_message: Option<String>,
+    pub inspect_scroll: usize,
 }
 
 pub struct Tui {
@@ -140,6 +141,7 @@ impl Tui {
                             }
                             KeyCode::Char('i') | KeyCode::Char('?') | KeyCode::Enter => {
                                 s.mode = TuiMode::Inspect;
+                                s.inspect_scroll = 0;
                             }
                             KeyCode::Char('s') | KeyCode::Char('m') => {
                                 if let Some(selected_node) = s.nodes.get(s.selected_idx) {
@@ -165,13 +167,29 @@ impl Tui {
                                 s.mode = TuiMode::Normal;
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
-                                if s.selected_idx > 0 {
-                                    s.selected_idx -= 1;
+                                if s.inspect_scroll > 0 {
+                                    s.inspect_scroll -= 1;
                                 }
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
+                                s.inspect_scroll += 1;
+                            }
+                            KeyCode::PageUp => {
+                                s.inspect_scroll = s.inspect_scroll.saturating_sub(10);
+                            }
+                            KeyCode::PageDown => {
+                                s.inspect_scroll += 10;
+                            }
+                            KeyCode::Left | KeyCode::Char('h') => {
+                                if s.selected_idx > 0 {
+                                    s.selected_idx -= 1;
+                                    s.inspect_scroll = 0;
+                                }
+                            }
+                            KeyCode::Right | KeyCode::Char('l') => {
                                 if !s.nodes.is_empty() && s.selected_idx + 1 < s.nodes.len() {
                                     s.selected_idx += 1;
+                                    s.inspect_scroll = 0;
                                 }
                             }
                             KeyCode::Char('s') | KeyCode::Char('m') => {
@@ -239,10 +257,8 @@ impl Tui {
                         && !s.nodes.is_empty()
                 };
                 if all_complete {
-                    // All tasks completed cleanly -> return to display terminal summary
                     break;
                 }
-                // When stopped or blocked on a failure, stay interactive so user can inspect, steer, or press 'r' to retry or 'q' to exit
             }
         }
 
@@ -288,7 +304,11 @@ impl Tui {
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
-                    "   [↑/↓: select, i: inspect, s: steer, r: retry, q: quit]",
+                    if state.mode == TuiMode::Inspect {
+                        "   [↑/↓: scroll doc, ←/→: select node, s: steer, r: retry, Esc/i: close]"
+                    } else {
+                        "   [↑/↓: select, i: inspect doc/code, s: steer, r: retry, q: quit]"
+                    },
                     Style::default().fg(Color::Yellow),
                 ),
             ]),
@@ -303,7 +323,11 @@ impl Tui {
         // Main area: tree + stats/inspect
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .constraints(if state.mode == TuiMode::Inspect {
+                [Constraint::Percentage(45), Constraint::Percentage(55)]
+            } else {
+                [Constraint::Percentage(65), Constraint::Percentage(35)]
+            })
             .split(chunks[1]);
 
         // Tree panel
@@ -320,59 +344,175 @@ impl Tui {
         if state.mode == TuiMode::Inspect {
             let inspect_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Node Inspector ")
+                .title(" Detailed Node Inspector (Contract, Decisions, Logs & Code Artifacts) ")
                 .border_style(Style::default().fg(Color::Cyan));
 
             let mut inspect_lines: Vec<Line> = Vec::new();
             if let Some(node) = state.nodes.get(state.selected_idx) {
                 inspect_lines.push(Line::from(vec![
-                    Span::styled("ID:     ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("Node ID:  ", Style::default().fg(Color::DarkGray)),
                     Span::styled(&node.id, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  [{}]", node.status), Style::default().fg(status_color(&node.status))),
-                ]));
-                inspect_lines.push(Line::from(vec![
-                    Span::styled("Goal:   ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(truncate(&node.goal, 40), Style::default().fg(Color::White)),
+                    Span::styled(format!("  [{}]", node.status), Style::default().fg(status_color(&node.status)).add_modifier(Modifier::BOLD)),
                 ]));
                 if let Some(ref p) = node.parent {
                     inspect_lines.push(Line::from(vec![
-                        Span::styled("Parent: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("Parent:   ", Style::default().fg(Color::DarkGray)),
                         Span::styled(p, Style::default().fg(Color::Gray)),
+                        Span::styled(format!("  (depth: {})", node.depth), Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+                if !node.depends_on.is_empty() {
+                    inspect_lines.push(Line::from(vec![
+                        Span::styled("Depends:  ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(node.depends_on.join(", "), Style::default().fg(Color::LightBlue)),
                     ]));
                 }
                 inspect_lines.push(Line::from(""));
+
+                // Contract section
                 let contract = node.contract();
+                inspect_lines.push(Line::from(Span::styled(
+                    "▶ CONTRACT GOAL",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )));
+                for g_line in node.goal.lines() {
+                    inspect_lines.push(Line::from(Span::styled(
+                        format!("  {}", g_line),
+                        Style::default().fg(Color::White),
+                    )));
+                }
+                inspect_lines.push(Line::from(""));
+
+                if !contract.acceptance_criteria.is_empty() {
+                    inspect_lines.push(Line::from(Span::styled(
+                        "▶ ACCEPTANCE CRITERIA",
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    )));
+                    for c in &contract.acceptance_criteria {
+                        inspect_lines.push(Line::from(Span::styled(
+                            format!("  ✓ {}", c),
+                            Style::default().fg(Color::LightGreen),
+                        )));
+                    }
+                    inspect_lines.push(Line::from(""));
+                }
+
                 if !contract.constraints.is_empty() {
                     inspect_lines.push(Line::from(Span::styled(
-                        "Constraints:",
+                        "▶ INHERITED CONSTRAINTS",
                         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                     )));
                     for c in &contract.constraints {
                         inspect_lines.push(Line::from(Span::styled(
-                            format!(" • {}", truncate(c, 35)),
+                            format!("  ⚠ {}", c),
                             Style::default().fg(Color::LightYellow),
                         )));
                     }
                     inspect_lines.push(Line::from(""));
                 }
 
+                // Decisions section
                 if let Ok(decisions) = std::fs::read_to_string(node.decisions_path()) {
-                    inspect_lines.push(Line::from(Span::styled(
-                        "Decisions:",
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    )));
-                    for l in decisions.lines().filter(|l| l.starts_with("- ")).rev().take(5) {
+                    let d_lines: Vec<&str> = decisions
+                        .lines()
+                        .filter(|l| l.starts_with("- "))
+                        .collect();
+                    if !d_lines.is_empty() {
                         inspect_lines.push(Line::from(Span::styled(
-                            truncate(l, 38),
-                            Style::default().fg(Color::DarkGray),
+                            "▶ DECISIONS TIMELINE",
+                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
                         )));
+                        for l in d_lines {
+                            inspect_lines.push(Line::from(Span::styled(
+                                format!("  {}", l),
+                                Style::default().fg(Color::Gray),
+                            )));
+                        }
+                        inspect_lines.push(Line::from(""));
+                    }
+                }
+
+                // Recent Events & Logs
+                if let Ok(events) = std::fs::read_to_string(node.log_path()) {
+                    let last_events: Vec<&str> = events.lines().filter(|l| !l.trim().is_empty()).collect();
+                    if !last_events.is_empty() {
+                        inspect_lines.push(Line::from(Span::styled(
+                            "▶ RECENT LOG EVENTS",
+                            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                        )));
+                        for ev in last_events.iter().rev().take(4) {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(ev) {
+                                let event_name = v.get("event").and_then(|e| e.as_str()).unwrap_or("event");
+                                let detail = if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                                    format!("error: {}", truncate(err, 60))
+                                } else if let Some(reason) = v.get("reason").and_then(|r| r.as_str()) {
+                                    format!("reason: {}", truncate(reason, 60))
+                                } else {
+                                    truncate(ev, 60)
+                                };
+                                inspect_lines.push(Line::from(vec![
+                                    Span::styled(format!("  • [{}] ", event_name), Style::default().fg(Color::DarkGray)),
+                                    Span::styled(detail, Style::default().fg(Color::Gray)),
+                                ]));
+                            }
+                        }
+                        inspect_lines.push(Line::from(""));
+                    }
+                }
+
+                // Deliverable summary
+                if !node.summary.is_empty() {
+                    inspect_lines.push(Line::from(Span::styled(
+                        "▶ SUMMARY DELIVERABLE",
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    )));
+                    for s_line in node.summary.lines() {
+                        inspect_lines.push(Line::from(Span::styled(
+                            format!("  {}", s_line),
+                            Style::default().fg(Color::LightCyan),
+                        )));
+                    }
+                    inspect_lines.push(Line::from(""));
+                }
+
+                // Artifacts content preview
+                let artifacts = node.find_artifacts();
+                if !artifacts.is_empty() {
+                    inspect_lines.push(Line::from(Span::styled(
+                        format!("▶ CODE ARTIFACTS ({})", artifacts.len()),
+                        Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                    )));
+                    for art_path in &artifacts {
+                        let fname = art_path.file_name().unwrap_or_default().to_string_lossy();
+                        inspect_lines.push(Line::from(vec![
+                            Span::styled("  📁 ", Style::default().fg(Color::Yellow)),
+                            Span::styled(format!("artifacts/{}", fname), Style::default().fg(Color::White).add_modifier(Modifier::UNDERLINED)),
+                        ]));
+                        if let Ok(content) = std::fs::read_to_string(art_path) {
+                            for (c_idx, c_line) in content.lines().take(15).enumerate() {
+                                inspect_lines.push(Line::from(Span::styled(
+                                    format!("    {:2} | {}", c_idx + 1, c_line),
+                                    Style::default().fg(Color::DarkGray),
+                                )));
+                            }
+                            if content.lines().count() > 15 {
+                                inspect_lines.push(Line::from(Span::styled(
+                                    format!("    ... ({} more lines)", content.lines().count() - 15),
+                                    Style::default().fg(Color::DarkGray),
+                                )));
+                            }
+                        }
+                        inspect_lines.push(Line::from(""));
                     }
                 }
             } else {
                 inspect_lines.push(Line::from(Span::styled("No node selected", Style::default().fg(Color::DarkGray))));
             }
 
-            let inspect_p = Paragraph::new(Text::from(inspect_lines)).block(inspect_block);
+            let inspect_p = Paragraph::new(Text::from(inspect_lines))
+                .block(inspect_block)
+                .scroll((state.inspect_scroll as u16, 0))
+                .wrap(Wrap { trim: false });
             frame.render_widget(inspect_p, main_chunks[1]);
         } else {
             // Stats panel
