@@ -141,17 +141,26 @@ pub fn run(
             // Check if any failed or blocked nodes exist
             let has_failed = nodes.iter().any(|n| n.status == FAILED);
             let all_complete = nodes.iter().all(|n| n.status == COMPLETE || n.status == SPLIT_STATUS);
-            let mut s = state.lock().unwrap();
-            if has_failed {
-                s.status_line = "Blocked: some subtasks failed. Press 'r' on failed nodes to retry, or 'q' to exit.".into();
-            } else if all_complete {
-                s.status_line = "All tasks completed successfully.".into();
-            } else {
-                s.status_line = "No runnable tasks. Dependencies may be unsatisfied.".into();
+            {
+                let mut s = state.lock().unwrap();
+                if has_failed {
+                    s.status_line = "Blocked on failed subtasks. Press 'r' on a failed node to retry, or 'q' to exit.".into();
+                } else if all_complete {
+                    s.status_line = "All tasks completed successfully.".into();
+                    break;
+                } else {
+                    s.status_line = "No runnable tasks. Waiting for dependencies or steer commands...".into();
+                }
             }
-            break;
-        }
 
+            if has_failed {
+                // Wait briefly for user steering / retry keystroke without killing the scheduler thread
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                continue;
+            } else {
+                break;
+            }
+        }
         let batch = &runnable[..runnable.len().min(max_parallel)];
         for _n in batch {
             report.steps += 1;

@@ -156,8 +156,10 @@ impl Tui {
                             KeyCode::Char('r') => {
                                 if let Some(selected_node) = s.nodes.get(s.selected_idx) {
                                     let nid = selected_node.id.clone();
+                                    let _ = store.retry(&nid);
                                     let _ = store.enqueue_steer("retry", &nid);
-                                    s.prompt_message = Some(format!("Queued retry for node {nid}"));
+                                    s.nodes = store.walk().unwrap_or_default();
+                                    s.prompt_message = Some(format!("Retried node {nid} (reset to pending)"));
                                 }
                             }
                             _ => {}
@@ -205,8 +207,10 @@ impl Tui {
                             KeyCode::Char('r') => {
                                 if let Some(selected_node) = s.nodes.get(s.selected_idx) {
                                     let nid = selected_node.id.clone();
+                                    let _ = store.retry(&nid);
                                     let _ = store.enqueue_steer("retry", &nid);
-                                    s.prompt_message = Some(format!("Queued retry for node {nid}"));
+                                    s.nodes = store.walk().unwrap_or_default();
+                                    s.prompt_message = Some(format!("Retried node {nid} (reset to pending)"));
                                 }
                             }
                             _ => {}
