@@ -261,7 +261,10 @@ impl Tui {
                         && !s.nodes.is_empty()
                 };
                 if all_complete {
-                    break;
+                    let mut s = self.state.lock().unwrap();
+                    if s.status_line.is_empty() || s.status_line.starts_with("All tasks completed") {
+                        s.status_line = "Project complete! Press 'q' or 'Enter' to view summary and exit.".to_string();
+                    }
                 }
             }
         }

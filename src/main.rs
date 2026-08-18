@@ -530,8 +530,7 @@ fn generate_summary(project: &PathBuf, _store: &store::Store, nodes: &[store::No
             }
         }
     }
-    ctx.push_str("\n## Instructions\nWrite a concise, specific summary of what was delivered. Mention key files/artifacts created. One paragraph. No markdown formatting — plain text only.\n");
-
+    ctx.push_str("\n## Instructions\nWrite a clear, structured summary:\n1. Executive Summary: What was accomplished and built.\n2. Key Artifacts: List created files and build outputs (e.g. dist/chrome, dist/firefox).\n3. How to Install & Test: Step-by-step instructions for the developer to run, test, and use the project right now.\n");
     let executor = runner::get_executor();
     if executor == "opencode" {
         let bin = which::which("opencode").unwrap_or_else(|_| std::path::Path::new("opencode").to_path_buf());
