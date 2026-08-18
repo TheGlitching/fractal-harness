@@ -13,13 +13,6 @@ pub const ESCALATE: &str = "escalate";
 pub const ESCALATE_RESOLVE: &str = "escalate_resolve";
 pub const NOTE_GLOBAL: &str = "note_global";
 
-static DECISION_RE: OnceLock<Regex> = OnceLock::new();
-fn decision_re() -> &'static Regex {
-    DECISION_RE.get_or_init(|| {
-        Regex::new(r#"\{\s*"verb"\s*:\s*"(split|complete|escalate|escalate_resolve|note_global)""#).unwrap()
-    })
-}
-
 static CODE_BLOCK_RE: OnceLock<Regex> = OnceLock::new();
 fn code_block_re() -> &'static Regex {
     CODE_BLOCK_RE.get_or_init(|| {
@@ -181,64 +174,81 @@ Work ONLY in this directory.\n"
 }
 
 pub fn extract_decision(text: &str) -> Option<Value> {
-    // 1. Check markdown fenced code blocks first
+    let trimmed = text.trim();
+
+    // 1. Direct JSON parse if the whole text or trimmed text is already a JSON object
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+            if v.get("verb").is_some() || v.get("verdict").is_some() {
+                return Some(v);
+            }
+        }
+    }
+
+    // 2. Check markdown fenced code blocks first
     for cap in code_block_re().captures_iter(text) {
         if let Some(m) = cap.get(1) {
             let raw = m.as_str().trim();
             if let Ok(v) = serde_json::from_str::<Value>(raw) {
-                if v.get("verb").is_some() {
+                if v.get("verb").is_some() || v.get("verdict").is_some() {
                     return Some(v);
                 }
             }
         }
     }
 
-    // 2. Scan for JSON structures matching decision_re with string-aware brace matching
-    for m in decision_re().find_iter(text) {
-        let start = m.start();
-        let mut depth = 0;
-        let mut in_string = false;
-        let mut escape = false;
-        let mut end = start;
+    // 3. Scan for any top-level JSON object '{' with string-aware brace balancing
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            let start = i;
+            let mut depth = 0;
+            let mut in_string = false;
+            let mut escape = false;
+            let mut end = start;
 
-        for (i, ch) in text[start..].char_indices() {
-            if escape {
-                escape = false;
-                continue;
+            for (j, &b) in bytes[start..].iter().enumerate() {
+                if escape {
+                    escape = false;
+                    continue;
+                }
+                if b == b'\\' {
+                    escape = true;
+                    continue;
+                }
+                if b == b'"' {
+                    in_string = !in_string;
+                    continue;
+                }
+                if !in_string {
+                    match b {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = start + j + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
-            if ch == '\\' {
-                escape = true;
-                continue;
-            }
-            if ch == '"' {
-                in_string = !in_string;
-                continue;
-            }
-            if !in_string {
-                match ch {
-                    '{' => depth += 1,
-                    '}' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = start + i + 1;
-                            break;
+
+            if end > start {
+                if let Ok(candidate_str) = std::str::from_utf8(&bytes[start..end]) {
+                    if let Ok(v) = serde_json::from_str::<Value>(candidate_str) {
+                        if v.get("verb").is_some() || v.get("verdict").is_some() {
+                            return Some(v);
                         }
                     }
-                    _ => {}
                 }
             }
         }
-
-        if end > start {
-            if let Ok(v) = serde_json::from_str::<Value>(&text[start..end]) {
-                if v.get("verb").is_some() {
-                    return Some(v);
-                }
-            }
-        }
+        i += 1;
     }
 
-    // 3. Fallback check: if artifacts were directly written on disk, synthesize a valid COMPLETE decision
     None
 }
 
@@ -882,19 +892,28 @@ mod tests {
 Here is my decision:
 ```json
 {
-  "verb": "complete",
-  "summary": "all done",
-  "deliverable": "done",
   "artifacts": [
     {
-      "path": "artifacts/types.ts",
-      "content": "export function foo() {\n  return { a: 1 };\n}\n"
+      "content": "export function foo() {\n  return { a: 1 };\n}\n",
+      "path": "artifacts/types.ts"
     }
-  ]
+  ],
+  "deliverable": "done",
+  "summary": "all done",
+  "verb": "complete"
 }
 ```
 Working...
 "#;
+        let d = extract_decision(text);
+        assert!(d.is_some());
+        let val = d.unwrap();
+        assert_eq!(val.get("verb").unwrap(), "complete");
+    }
+
+    #[test]
+    fn test_extract_decision_direct_json() {
+        let text = r#"{"artifacts":[{"content":"...","path":"artifacts/types.ts"}],"deliverable":"Artifacts generated on disk.","summary":"Completed deliverables saved to artifacts directory.","verb":"complete"}"#;
         let d = extract_decision(text);
         assert!(d.is_some());
         let val = d.unwrap();
