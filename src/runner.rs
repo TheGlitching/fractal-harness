@@ -98,6 +98,39 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
         ));
     }
 
+    // Expose artifacts from direct dependencies (depends_on) and the unified workspace
+    let mut dep_artifacts = Vec::new();
+    let all_nodes = store.walk().unwrap_or_default();
+    for dep_id in &node.depends_on {
+        if let Some(dep_node) = all_nodes.iter().find(|n| n.id == *dep_id) {
+            for art in dep_node.find_artifacts() {
+                if let Ok(rel) = art.strip_prefix(dep_node.artifacts_dir()) {
+                    let preview = fs::read_to_string(&art).unwrap_or_default();
+                    let head = if preview.len() > 600 {
+                        format!("{}... [{} bytes]", &preview[..600], preview.len())
+                    } else {
+                        preview
+                    };
+                    dep_artifacts.push(format!("### Dependency artifact: {} (from {})\n```\n{}\n```\n", rel.display(), dep_node.id, head));
+                }
+            }
+        }
+    }
+    if !dep_artifacts.is_empty() {
+        parts.push(format!(
+            "## Dependency Code & Artifacts (depends_on)\n{}\n",
+            dep_artifacts.join("\n")
+        ));
+    }
+
+    let unified = store.unified_dir();
+    if unified.exists() {
+        parts.push(format!(
+            "## Shared Unified Codebase (`dist/`)\nAll previously completed subtasks have synced their code to `{}`. You can reference or build upon them.\n",
+            unified.display()
+        ));
+    }
+
     // Only inject direct parent context and sibling overview (Minimal Context Principle)
     if let Some(ref pid) = node.parent {
         let nodes = store.walk().unwrap_or_default();

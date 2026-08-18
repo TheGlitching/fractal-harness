@@ -37,6 +37,12 @@ enum Commands {
         /// Node id to retry
         node_id: String,
     },
+    /// Export the unified codebase from all completed nodes to a clean directory
+    Export {
+        /// Output directory (default: dist/)
+        #[arg(short, long, default_value = "dist")]
+        output: PathBuf,
+    },
 }
 
 fn install_panic_hook() {
@@ -134,6 +140,20 @@ fn main() {
                 Ok(n) => {
                     println!("retried {} nodes from '{}' and below — run `fractal run -p {}` to resume",
                         n, node_id, project.display());
+                }
+                Err(e) => { eprintln!("fractal: {e}"); std::process::exit(1); }
+            }
+        }
+        Commands::Export { output } => {
+            let s = store::Store::new(&project);
+            if let Err(e) = s.require_initialised() {
+                eprintln!("fractal: {e}");
+                std::process::exit(2);
+            }
+            let target = if output.is_absolute() { output } else { project.join(output) };
+            match s.export_workspace(&target) {
+                Ok(count) => {
+                    println!("Successfully exported {} unified code artifacts to: {}", count, target.display());
                 }
                 Err(e) => { eprintln!("fractal: {e}"); std::process::exit(1); }
             }

@@ -10,6 +10,7 @@ pub const ROOT_ID: &str = "root";
 const TREE_DIRNAME: &str = "tree";
 const GLOBAL_DIRNAME: &str = "global";
 const STATE_DIRNAME: &str = ".fractal";
+const UNIFIED_DIRNAME: &str = "dist";
 const INDEX_FILENAME: &str = "index.db";
 const CONTRACT_FILENAME: &str = "contract.md";
 const DECISIONS_FILENAME: &str = "decisions.md";
@@ -503,6 +504,7 @@ impl Store {
         artifacts: &[(String, String)],
     ) -> Result<(), StoreError> {
         self.write_artifacts(node, artifacts, deliverable)?;
+        self.sync_unified_workspace(node, artifacts)?;
         let stamp = now();
         self.with_conn(|conn| {
             conn.execute(
@@ -560,6 +562,71 @@ impl Store {
             }
         }
         out
+    }
+    pub fn unified_dir(&self) -> PathBuf {
+        self.tree_dir.parent().unwrap_or(&self.tree_dir).join(UNIFIED_DIRNAME)
+    }
+
+    pub fn sync_unified_workspace(
+        &self,
+        node: &Node,
+        artifacts: &[(String, String)],
+    ) -> Result<(), StoreError> {
+        let dist = self.unified_dir();
+        fs::create_dir_all(&dist)?;
+
+        for (p, c) in artifacts {
+            if c.trim().is_empty() {
+                continue;
+            }
+            let rel = Self::safe_path(p);
+            let target = dist.join(&rel);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&target, c)?;
+        }
+
+        // Also copy any existing disk artifacts from this node
+        for art in node.find_artifacts() {
+            if let Ok(rel) = art.strip_prefix(node.artifacts_dir()) {
+                let target = dist.join(rel);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if art.is_file() {
+                    let _ = fs::copy(&art, &target);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn export_workspace(&self, target_dir: &Path) -> Result<usize, StoreError> {
+        fs::create_dir_all(target_dir)?;
+        let nodes = self.walk()?;
+        let mut count = 0;
+        for n in &nodes {
+            if n.status == COMPLETE {
+                for art in n.find_artifacts() {
+                    if let Ok(rel) = art.strip_prefix(n.artifacts_dir()) {
+                        if rel.to_string_lossy() == "deliverable.md" {
+                            continue;
+                        }
+                        let dest = target_dir.join(rel);
+                        if let Some(parent) = dest.parent() {
+                            fs::create_dir_all(parent)?;
+                        }
+                        if art.is_file() {
+                            if fs::copy(&art, &dest).is_ok() {
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(count)
     }
 
     pub fn append_decision(&self, node: &Node, text: &str) -> Result<(), StoreError> {
