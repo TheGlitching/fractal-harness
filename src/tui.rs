@@ -118,8 +118,9 @@ impl Tui {
             if event::poll(tick)? {
                 if let Event::Key(key) = event::read()? {
                     let mut s = self.state.lock().unwrap();
-                    if key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    if (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
+                        || key.code == KeyCode::Char('q')
                     {
                         crate::scheduler::INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
                         break;
@@ -127,7 +128,6 @@ impl Tui {
 
                     match &s.mode.clone() {
                         TuiMode::Normal => match key.code {
-                            KeyCode::Char('q') => break,
                             KeyCode::Up | KeyCode::Char('k') => {
                                 if s.selected_idx > 0 {
                                     s.selected_idx -= 1;
@@ -161,7 +161,7 @@ impl Tui {
                             _ => {}
                         },
                         TuiMode::Inspect => match key.code {
-                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') => {
+                            KeyCode::Esc | KeyCode::Char('i') => {
                                 s.mode = TuiMode::Normal;
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
@@ -233,8 +233,16 @@ impl Tui {
 
             let done = self.state.lock().unwrap().done;
             if done {
-                // Return gracefully without blocking
-                break;
+                let all_complete = {
+                    let s = self.state.lock().unwrap();
+                    s.nodes.iter().all(|n| n.status == "complete" || n.status == "split")
+                        && !s.nodes.is_empty()
+                };
+                if all_complete {
+                    // All tasks completed cleanly -> return to display terminal summary
+                    break;
+                }
+                // When stopped or blocked on a failure, stay interactive so user can inspect, steer, or press 'r' to retry or 'q' to exit
             }
         }
 
@@ -280,7 +288,7 @@ impl Tui {
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
-                    "   [↑/↓: select, i: inspect, s: steer/constraint, r: retry, q: quit]",
+                    "   [↑/↓: select, i: inspect, s: steer, r: retry, q: quit]",
                     Style::default().fg(Color::Yellow),
                 ),
             ]),
