@@ -252,7 +252,7 @@ fn call_via_omp(
         .and_then(|s| s.parse().ok())
         .unwrap_or(1200);
 
-    let msg = "Read CLAUDE.md. Execute fully. Write files into artifacts/. When done, output exactly one JSON decision as the last line.";
+    let msg = "Read CLAUDE.md. You are a node in a fractal task tree. Execute fully or split. Output your decision JSON as the last line.";
 
     let mut cmd = Command::new(&bin);
     cmd.arg("-p");
@@ -324,6 +324,7 @@ fn call_via_omp(
     let done_msg = format!("  done ({}s)", start.elapsed().as_secs());
     on_output(&done_msg);
 
+    // Extract decision JSON from stdout and stderr text
     let decision = extract_decision(&all_text).ok_or_else(|| {
         let suffix = if all_text.len() > 400 {
             &all_text[all_text.len() - 400..]
