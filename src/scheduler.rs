@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 pub(crate) static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-const MAX_DEPTH: i64 = 3;
+const MAX_DEPTH: i64 = 4;
 const MAX_ATTEMPTS: usize = 3;
 const MAX_STEPS: usize = 500;
 
@@ -138,6 +138,17 @@ pub fn run(
         let nodes = store.walk()?;
         let runnable = next_nodes(&nodes);
         if runnable.is_empty() {
+            // Check if any failed or blocked nodes exist
+            let has_failed = nodes.iter().any(|n| n.status == FAILED);
+            let all_complete = nodes.iter().all(|n| n.status == COMPLETE || n.status == SPLIT_STATUS);
+            let mut s = state.lock().unwrap();
+            if has_failed {
+                s.status_line = "Blocked: some subtasks failed. Press 'r' on failed nodes to retry, or 'q' to exit.".into();
+            } else if all_complete {
+                s.status_line = "All tasks completed successfully.".into();
+            } else {
+                s.status_line = "No runnable tasks. Dependencies may be unsatisfied.".into();
+            }
             break;
         }
 
@@ -218,7 +229,11 @@ pub fn run(
         s.nodes = nodes;
         s.stats = sn;
         s.done = true;
-        s.status_line = format!("done — root: {}", report.root_status);
+        if report.root_status == COMPLETE {
+            s.status_line = "done — root complete".into();
+        } else {
+            s.status_line = format!("stopped — root: {} (press r on a node to retry)", report.root_status);
+        }
     }
     Ok(report)
 }
@@ -290,6 +305,10 @@ fn run_one_node(
     {
         let mut s = state.lock().unwrap();
         s.nodes = store.walk().unwrap_or_default();
+        s.node_id = node.id.clone();
+        s.node_goal = node.goal.clone();
+        s.node_started_at = std::time::Instant::now();
+        s.status_line = format!("running {}", node.id);
     }
 
     let mut feedback: Option<String> = None;
@@ -354,7 +373,6 @@ fn run_one_node(
                     )
                     .ok();
 
-                // Propagate escalation up to parent
                 if let Some(ref pid) = node.parent {
                     let nodes = store.walk().unwrap_or_default();
                     if let Some(parent) = nodes.iter().find(|n| n.id == *pid) {
@@ -363,7 +381,6 @@ fn run_one_node(
                             node.id, result.assumption, result.evidence
                         );
                         let _ = store.append_decision(parent, &escalation_msg);
-                        // Add as constraint to parent & sibling subtree
                         let constraint = format!(
                             "Assumption invalid (from {}): {}",
                             node.id, result.assumption

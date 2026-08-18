@@ -232,26 +232,9 @@ impl Tui {
             }
 
             let done = self.state.lock().unwrap().done;
-            if !done {
-                continue;
-            }
-
-            // Done — keep drawing until user presses q
-            self.terminal
-                .draw(|f| Self::render(f, &self.state.lock().unwrap(), self.started_at))?;
-            loop {
-                if event::poll(tick)? {
-                    if let Event::Key(key) = event::read()? {
-                        if (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL))
-                            || key.code == KeyCode::Char('q')
-                        {
-                            return self.cleanup();
-                        }
-                    }
-                }
-                self.terminal
-                    .draw(|f| Self::render(f, &self.state.lock().unwrap(), self.started_at))?;
+            if done {
+                // Return gracefully without blocking
+                break;
             }
         }
 
@@ -475,7 +458,7 @@ impl Tui {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled("Done", Style::default().fg(Color::Green)),
-                    Span::styled(" — press q to exit", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" — Summary below", Style::default().fg(Color::DarkGray)),
                 ])
             }
         } else {
