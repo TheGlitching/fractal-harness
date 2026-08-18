@@ -659,17 +659,33 @@ pub fn verify_node(
     _store: &Store,
     node: &Node,
     deliverable: &str,
+    artifacts: &[(String, String)],
     criteria: &[String],
     model: &str,
 ) -> std::result::Result<(String, Vec<Value>), RunnerError> {
+    let mut artifact_summary = String::new();
+    for (p, c) in artifacts {
+        let preview = if c.len() > 300 {
+            format!("{}... [{} chars]", &c[..300], c.len())
+        } else {
+            c.clone()
+        };
+        artifact_summary.push_str(&format!("\nFile: {p}\n```\n{preview}\n```\n"));
+    }
+
     let prompt = format!(
-        "Contract goal: {}\nAcceptance criteria:\n{}\nDeliverable:\n{}",
+        "Contract goal: {}\nAcceptance criteria:\n{}\nDeliverable summary:\n{}\nArtifacts produced:\n{}",
         node.goal,
         bullets(criteria),
         if deliverable.is_empty() {
-            "(no text)"
+            "(no text summary)"
         } else {
             deliverable
+        },
+        if artifact_summary.is_empty() {
+            "(no artifacts provided)"
+        } else {
+            &artifact_summary
         }
     );
     let message = call_critic(&prompt, model)?;

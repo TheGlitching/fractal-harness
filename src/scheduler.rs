@@ -447,7 +447,7 @@ fn run_one_node(
                 }
                 let criteria = node.contract().acceptance_criteria;
                 report.verifications += 1;
-                match verify_node(store, node, &result.deliverable, &criteria, model) {
+                match verify_node(store, node, &result.deliverable, &result.artifacts, &criteria, model) {
                     Ok((verdict, crit_details)) if verdict == "PASS" => {
                         store
                             .complete(node, &result.summary, &result.deliverable, &result.artifacts)
