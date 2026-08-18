@@ -224,18 +224,17 @@ PHASE 1 — DECIDE (do this before any implementation):
 - RULE: if the contract mentions multiple features, files, layers, or components -> SPLIT. Only a truly single-file, single-concern contract should reach Phase 2.
 
 PHASE 2 — EXECUTE (only if Phase 1 decided COMPLETE):
-- Implement the contract.
-- Write ALL deliverable files into the `artifacts/` directory.
-- When done, output EXACTLY one JSON decision as the very last line with nothing after it:
+- Implement or modify the contract directly for the repository.
+- When done, output EXACTLY one JSON decision as the very last line with relative project file paths and their contents:
 
-{\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\",\"artifacts\":[{\"path\":\"artifacts/file.py\",\"content\":\"...\"}]}
+{\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\",\"artifacts\":[{\"path\":\"src/file.ts\",\"content\":\"...\"}]}
 
 Or if decomposing (Phase 1):
 {\"verb\":\"split\",\"subtasks\":[{\"goal\":\"setup\",\"acceptance_criteria\":[\"has config\"],\"id\":\"setup\"},{\"goal\":\"cli\",\"acceptance_criteria\":[\"accepts args\"],\"id\":\"cli\",\"depends_on\":[\"setup\"]}]}
 
 {\"verb\":\"escalate\",\"assumption\":\"...\",\"evidence\":\"...\"}
 
-Work ONLY in this directory.
+Modify or create files directly with relative paths from the project root.
 "
         .into(),
     );

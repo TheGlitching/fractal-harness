@@ -534,17 +534,28 @@ impl Store {
         deliverable: &str,
     ) -> Result<(), StoreError> {
         fs::create_dir_all(node.artifacts_dir())?;
+        let project_root = self.tree_dir.parent().unwrap_or(&self.tree_dir);
         let mut written = false;
         for (p, c) in artifacts {
             if c.trim().is_empty() {
                 continue;
             }
             let rel = Self::safe_path(p);
-            let target = node.artifacts_dir().join(&rel);
-            if let Some(parent) = target.parent() {
+
+            // 1. Write to node's artifact archive for memory & trace
+            let target_node = node.artifacts_dir().join(&rel);
+            if let Some(parent) = target_node.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&target, c)?;
+            fs::write(&target_node, c)?;
+
+            // 2. Write directly to the repository root for real unified in-place project code
+            let target_root = project_root.join(&rel);
+            if let Some(parent) = target_root.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&target_root, c)?;
+
             written = true;
         }
         if !written && !deliverable.trim().is_empty() {
