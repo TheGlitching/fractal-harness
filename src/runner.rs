@@ -439,24 +439,23 @@ pub fn call_via_omp(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let (std_tx, std_rx) = std::sync::mpsc::channel::<(bool, String)>();
+    let (std_tx, std_rx) = std::sync::mpsc::channel::<(bool, String, String)>();
     let std_tx_err = std_tx.clone();
 
     let node_name_out = node_name.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines().flatten() {
-            let l = format!(" [{}] {}", node_name_out, line);
-            let _ = std_tx.send((false, l));
+            let log_line = format!(" [{}] {}", node_name_out, line);
+            let _ = std_tx.send((false, log_line, line));
         }
     });
-
     let node_name_err = node_name.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines().flatten() {
-            let l = format!(" [{}] ERR: {}", node_name_err, line);
-            let _ = std_tx_err.send((true, l));
+            let log_line = format!(" [{}] ERR: {}", node_name_err, line);
+            let _ = std_tx_err.send((true, log_line, line));
         }
     });
 
@@ -469,12 +468,12 @@ pub fn call_via_omp(
         .unwrap_or(300);
 
     loop {
-        while let Ok((is_err, line)) = std_rx.try_recv() {
-            on_output(&line);
+        while let Ok((is_err, log_line, raw_line)) = std_rx.try_recv() {
+            on_output(&log_line);
             if is_err {
-                stderr_lines.push(line);
+                stderr_lines.push(raw_line);
             } else {
-                stdout_lines.push(line);
+                stdout_lines.push(raw_line);
             }
         }
         if start.elapsed().as_secs() > timeout_secs {
@@ -488,15 +487,14 @@ pub fn call_via_omp(
         }
     }
 
-    while let Ok((is_err, line)) = std_rx.try_recv() {
-        on_output(&line);
+    while let Ok((is_err, log_line, raw_line)) = std_rx.try_recv() {
+        on_output(&log_line);
         if is_err {
-            stderr_lines.push(line);
+            stderr_lines.push(raw_line);
         } else {
-            stdout_lines.push(line);
+            stdout_lines.push(raw_line);
         }
     }
-
     let all_text = stdout_lines.join("\n");
     let val = match extract_decision(&all_text) {
         Some(v) => v,

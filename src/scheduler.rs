@@ -330,21 +330,29 @@ fn run_one_node(
                 store
                     .append_log(node, &serde_json::json!({"event":"error","error":e}))
                     .ok();
-                feedback = Some(format!("Runtime error on previous attempt: {e}"));
+                feedback = Some(format!("Runtime error on previous attempt: {e}. Please output a valid JSON decision (split or complete) as your very last line."));
+                continue;
+            }
+            Err(RunnerError::NoDecision(e)) => {
+                store
+                    .append_log(node, &serde_json::json!({"event":"error","error":e}))
+                    .ok();
+                feedback = Some(format!("No valid JSON decision was found on the previous attempt ({e}). Remember: your VERY LAST line must be a single raw JSON decision object (e.g. {{\"verb\":\"complete\",\"deliverable\":\"...\",\"summary\":\"...\",\"artifacts\":[...]}} or {{\"verb\":\"split\",\"subtasks\":[...]}})."));
+                continue;
+            }
+            Err(RunnerError::Timeout) => {
+                store
+                    .append_log(node, &serde_json::json!({"event":"error","error":"timeout"}))
+                    .ok();
+                feedback = Some("The previous attempt timed out. If the task is too large, output a `split` decision immediately.".into());
                 continue;
             }
             Err(e) => {
                 store
                     .append_log(node, &serde_json::json!({"event":"error","error":e.to_string()}))
                     .ok();
-                store.append_decision(node, &format!("failed: {e}")).ok();
-                store.set_status(node, FAILED).ok();
-                report.failed += 1;
-                {
-                    let mut s = state.lock().unwrap();
-                    s.nodes = store.walk().unwrap_or_default();
-                }
-                return Ok(report);
+                feedback = Some(format!("Error on previous attempt: {e}. Output a valid JSON decision."));
+                continue;
             }
         };
 
