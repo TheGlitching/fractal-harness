@@ -13,30 +13,25 @@ by prompting:
 |------|---------|
 | `split(subtasks)` | the task is too big for one agent; propose child contracts |
 | `complete(deliverable, summary)` | submit work for verification against the contract |
-| `escalate(assumption, evidence)` | an inherited constraint is false; reopen the owner |
+| `escalate(assumption, evidence)` | an inherited constraint or blocker; propagates up to parent |
 | `escalate_resolve(resolution)` | settle an escalation |
 | `note_global(type, content)` | write a lesson, convention, or skill to the shared global store |
 
-The **leaf executor** spawns opencode headlessly in each node directory.
-opencode reads a generated `CLAUDE.md` (the contract + inherited constraints
-+ global knowledge) and writes deliverables as real files.
+The **leaf executor** spawns `omp` (default) or `opencode` headlessly in each node directory.
+Agents read a generated `CLAUDE.md` (atomic contract + direct parent constraints
++ relevant global knowledge) and write deliverables as real files in `artifacts/`.
 
-## How it works
+## Key Modern Harness Principles
 
-A project is a directory tree that mirrors a task tree. Every node holds:
-
-- `contract.md` — goal, acceptance criteria, interfaces, inherited constraints
-- `decisions.md` — append-only semantic memory of the node
-- `log/` — episodic traces
-- `artifacts/` — the deliverables a node produces
-- `children/` — subordinate nodes
-
-A SQLite index (`.fractal/index.db`) carries what the scheduler needs; the
-filesystem is the source of truth.
+- **Atomic Decomposition**: Each node is small, atomic (single file / single concern) so lightweight models can succeed reliably without context dilution.
+- **Minimal Context**: Each agent only receives its contract, direct parent constraints, and sibling goals. It does not carry the full ancestral chain.
+- **Fail-Safe & Auto-Healing Retries**: Nodes retry up to 3 times on runtime errors or verification failures, feeding back precise failure reasons so the model corrects its output.
+- **Constraint Escalation & Downstream Propagation**: When a child escalates an invalid assumption or a constraint is added, it is recorded in the parent and automatically propagated to all descendant contracts.
+- **Interactive TUI Steering**: Inspect running nodes, review decisions & constraints, inject new global or subtree constraints, and trigger retries directly from the live TUI.
 
 ## Installation
 
-Requires [Rust](https://rustup.rs) and [opencode](https://github.com/sst/opencode) on your PATH.
+Requires [Rust](https://rustup.rs) and [`omp`](https://github.com/can1357/omp) (or `opencode`) on your PATH.
 
 ```bash
 git clone https://github.com/TheGlitching/fractal-harness.git
@@ -54,8 +49,13 @@ After installation, the `fractal` command is available globally.
 fractal init "Build a CLI weather dashboard with tests"
 ```
 
-This creates the tree, starts the scheduler, and shows a real-time animated
-tree view. No separate `run` command is needed.
+### Options and Executor selection
+
+```bash
+fractal init --executor omp "Goal"
+# or
+FRACTAL_EXECUTOR=omp fractal init "Goal"
+```
 
 ### Resume a paused project
 
@@ -64,16 +64,19 @@ cd my-project
 fractal run
 ```
 
-### Inspect the tree
+### Interactive TUI Controls
+
+While `fractal init` or `fractal run` is active:
+- **`↑` / `↓`** (or `k` / `j`): Select a node in the tree.
+- **`i` / `Enter` / `?`**: Open the **Node Inspector** (view Goal, Status, inherited Constraints, and recent Decisions).
+- **`s` / `m`**: **Steer / Add Constraint**: Opens a modal to input a constraint that is immediately applied to the selected node and propagated down to all descendants.
+- **`r`**: **Retry**: Queue an instant reset and retry of the selected node and its subtasks.
+- **`q`**: Exit TUI (or press `Ctrl+C` to interrupt).
+
+### Inspect the tree (CLI)
 
 ```bash
 fractal status
-```
-
-```
-root  [complete]  Build a CLI weather dashboard with tests
-  root-01  [complete]  Write the weather fetch module
-  root-02  [complete]  Write the CLI entry point
 ```
 
 ### Summarize
@@ -88,34 +91,12 @@ Writes `digest.md` with three sections (done / blocked / next).
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `FRACTAL_EXECUTOR` | `opencode` | Leaf executor (only opencode in the Rust binary) |
+| `FRACTAL_EXECUTOR` | `omp` | Leaf executor (`omp` or `opencode`) |
 | `FRACTAL_BUDGET` | unset | Token allowance at the root; enables budget scaling |
 | `FRACTAL_SPLIT_FEE` | `200` | Token cost charged per split |
 | `FRACTAL_MAX_STEPS` | `500` | Backstop loop bound for a single run |
-| `FRACTAL_TIMEOUT` | `600` | Seconds before a stuck node is killed |
-
-With `FRACTAL_BUDGET`, recursion is bounded by economics: every split debits a
-split-fee and divides the remaining allowance across children.
-
-```bash
-FRACTAL_BUDGET=100000 FRACTAL_SPLIT_FEE=500 fractal init "Large task"
-```
-
-## What the animation looks like
-
-```
-┌─ fractal ──────────────────────────────
-  ● root  Write a CLI weather dashboard with tests
-  ├─ ◉ root-01  Write the weather fetch module...
-  ├─ ○ root-02  Write the CLI entry point...
-  └─ ● root-03  Write the README
-├─────────────────────────────────────
-  steps: 4  ✓3  ◇1  ✗0  ⤴0  verify: 4/4
-└─────────────────────────────────────
-```
-
-Every `init` and `run` writes `trace.json` to the project root with
-per-node status, depth distribution, escalation count, and verification stats.
+| `FRACTAL_TIMEOUT` | `1200` | Seconds before a stuck node is killed |
+| `FRACTAL_PARALLEL` | `4` | Number of concurrent nodes executed in parallel |
 
 ## License / status
 
