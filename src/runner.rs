@@ -597,17 +597,18 @@ pub fn call_critic(
 
     let output = cmd.output().map_err(|e| RunnerError::Other(format!("critic: {e}")))?;
     let _ = fs::remove_dir_all(&temp_dir);
-
     let text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-
     let decision = extract_decision(&text).unwrap_or_else(|| {
+        // Fail closed. An unreadable verdict is not evidence of success, and
+        // defaulting to PASS here meant a critic that errored or rambled granted
+        // the node a pass for free.
         serde_json::json!({
-            "verdict": "PASS",
-            "reason": "Default acceptance on unparsed critic output",
+            "verdict": "FAIL",
+            "reason": "Critic produced no readable verdict; treating as not verified",
             "criteria": []
         })
     });
@@ -618,10 +619,19 @@ pub fn call_critic(
 }
 
 const CRITIC_SYSTEM: &str = "\
-You are a strict, adversarial verifier. You evaluate deliverables against \
-acceptance criteria.
+You are a strict, adversarial verifier judging whether a contract was actually \
+fulfilled.
 
-Evaluate the deliverable summary, contract goal, and acceptance criteria. If the implementation satisfies the criteria, output PASS.
+The 'Actual code change' section is the git diff of this work. It is ground truth; \
+the deliverable summary is only a claim. Where they disagree, believe the diff.
+
+FAIL if the diff is empty for a node that was supposed to implement something.
+FAIL if the diff adds a stub, placeholder, mock, hardcoded sample data, or a \
+component that renders nothing, whatever the summary claims.
+FAIL if the diff adds a module nothing imports, when the contract required \
+working behaviour.
+For a node whose children already produced and verified the work, judge those \
+verified child results against the acceptance criteria instead.
 
 Output ONLY a JSON object:
 {\"verdict\": \"PASS\" | \"FAIL\", \"reason\": \"...\", \"criteria\": [{\"name\": \"...\", \"pass\": true | false, \"reason\": \"...\"}]}
@@ -657,8 +667,26 @@ pub fn verify_node(
         }
     }
 
+    // The strongest available evidence is what changed on disk. At verification
+    // time the node's work is still uncommitted, so `git diff HEAD` is precisely
+    // this node's contribution - not its description of itself. Judging prose
+    // alone is how a node that never created a file was passed as complete.
+    let changed = crate::git::diff_stat_since(&store.root, "HEAD");
+    let code_evidence = if changed.trim().is_empty() {
+        if !children.is_empty() {
+            "(no direct change; this node aggregates the verified children above)".to_string()
+        } else {
+            "(NO FILE CHANGED - this node modified nothing on disk)".to_string()
+        }
+    } else {
+        format!(
+            "Files changed (git):\n{changed}\n\nPatch:\n{}",
+            crate::git::diff_since(&store.root, "HEAD", 12000)
+        )
+    };
+
     let prompt = format!(
-        "Contract goal: {}\nAcceptance criteria:\n{}\nDeliverable summary:\n{}\n{}\nArtifacts produced:\n{}",
+        "Contract goal: {}\nAcceptance criteria:\n{}\nDeliverable summary:\n{}\n{}\nActual code change:\n{}{}",
         node.goal,
         bullets(criteria),
         if deliverable.is_empty() {
@@ -671,16 +699,11 @@ pub fn verify_node(
         } else {
             format!("\n{children_summary}\n")
         },
+        code_evidence,
         if artifact_summary.is_empty() {
-            if !children.is_empty() {
-                "(verified by completed child subtasks above)"
-            } else if !deliverable.is_empty() {
-                "(implemented directly in workspace via native tools)"
-            } else {
-                "(no artifacts provided)"
-            }
+            String::new()
         } else {
-            &artifact_summary
+            format!("\n\nDeclared artifacts:\n{artifact_summary}")
         }
     );
     let message = call_critic(&prompt, model)?;
