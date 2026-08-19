@@ -45,24 +45,37 @@ while IFS= read -r file; do
     stem=$(basename "$(dirname "$file")")
   fi
 
-  # Any import referencing this module by stem, from a file other than itself.
+  # Any import referencing this module by stem, from a file OTHER than itself.
   # The specifier is separated from `from`/`import` by whitespace, so the pattern
   # must allow it; without that every real import is missed and every module
   # looks orphaned.
-  if ! grep -rqE "(from|import|require)[[:space:]]*\(?[[:space:]]*['\"][^'\"]*${stem}['\"]" \
+  #
+  # The file itself must be excluded from the matches. A module containing
+  # `export * from './Self'` - a circular re-export that exports nothing - would
+  # otherwise match its own name and read as referenced.
+  importers=$(grep -rlE "(from|import|require)[[:space:]]*\(?[[:space:]]*['\"][^'\"]*${stem}['\"]" \
       --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' \
-      src tests 2>/dev/null; then
+      src tests 2>/dev/null | grep -vxF "$file" || true)
+
+  if [ -z "$importers" ]; then
     echo "ORPHAN   $file  (nothing imports it)"
     orphans=$((orphans + 1))
   fi
 done < <(find src -type f \( -name '*.ts' -o -name '*.tsx' \) | sort)
 
-# A component whose body is a single empty element is a placeholder that will
-# pass a "does it render" test and deliver nothing.
+# A component whose entire body is one self-closing element is a placeholder: it
+# satisfies a "does it render" test and delivers nothing.
+#
+# There is deliberately no file-length condition. The stub that motivated this
+# check lived at the bottom of a 140-line file full of real types and helpers,
+# so any length gate would have missed exactly the case it exists to catch.
+# Both shapes count: an explicit `return <X />;` and a concise arrow `=> <X />;`.
 while IFS= read -r file; do
-  if grep -qE 'return <[a-zA-Z]+ [^>]*/>;?\s*$' "$file" 2>/dev/null &&
-     [ "$(wc -l < "$file")" -lt 12 ]; then
-    echo "STUB     $file  (renders an empty element)"
+  # A body that forwards props (`<Inner {...props} />`) is real delegation, not a
+  # placeholder, so require the element to carry no spread.
+  if grep -E '(return|=>)[[:space:]]*<[A-Za-z][A-Za-z0-9]*([[:space:]][^>]*)?/>[[:space:]]*;?[[:space:]]*$' "$file" 2>/dev/null |
+     grep -qv '{\.\.\.'; then
+    echo "STUB     $file  (a component body is a single inert element)"
     stubs=$((stubs + 1))
   fi
 done < <(find src -type f -name '*.tsx' | sort)
