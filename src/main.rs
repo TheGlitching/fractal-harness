@@ -2,6 +2,8 @@ mod store;
 mod runner;
 mod scheduler;
 mod tui;
+mod git;
+mod verify;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
