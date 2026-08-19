@@ -12,12 +12,17 @@ pub const COMPLETE_VERB: &str = "complete";
 pub const ESCALATE: &str = "escalate";
 pub const ESCALATE_RESOLVE: &str = "escalate_resolve";
 pub const NOTE_GLOBAL: &str = "note_global";
+/// An integrating parent rejecting specific children's work and sending it back
+/// down the tree, instead of the parent itself failing after N attempts.
+pub const REOPEN: &str = "reopen";
 
 static DECISION_RE: OnceLock<Regex> = OnceLock::new();
 fn decision_re() -> &'static Regex {
     DECISION_RE.get_or_init(|| {
-        Regex::new(r#"\{"verb":\s*"(split|complete|escalate|escalate_resolve|note_global)""#)
-            .unwrap()
+        Regex::new(
+            r#"\{"verb":\s*"(split|complete|escalate|escalate_resolve|note_global|reopen)""#,
+        )
+        .unwrap()
     })
 }
 
@@ -215,19 +220,64 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
         "\
 ## Instructions & Lifecycle Commands
 
-You are executing directly in the project workspace with tools (write, edit, read, bash).
+You work directly in the real project repository, with your own tools (write,
+edit, read, bash). There is no scratch area and no staging copy: the files you
+write ARE the project. Your work is committed for you once verified, so do not
+commit yourself.
 
-### PHASE 1 — DECIDE (first check):
-- If this contract requires multiple components, run fractal split via bash and STOP:
-  fractal split --subtasks '[{\"id\":\"a\",\"goal\":\"...\",\"acceptance_criteria\":[\"...\"]}]'
+### If this contract needs decomposition
+Run this and STOP - do not write any code:
+  fractal split --subtasks '[{\"id\":\"a\",\"goal\":\"...\",\"acceptance_criteria\":[\"...\"],\"verification\":[\"npm test\"]}]'
 
-### PHASE 2 — EXECUTE (if implementing directly):
-1. Create or edit files directly in proper directories (src/..., tests/...).
-2. Run your tests with bash to verify your implementation.
-3. Signal completion with fractal done:
-  fractal done --summary \"Summary of implemented code and tests\"
+Order the subtasks with `depends_on` so whoever consumes a module runs AFTER the
+module it consumes exists. That ordering is what stops two children inventing two
+different names for the same thing.
 
-### ESCALATE (if an assumption is false):
+### If you are IMPLEMENTING this contract
+You are editing a live codebase, not producing something to be merged later.
+
+1. Read what already exists before writing anything. Use the real types, names,
+   taxonomies and helpers this project already defines. Importing an existing
+   type is always correct; redefining your own version of it is always wrong.
+2. Write code that is connected as you write it: import it where it is used and
+   register it where the app expects it. A module nothing imports is unfinished
+   work, not finished work.
+3. Never write a mock, stub, placeholder, hardcoded sample data or an empty
+   component to satisfy a check. If you cannot implement the contract, escalate -
+   do not fake it.
+4. Never import from tree/ - that is the harness's own memory, not project code.
+5. Prove it runs: execute the project's own commands with bash (typecheck, build,
+   tests) and fix what they report.
+6. Then:
+  fractal done --summary \"what you implemented, where it is wired in, and which commands proved it\"
+
+### If you have children: VERIFY ONLY - NEVER FIX
+Your only job is to check that your children's work actually functions, and to
+send back whatever does not. Do not write or edit project files in this role.
+Repairing a child's code yourself would force you to hold every child's context
+at once - the very thing this tree exists to prevent - and it hides the defect
+from the child that owns it.
+
+1. Run the real verification: `fractal verify`.
+2. Look at what was actually produced, never at what was claimed:
+     fractal-node-diff.sh --stat <child-id>
+     fractal-integrate-check.sh
+3. Then do exactly one of:
+
+   a. It works -> report it:
+        fractal done --summary \"what your children delivered and what verification proved it\"
+
+   b. Anything is broken, missing, stubbed, mocked, unreferenced, or disagrees
+      with a sibling's types or names -> return it to the child that owns that
+      code. Your reason text is the only thing that child will see, so state the
+      failure and the requirement precisely:
+        fractal reopen --children <id> --reason \"<what is broken, and what it must satisfy>\"
+
+   c. A capability nobody was ever asked to build is genuinely absent -> add a
+      child for it:
+        fractal split --subtasks '[{\"id\":\"...\",\"goal\":\"...\",\"depends_on\":[\"...\"],\"acceptance_criteria\":[\"...\"]}]'
+
+### If an inherited assumption is false
   fractal escalate --assumption \"...\" --evidence \"...\"
 "
         .into(),
@@ -361,6 +411,10 @@ pub struct VerbResult {
     pub summary: String,
     pub artifacts: Vec<(String, String)>,
     pub assumption: String,
+    /// Child ids an integrating parent is sending back for rework.
+    pub reopen_children: Vec<String>,
+    /// Why they are being sent back; becomes their retry feedback.
+    pub reopen_reason: String,
     pub evidence: String,
     pub resolution: String,
     pub entry_type: String,
@@ -673,11 +727,22 @@ fn result_from_payload(
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let verification: Vec<String> = item
+                        .get("verification")
+                        .and_then(|v| v.as_array())
+                        .map(|v| {
+                            v.iter()
+                                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     r.subtasks.push(Contract {
                         goal,
                         acceptance_criteria: crit,
                         id,
                         depends_on: deps,
+                        verification,
                         ..Default::default()
                     });
                 }
@@ -749,6 +814,24 @@ fn result_from_payload(
                 .get("supersedes")
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string());
+        }
+        REOPEN => {
+            r.reopen_children = payload
+                .get("children")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            r.reopen_reason = payload
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("")
+                .to_string();
         }
         _ => {}
     }

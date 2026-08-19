@@ -22,17 +22,39 @@ pub struct GateOutcome {
     pub output: String,
 }
 
-/// Gates a contract asked for explicitly, plus whatever the project's own
-/// tooling exposes. Explicit gates win; detection is only a floor, so a project
-/// can never end up with zero executable checks just because nobody wrote a
-/// `## verification` section.
-pub fn resolve_gates(root: &Path, contract_gates: &[String]) -> Vec<String> {
+/// Which gates a node is accountable for.
+///
+/// This distinction is load-bearing. Auto-detected gates are whole-project
+/// commands (`tsc --noEmit`, `npm run build`), and a leaf cannot satisfy those:
+/// when the first leaf runs, its siblings' modules do not exist yet, so the
+/// project legitimately does not typecheck. Applying project-wide gates to
+/// leaves would fail every early node through no fault of its own, exhaust its
+/// retries and stall the tree before integration was ever reached.
+///
+/// So leaves are accountable only for gates their contract states explicitly,
+/// and whole-project truth is enforced where it is actually actionable: on the
+/// integrating parents, whose job is to assemble the pieces and prove they work
+/// together - and which can reopen a specific child when they do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateScope {
+    /// A node implementing one contract directly.
+    Leaf,
+    /// A node aggregating completed children.
+    Integration,
+}
+
+/// Gates a contract asked for explicitly, else the detected suite - but only for
+/// integration nodes. Explicit gates always win and always apply, so a leaf can
+/// still be held to a specific command when its contract names one.
+pub fn resolve_gates(root: &Path, contract_gates: &[String], scope: GateScope) -> Vec<String> {
     if !contract_gates.is_empty() {
         return contract_gates.to_vec();
     }
-    detect_gates(root)
+    match scope {
+        GateScope::Leaf => Vec::new(),
+        GateScope::Integration => detect_gates(root),
+    }
 }
-
 /// Infer build/test commands from the manifests actually present.
 pub fn detect_gates(root: &Path) -> Vec<String> {
     let mut gates = Vec::new();
@@ -226,11 +248,32 @@ mod tests {
     }
 
     #[test]
-    fn explicit_contract_gates_override_detection() {
+    fn explicit_contract_gates_apply_to_every_scope() {
         let dir = temp_dir("explicit");
         std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
         let explicit = vec!["make verify".to_string()];
-        assert_eq!(resolve_gates(&dir, &explicit), explicit);
+        assert_eq!(resolve_gates(&dir, &explicit, GateScope::Leaf), explicit);
+        assert_eq!(resolve_gates(&dir, &explicit, GateScope::Integration), explicit);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression guard for a deadlock: whole-project gates on leaves would fail
+    /// the first leaf (its siblings' modules do not exist yet), burn its retries
+    /// and stall the whole tree before integration.
+    #[test]
+    fn leaves_do_not_inherit_whole_project_gates() {
+        let dir = temp_dir("leafscope");
+        std::fs::write(dir.join("package.json"), r#"{"scripts":{"build":"vite build","test":"vitest run"}}"#).unwrap();
+        std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
+
+        assert!(
+            resolve_gates(&dir, &[], GateScope::Leaf).is_empty(),
+            "a leaf must not be gated on the whole project building"
+        );
+        assert!(
+            !resolve_gates(&dir, &[], GateScope::Integration).is_empty(),
+            "an integrating parent must run the project's own build/test suite"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

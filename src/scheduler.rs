@@ -1,10 +1,11 @@
 use crate::runner::{
-    run_node, verify_node, RunnerError, COMPLETE_VERB, ESCALATE, NOTE_GLOBAL, SPLIT,
+    run_node, verify_node, RunnerError, COMPLETE_VERB, ESCALATE, NOTE_GLOBAL, REOPEN, SPLIT,
 };
 use crate::store::{
     Node, Store, StoreError, COMPLETE, FAILED, PENDING, RUNNING, SPLIT as SPLIT_STATUS,
 };
 use crate::tui::{StatsSnapshot, TuiState};
+use crate::verify::GateScope;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,6 +15,9 @@ pub(crate) static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 const MAX_DEPTH: i64 = 4;
 const MAX_ATTEMPTS: usize = 3;
 const MAX_STEPS: usize = 500;
+/// Builds and test suites are slow; a gate needs a far longer leash than an
+/// agent turn.
+const GATE_TIMEOUT_SECS: u64 = 900;
 
 pub struct RunReport {
     pub steps: usize,
@@ -464,7 +468,49 @@ fn run_one_node(
                     feedback = Some("COMPLETE refused: no summary, deliverable, or code modifications were provided.".into());
                     continue;
                 }
-                let criteria = node.contract().acceptance_criteria;
+
+                // Gate 1: the project's own commands. Their exit codes are the
+                // only evidence that cannot be talked around, so they run before
+                // any critic is consulted.
+                //
+                // Scope matters: a leaf is held only to gates its contract names,
+                // because whole-project commands cannot pass until its siblings
+                // exist. Integrating parents carry the project-wide suite, which
+                // is exactly where cross-module breakage is both detectable and
+                // fixable - and where `reopen` can push it back down.
+                let contract = node.contract();
+                let scope = if aggregating {
+                    GateScope::Integration
+                } else {
+                    GateScope::Leaf
+                };
+                let gates = crate::verify::resolve_gates(&store.root, &contract.verification, scope);
+                if !gates.is_empty() {
+                    on_output(&format!(
+                        "  [{}] running {} verification gate(s)",
+                        node.id,
+                        gates.len()
+                    ));
+                    let outcomes =
+                        crate::verify::run_gates(&store.root, &gates, GATE_TIMEOUT_SECS);
+                    if let Some(failures) = crate::verify::format_failures(&outcomes) {
+                        report.verify_failures += 1;
+                        report.refused += 1;
+                        store
+                            .append_log(
+                                node,
+                                &serde_json::json!({"event":"gate_failed","detail":&failures}),
+                            )
+                            .ok();
+                        feedback = Some(failures);
+                        continue;
+                    }
+                    store
+                        .append_decision(node, &format!("gates passed: {}", gates.join(" && ")))
+                        .ok();
+                }
+
+                let criteria = contract.acceptance_criteria;
                 report.verifications += 1;
                 match verify_node(store, node, &result.deliverable, &result.artifacts, &criteria, model) {
                     Ok((verdict, crit_details)) if verdict == "PASS" => {
@@ -472,6 +518,32 @@ fn run_one_node(
                             .complete(node, &result.summary, &result.deliverable, &result.artifacts)
                             .map_err(|e| e.to_string())?;
                         store.append_decision(node, "verified: verdict=PASS").ok();
+
+                        // One commit per verified node, so the code's history and
+                        // the tree's history are the same history and any single
+                        // node's contribution stays attributable and revertible.
+                        match crate::git::commit_node_work(&store.root, &node.id, &result.summary) {
+                            Ok(Some(sha)) => {
+                                let short: String = sha.chars().take(8).collect();
+                                let files = crate::git::changed_files_since(&store.root, &format!("{sha}~1"));
+                                store
+                                    .append_decision(
+                                        node,
+                                        &format!("committed {} ({} file(s))", short, files.len()),
+                                    )
+                                    .ok();
+                                on_output(&format!("  [{}] committed {}", node.id, short));
+                            }
+                            Ok(None) => {
+                                // Legitimate for a pure decomposition step.
+                            }
+                            Err(e) => {
+                                store
+                                    .append_log(node, &serde_json::json!({"event":"commit_failed","error":e}))
+                                    .ok();
+                            }
+                        }
+
                         report.completed += 1;
                         report.node_depths.push(node.depth);
                         {
@@ -514,6 +586,63 @@ fn run_one_node(
                             .ok();
                         report.refused += 1;
                         feedback = Some(format!("Verifier error: {e}"));
+                        continue;
+                    }
+                }
+            }
+            REOPEN => {
+                if children.is_empty() {
+                    report.refused += 1;
+                    feedback = Some(
+                        "REOPEN refused: this node has no children to send back. Fix the contract yourself or escalate."
+                            .into(),
+                    );
+                    continue;
+                }
+                if result.reopen_reason.trim().is_empty() {
+                    report.refused += 1;
+                    feedback = Some(
+                        "REOPEN refused: a reason is required so the reopened child knows what to fix."
+                            .into(),
+                    );
+                    continue;
+                }
+                match store.reopen_children(node, &result.reopen_children, &result.reopen_reason) {
+                    Ok(reopened) if !reopened.is_empty() => {
+                        on_output(&format!(
+                            "  [{}] reopened {} for rework",
+                            node.id,
+                            reopened.join(", ")
+                        ));
+                        store
+                            .append_log(
+                                node,
+                                &serde_json::json!({
+                                    "event": "reopen",
+                                    "children": reopened,
+                                    "reason": result.reopen_reason,
+                                }),
+                            )
+                            .ok();
+                        report.split += 1;
+                        {
+                            let mut s = state.lock().unwrap();
+                            s.nodes = store.walk().unwrap_or_default();
+                        }
+                        return Ok(report);
+                    }
+                    Ok(_) => {
+                        report.refused += 1;
+                        let ids: Vec<&str> = children.iter().map(|c| c.id.as_str()).collect();
+                        feedback = Some(format!(
+                            "REOPEN matched no child. Use exact ids from this node's own children: {}",
+                            ids.join(", ")
+                        ));
+                        continue;
+                    }
+                    Err(e) => {
+                        report.refused += 1;
+                        feedback = Some(format!("REOPEN failed: {e}"));
                         continue;
                     }
                 }

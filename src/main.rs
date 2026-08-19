@@ -75,6 +75,20 @@ enum Commands {
         #[arg(short, long)]
         node: Option<String>,
     },
+    /// Send specific children back for rework (integration failed)
+    Reopen {
+        /// Child node ids to reopen (repeatable, or comma-separated)
+        #[arg(short, long, value_delimiter = ',', num_args = 1..)]
+        children: Vec<String>,
+        /// What is broken, so the child knows what to fix
+        #[arg(short, long)]
+        reason: String,
+        /// Parent node ID (defaults to the active running node)
+        #[arg(short, long)]
+        node: Option<String>,
+    },
+    /// Run this project's verification gates and report the result
+    Verify,
 }
 fn install_panic_hook() {
     let original = std::panic::take_hook();
@@ -104,6 +118,12 @@ fn main() {
                 eprintln!("fractal: a goal is required: fractal init <goal>");
                 std::process::exit(2);
             }
+            // Git is a hard prerequisite, not an optional nicety: it is how each
+            // node's work is attributed, reviewed and undone.
+            if let Err(e) = git::ensure_repo(&project) {
+                eprintln!("fractal: could not prepare git repository: {e}");
+                std::process::exit(2);
+            }
             let s = store::Store::new(&project);
             match s.init(&goal) {
                 Ok(node) => {
@@ -121,6 +141,10 @@ fn main() {
             let s = store::Store::new(&project);
             if let Err(e) = s.require_initialised() {
                 eprintln!("fractal: {e}");
+                std::process::exit(2);
+            }
+            if let Err(e) = git::ensure_repo(&project) {
+                eprintln!("fractal: could not prepare git repository: {e}");
                 std::process::exit(2);
             }
             let goal = s.get("root").map(|n| n.goal).unwrap_or_default();
@@ -269,6 +293,58 @@ fn main() {
             let decision_file = project.join(format!(".fractal_decision_{}", target_node_id));
             let _ = std::fs::write(&decision_file, serde_json::to_string(&decision).unwrap());
             println!("Node '{}' recorded ESCALATION.", target_node_id);
+        }
+        Commands::Reopen { children, reason, node } => {
+            let s = store::Store::new(&project);
+            let target_node_id = node
+                .or_else(|| std::env::var("FRACTAL_NODE_ID").ok())
+                .unwrap_or_else(|| {
+                    s.walk()
+                        .ok()
+                        .and_then(|nodes| {
+                            nodes
+                                .iter()
+                                .find(|n| n.status == store::RUNNING)
+                                .map(|n| n.id.clone())
+                        })
+                        .unwrap_or_default()
+                });
+            if target_node_id.is_empty() {
+                eprintln!("fractal: no active or specified node found for 'reopen'");
+                std::process::exit(1);
+            }
+            if children.is_empty() {
+                eprintln!("fractal: --children requires at least one child node id");
+                std::process::exit(2);
+            }
+            let decision = serde_json::json!({
+                "verb": "reopen",
+                "children": children,
+                "reason": reason,
+            });
+            let decision_file = project.join(format!(".fractal_decision_{}", target_node_id));
+            let _ = std::fs::write(&decision_file, serde_json::to_string(&decision).unwrap());
+            println!(
+                "Node '{}' will reopen {} for rework.",
+                target_node_id,
+                children.join(", ")
+            );
+        }
+        Commands::Verify => {
+            let gates = verify::detect_gates(&project);
+            if gates.is_empty() {
+                println!("no verification gates detected for this project");
+                return;
+            }
+            let outcomes = verify::run_gates(&project, &gates, 900);
+            for outcome in &outcomes {
+                println!("{} $ {}", if outcome.passed { "PASS" } else { "FAIL" }, outcome.command);
+            }
+            if let Some(failures) = verify::format_failures(&outcomes) {
+                eprintln!("\n{failures}");
+                std::process::exit(1);
+            }
+            println!("\nall {} gate(s) passed", outcomes.len());
         }
     }
 }

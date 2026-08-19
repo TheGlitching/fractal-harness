@@ -78,6 +78,9 @@ pub struct Contract {
     #[allow(dead_code)]
     pub id: String,
     pub depends_on: Vec<String>,
+    /// Shell commands that must exit 0 before this node may complete.
+    /// Explicit gates apply at every scope, including leaves.
+    pub verification: Vec<String>,
     #[allow(dead_code)]
     pub allocation: i64,
 }
@@ -98,7 +101,8 @@ impl Contract {
              ## Acceptance criteria\n\n{ac}\
              ## Interfaces\n\n{iface}\
              ## Inherited constraints\n\n{cons}\
-             ## depends_on\n\n{deps}",
+             ## depends_on\n\n{deps}\
+             ## verification\n\n{verif}",
             nid = node_id,
             p = parent.unwrap_or("(none)"),
             depth = depth,
@@ -108,6 +112,7 @@ impl Contract {
             iface = bullets(&self.interfaces),
             cons = bullets(&self.constraints),
             deps = bullets(&self.depends_on),
+            verif = bullets(&self.verification),
         )
     }
 
@@ -149,6 +154,7 @@ impl Contract {
             constraints: unbullet("inherited constraints"),
             id: body("id"),
             depends_on: unbullet("depends_on"),
+            verification: unbullet("verification"),
             allocation: 0,
         };
         if c.goal.is_empty() {
@@ -199,6 +205,7 @@ impl Node {
                 constraints: vec![],
                 id: self.id.clone(),
                 depends_on: self.depends_on.clone(),
+                verification: vec![],
                 allocation: 0,
             }
         }
@@ -342,12 +349,17 @@ impl Store {
             goal: goal.to_string(),
             acceptance_criteria: vec![
                 "the goal is delivered in full".to_string(),
-                "every leaf leaves an artifact behind".to_string(),
+                "all the pieces are assembled into one working whole, not left as \
+                 independent modules"
+                    .to_string(),
+                "the project's own build, typecheck and test commands pass".to_string(),
             ],
             interfaces: vec![],
             constraints: vec![],
             id: String::new(),
             depends_on: vec![],
+            // The root always answers to the project's real commands.
+            verification: crate::verify::detect_gates(&self.root),
             allocation: 0,
         };
 
@@ -427,10 +439,23 @@ impl Store {
         if contracts.is_empty() {
             return Ok(vec![]);
         }
-        let existing = self.children_of(parent)?.len();
+        let existing_children = self.children_of(parent)?;
+        let existing = existing_children.len();
         let mut children = Vec::new();
         let mut id_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+
+        // Seed with children that already exist. A parent may split again later
+        // to add a capability, and that new child legitimately depends on its
+        // existing siblings. Without these entries such a dependency resolves to
+        // nothing, gets stripped with only a warning, and the new child becomes
+        // immediately runnable - running before the work it depends on.
+        for existing_child in &existing_children {
+            id_map.insert(existing_child.id.clone(), existing_child.id.clone());
+            if let Some(suffix) = existing_child.id.rsplit('-').next() {
+                id_map.insert(suffix.to_string(), existing_child.id.clone());
+            }
+        }
 
         for (i, c) in contracts.iter().enumerate() {
             let cid = format!("{}-{:02}", parent.id, existing + i + 1);
@@ -937,7 +962,56 @@ impl Store {
         }
         Ok(count)
     }
+    /// Send specific children back to PENDING with a reason recorded on each.
+    ///
+    /// This is the escape hatch the tree previously lacked: when an integrating
+    /// parent discovered that a child's work did not actually function, its only
+    /// options were to keep retrying itself or to fail permanently. Neither
+    /// re-engages the agent that owns the broken code. `reason` is appended to
+    /// each child's decision log so the relaunched agent sees why it is back.
+    pub fn reopen_children(
+        &self,
+        parent: &Node,
+        child_ids: &[String],
+        reason: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let nodes = self.walk()?;
+        let mut reopened = Vec::new();
 
+        for child_id in child_ids {
+            let child = match nodes.iter().find(|n| &n.id == child_id) {
+                Some(c) => c,
+                None => continue,
+            };
+            // A parent may only reopen its own subtree.
+            if child.parent.as_deref() != Some(parent.id.as_str()) {
+                continue;
+            }
+
+            // Reset the child and everything beneath it, so a child that had
+            // itself decomposed is re-derived rather than left half-stale.
+            let prefix = format!("{}/", child.path.to_string_lossy());
+            for node in nodes
+                .iter()
+                .filter(|n| n.id == child.id || n.path.to_string_lossy().starts_with(&prefix))
+            {
+                self.set_status(node, PENDING)?;
+            }
+
+            self.append_decision(child, &format!("reopened by {}: {}", parent.id, reason.trim()))?;
+            reopened.push(child.id.clone());
+        }
+
+        if !reopened.is_empty() {
+            self.set_status(parent, SPLIT)?;
+            self.append_decision(
+                parent,
+                &format!("reopened children {}: {}", reopened.join(", "), reason.trim()),
+            )?;
+        }
+
+        Ok(reopened)
+    }
     pub fn budget_remaining(&self, node_id: &str) -> Result<i64, StoreError> {
         self.with_conn(|conn| {
             let (a, c, f, ch): (i64, i64, i64, i64) = conn.query_row(
@@ -1040,4 +1114,119 @@ pub struct GlobalEntry {
     pub id: String,
     pub entry_type: String,
     pub content: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_store(name: &str) -> (Store, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("fractal_store_{}_{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        (Store::new(&dir), dir)
+    }
+
+    /// A parent that splits again to add a capability produces a child which
+    /// depends on its EXISTING siblings. If those ids do not resolve, the
+    /// dependency is stripped and the new child runs before the work it needs.
+    #[test]
+    fn added_child_can_depend_on_existing_siblings() {
+        let (store, dir) = temp_store("crossbatch");
+        let root = store.init("build a thing").unwrap();
+
+        let first = store
+            .add_children(
+                &root,
+                &[Contract { goal: "produce a module".into(), id: "producer".into(), ..Default::default() }],
+            )
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let producer_id = first[0].id.clone();
+
+        let second = store
+            .add_children(
+                &root,
+                &[Contract {
+                    goal: "consume that module".into(),
+                    id: "consumer".into(),
+                    depends_on: vec![producer_id.clone()],
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(second.len(), 1);
+        assert_eq!(
+            second[0].depends_on,
+            vec![producer_id],
+            "dependency on an existing sibling must survive, or ordering is lost"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reopen_children_resets_only_own_children() {
+        let (store, dir) = temp_store("reopen");
+        let root = store.init("goal").unwrap();
+        let kids = store
+            .add_children(
+                &root,
+                &[
+                    Contract { goal: "a".into(), id: "a".into(), ..Default::default() },
+                    Contract { goal: "b".into(), id: "b".into(), ..Default::default() },
+                ],
+            )
+            .unwrap();
+
+        for kid in &kids {
+            store.set_status(kid, COMPLETE).unwrap();
+        }
+
+        let reopened = store
+            .reopen_children(&root, &[kids[0].id.clone()], "does not build")
+            .unwrap();
+        assert_eq!(reopened, vec![kids[0].id.clone()]);
+
+        let after = store.walk().unwrap();
+        let a = after.iter().find(|n| n.id == kids[0].id).unwrap();
+        let b = after.iter().find(|n| n.id == kids[1].id).unwrap();
+        assert_eq!(a.status, PENDING, "reopened child must be runnable again");
+        assert_eq!(b.status, COMPLETE, "untouched sibling must keep its status");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reopen_refuses_a_node_that_is_not_our_child() {
+        let (store, dir) = temp_store("notmine");
+        let root = store.init("goal").unwrap();
+        let kids = store
+            .add_children(&root, &[Contract { goal: "a".into(), id: "a".into(), ..Default::default() }])
+            .unwrap();
+        let grandkids = store
+            .add_children(&kids[0], &[Contract { goal: "deep".into(), id: "deep".into(), ..Default::default() }])
+            .unwrap();
+        store.set_status(&grandkids[0], COMPLETE).unwrap();
+
+        // root is the grandparent, not the parent, so this must be refused.
+        let reopened = store
+            .reopen_children(&root, &[grandkids[0].id.clone()], "nope")
+            .unwrap();
+        assert!(reopened.is_empty(), "a parent may only reopen its own direct children");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn contract_roundtrips_verification_gates() {
+        let contract = Contract {
+            goal: "do it".into(),
+            verification: vec!["npm test".into(), "npx tsc --noEmit".into()],
+            ..Default::default()
+        };
+        let parsed = Contract::parse(&contract.render("root-01", 2, Some("root")));
+        assert_eq!(parsed.verification, contract.verification);
+    }
 }
