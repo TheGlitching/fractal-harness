@@ -1089,6 +1089,12 @@ fulfilled.
 The 'Actual code change' section is the git diff of this work. It is ground truth; \
 the deliverable summary is only a claim. Where they disagree, believe the diff.
 
+The harness caps how much evidence it can show for length. When it does, the cut is \
+marked explicitly and the omitted text was removed by the harness, not by the node. \
+Never FAIL a deliverable merely because a preview ended or a file was cut for length; \
+judge what is present and say what you could not see, rather than treating the \
+harness's cap as the node's incomplete work.
+
 FAIL if the diff is empty for a node that was supposed to implement something.
 FAIL if the diff adds a stub, placeholder, mock, hardcoded sample data, or a \
 component that renders nothing, whatever the summary claims.
@@ -1186,18 +1192,48 @@ pub fn verify_node(
         }
     );
     let message = call_critic(store, node, &prompt, model)?;
-    let (verdict, details) = parse_verdict(&message)?;
+    let (raw_verdict, raw_reason, raw_details) = parse_verdict_full(&message)?;
     // Reject a verdict that grades criteria belonging to another node. It is
     // retried with feedback rather than trusted, so a critic that never saw the
     // node's criteria cannot fail a correct leaf for its siblings' absent work.
-    if !verdict_matches_criteria(criteria, &details) {
-        let reason = "the verdict did not address this node's own acceptance criteria; \
-                      grade only the criteria listed for this node"
+    let (verdict, reason, details) = if verdict_matches_criteria(criteria, &raw_details) {
+        (raw_verdict, raw_reason, raw_details)
+    } else {
+        let scope_reason = "the verdict did not address this node's own acceptance criteria; \
+                            grade only the criteria listed for this node"
             .to_string();
-        return Ok((
+        (
             "FAIL".to_string(),
-            vec![serde_json::json!({"name": "verdict scope", "pass": false, "reason": reason})],
-        ));
+            scope_reason.clone(),
+            vec![
+                serde_json::json!({"name": "verdict scope", "pass": false, "reason": scope_reason}),
+            ],
+        )
+    };
+    // Persist a rejection into the node's own log and decisions. Without this a
+    // run that dies on critic judgement can only be explained by querying the
+    // session database, which is exactly how trial 3's H2 stayed invisible.
+    if verdict != "PASS" {
+        store
+            .append_log(
+                node,
+                &serde_json::json!({
+                    "event": "critic_rejected",
+                    "verdict": verdict,
+                    "reason": reason,
+                    "criteria": details,
+                }),
+            )
+            .ok();
+        store
+            .append_decision(
+                node,
+                &format!(
+                    "critic rejected (verdict={verdict}): {}",
+                    reason.replace('\n', " ")
+                ),
+            )
+            .ok();
     }
     Ok((verdict, details))
 }
@@ -1408,13 +1444,50 @@ fn normalize_criterion(text: &str) -> String {
         .to_lowercase()
 }
 
+/// Words that carry no requirement and would inflate a token-overlap score.
+const CRITERION_STOPWORDS: [&str; 24] = [
+    "the", "a", "an", "and", "or", "of", "to", "is", "are", "be", "for", "in", "on", "with",
+    "that", "this", "it", "as", "at", "by", "from", "must", "should", "all",
+];
+
+/// Significant normalized tokens: short function words dropped so a paraphrase
+/// is judged on its content words, not on shared filler.
+fn criterion_tokens(text: &str) -> Vec<&str> {
+    text.split_whitespace()
+        .filter(|t| t.len() > 2 && !CRITERION_STOPWORDS.contains(t))
+        .collect()
+}
+
+/// Fraction of the smaller criterion's significant tokens that appear in the
+/// other. 1.0 when one is a subset of the other, so a critic that renames a
+/// criterion while keeping its meaning still matches.
+fn token_overlap(a: &str, b: &str) -> f64 {
+    let ta = criterion_tokens(a);
+    let tb = criterion_tokens(b);
+    let (small, large) = if ta.len() <= tb.len() {
+        (&ta, &tb)
+    } else {
+        (&tb, &ta)
+    };
+    if small.is_empty() || large.is_empty() {
+        return 0.0;
+    }
+    let shared = small.iter().filter(|t| large.contains(t)).count();
+    shared as f64 / small.len() as f64
+}
+
 /// True when two criteria refer to the same requirement: an exact match after
-/// normalization, or one containing the other (the critic may append its own
-/// parenthetical detail to a copied criterion).
+/// normalization, one containing the other (the critic may append its own
+/// parenthetical detail to a copied criterion), or a paraphrase sharing most of
+/// one criterion's significant words.
 fn criterion_matches(returned: &str, criterion: &str) -> bool {
-    !returned.is_empty()
-        && !criterion.is_empty()
-        && (returned == criterion || returned.contains(criterion) || criterion.contains(returned))
+    if returned.is_empty() || criterion.is_empty() {
+        return false;
+    }
+    returned == criterion
+        || returned.contains(criterion)
+        || criterion.contains(returned)
+        || token_overlap(returned, criterion) >= 0.6
 }
 
 /// A verdict is only evidence about *this* node when it grades this node's own
@@ -1446,7 +1519,16 @@ fn verdict_matches_criteria(criteria: &[String], details: &[Value]) -> bool {
     foreign_free && all_addressed
 }
 
+#[cfg(test)]
 fn parse_verdict(msg: &Value) -> std::result::Result<(String, Vec<Value>), RunnerError> {
+    parse_verdict_full(msg).map(|(verdict, _reason, details)| (verdict, details))
+}
+
+/// As `parse_verdict`, but also surfaces the critic's top-level reason. The
+/// rejection reason is persisted to the node's own artifacts, so callers need it.
+fn parse_verdict_full(
+    msg: &Value,
+) -> std::result::Result<(String, String, Vec<Value>), RunnerError> {
     let content = msg
         .get("content")
         .and_then(|c| c.as_array())
@@ -1456,11 +1538,16 @@ fn parse_verdict(msg: &Value) -> std::result::Result<(String, Vec<Value>), Runne
         .unwrap_or("");
     let d = extract_verdict(content)
         .ok_or_else(|| RunnerError::Other(format!("critic returned no verdict: {content}")))?;
-    let verdict = d
+    let mut verdict = d
         .get("verdict")
         .and_then(|v| v.as_str())
         .map(|v| v.trim().to_ascii_uppercase())
         .unwrap_or_else(|| "FAIL".to_string());
+    let reason = d
+        .get("reason")
+        .and_then(|r| r.as_str())
+        .unwrap_or("")
+        .to_string();
     let details: Vec<Value> = d
         .get("criteria")
         .and_then(|c| c.as_array())
@@ -1469,9 +1556,9 @@ fn parse_verdict(msg: &Value) -> std::result::Result<(String, Vec<Value>), Runne
     // An explicit PASS must carry per-criterion results. A bare PASS with
     // nothing checked is not evidence that anything was verified.
     if verdict == "PASS" && details.is_empty() {
-        return Ok(("FAIL".to_string(), details));
+        verdict = "FAIL".to_string();
     }
-    Ok((verdict, details))
+    Ok((verdict, reason, details))
 }
 
 #[cfg(test)]
@@ -1618,6 +1705,46 @@ Working..."#;
         let returned: Vec<Value> =
             serde_json::from_str(r#"[{"name":"alpha works","pass":true,"reason":"ok"}]"#).unwrap();
         assert!(!verdict_matches_criteria(&own, &returned));
+    }
+
+    /// A paraphrasing critic that keeps a criterion's meaning must not be forced
+    /// to FAIL only because it did not echo the name verbatim.
+    #[test]
+    fn paraphrased_criterion_is_accepted_by_token_overlap() {
+        let own = vec!["README explains test and build commands".to_string()];
+        let returned: Vec<Value> = serde_json::from_str(
+            r#"[{"name":"Test and build commands are documented","pass":true,"reason":"ok"}]"#,
+        )
+        .unwrap();
+        assert!(
+            verdict_matches_criteria(&own, &returned),
+            "a meaning-preserving rename must not be treated as a foreign criterion"
+        );
+    }
+
+    /// Token overlap must not become a rubber stamp: an unrelated criterion is
+    /// still rejected.
+    #[test]
+    fn unrelated_criterion_is_still_rejected() {
+        let own = vec!["README explains test and build commands".to_string()];
+        let returned: Vec<Value> = serde_json::from_str(
+            r#"[{"name":"the app renders a portfolio table","pass":true,"reason":"ok"}]"#,
+        )
+        .unwrap();
+        assert!(!verdict_matches_criteria(&own, &returned));
+    }
+
+    /// The top-level reason is surfaced for persistence, and a bare PASS is still
+    /// downgraded.
+    #[test]
+    fn parse_verdict_full_surfaces_the_reason() {
+        let msg = critic_message(
+            r#"{"verdict":"FAIL","reason":"README is truncated","criteria":[{"name":"x","pass":false,"reason":"cut"}]}"#,
+        );
+        let (verdict, reason, details) = parse_verdict_full(&msg).unwrap();
+        assert_eq!(verdict, "FAIL");
+        assert_eq!(reason, "README is truncated");
+        assert_eq!(details.len(), 1);
     }
 
     /// Per-node context must not grow with the project's age (steering events),
