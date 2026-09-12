@@ -1,4 +1,9 @@
 use crate::store::Node;
+use crossterm::{
+    event::{self, Event, KeyCode, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -6,11 +11,6 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
     Frame, Terminal,
-};
-use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::collections::HashMap;
 use std::io;
@@ -64,7 +64,11 @@ pub struct StatsSnapshot {
 pub enum TuiMode {
     Normal,
     Inspect,
-    InputPrompt { title: String, input: String, command: String },
+    InputPrompt {
+        title: String,
+        input: String,
+        command: String,
+    },
 }
 
 pub struct TuiState {
@@ -123,7 +127,8 @@ impl Tui {
                         && key.modifiers.contains(KeyModifiers::CONTROL))
                         || key.code == KeyCode::Char('q')
                     {
-                        crate::scheduler::INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+                        crate::scheduler::INTERRUPTED
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                         break;
                     }
 
@@ -159,7 +164,8 @@ impl Tui {
                                     let _ = store.retry(&nid);
                                     let _ = store.enqueue_steer("retry", &nid);
                                     s.nodes = store.walk().unwrap_or_default();
-                                    s.prompt_message = Some(format!("Retried node {nid} (reset to pending)"));
+                                    s.prompt_message =
+                                        Some(format!("Retried node {nid} (reset to pending)"));
                                 }
                             }
                             _ => {}
@@ -210,22 +216,27 @@ impl Tui {
                                     let _ = store.retry(&nid);
                                     let _ = store.enqueue_steer("retry", &nid);
                                     s.nodes = store.walk().unwrap_or_default();
-                                    s.prompt_message = Some(format!("Retried node {nid} (reset to pending)"));
+                                    s.prompt_message =
+                                        Some(format!("Retried node {nid} (reset to pending)"));
                                 }
                             }
                             _ => {}
                         },
-                        TuiMode::InputPrompt { title, input, command } => match key.code {
+                        TuiMode::InputPrompt {
+                            title,
+                            input,
+                            command,
+                        } => match key.code {
                             KeyCode::Esc => {
                                 s.mode = TuiMode::Normal;
                             }
                             KeyCode::Enter => {
-                                if !input.trim().is_empty() {
-                                    if command.starts_with("constraint:") {
-                                        let nid = command.trim_start_matches("constraint:");
-                                        let _ = store.enqueue_steer("constraint", &format!("{nid}:{input}"));
-                                        s.prompt_message = Some(format!("Constraint applied: \"{input}\" on {nid}"));
-                                    }
+                                if !input.trim().is_empty() && command.starts_with("constraint:") {
+                                    let nid = command.trim_start_matches("constraint:");
+                                    let _ = store
+                                        .enqueue_steer("constraint", &format!("{nid}:{input}"));
+                                    s.prompt_message =
+                                        Some(format!("Constraint applied: \"{input}\" on {nid}"));
                                 }
                                 s.mode = TuiMode::Normal;
                             }
@@ -257,13 +268,18 @@ impl Tui {
             if done {
                 let all_complete = {
                     let s = self.state.lock().unwrap();
-                    s.nodes.iter().all(|n| n.status == "complete" || n.status == "split")
+                    s.nodes
+                        .iter()
+                        .all(|n| n.status == "complete" || n.status == "split")
                         && !s.nodes.is_empty()
                 };
                 if all_complete {
                     let mut s = self.state.lock().unwrap();
-                    if s.status_line.is_empty() || s.status_line.starts_with("All tasks completed") {
-                        s.status_line = "Project complete! Press 'q' or 'Enter' to view summary and exit.".to_string();
+                    if s.status_line.is_empty() || s.status_line.starts_with("All tasks completed")
+                    {
+                        s.status_line =
+                            "Project complete! Press 'q' or 'Enter' to view summary and exit."
+                                .to_string();
                     }
                 }
             }
@@ -358,20 +374,36 @@ impl Tui {
             if let Some(node) = state.nodes.get(state.selected_idx) {
                 inspect_lines.push(Line::from(vec![
                     Span::styled("Node ID:  ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(&node.id, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  [{}]", node.status), Style::default().fg(status_color(&node.status)).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        &node.id,
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  [{}]", node.status),
+                        Style::default()
+                            .fg(status_color(&node.status))
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]));
                 if let Some(ref p) = node.parent {
                     inspect_lines.push(Line::from(vec![
                         Span::styled("Parent:   ", Style::default().fg(Color::DarkGray)),
                         Span::styled(p, Style::default().fg(Color::Gray)),
-                        Span::styled(format!("  (depth: {})", node.depth), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("  (depth: {})", node.depth),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ]));
                 }
                 if !node.depends_on.is_empty() {
                     inspect_lines.push(Line::from(vec![
                         Span::styled("Depends:  ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(node.depends_on.join(", "), Style::default().fg(Color::LightBlue)),
+                        Span::styled(
+                            node.depends_on.join(", "),
+                            Style::default().fg(Color::LightBlue),
+                        ),
                     ]));
                 }
                 inspect_lines.push(Line::from(""));
@@ -380,7 +412,9 @@ impl Tui {
                 let contract = node.contract();
                 inspect_lines.push(Line::from(Span::styled(
                     "▶ CONTRACT GOAL",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 for g_line in node.goal.lines() {
                     inspect_lines.push(Line::from(Span::styled(
@@ -393,7 +427,9 @@ impl Tui {
                 if !contract.acceptance_criteria.is_empty() {
                     inspect_lines.push(Line::from(Span::styled(
                         "▶ ACCEPTANCE CRITERIA",
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
                     )));
                     for c in &contract.acceptance_criteria {
                         inspect_lines.push(Line::from(Span::styled(
@@ -407,7 +443,9 @@ impl Tui {
                 if !contract.constraints.is_empty() {
                     inspect_lines.push(Line::from(Span::styled(
                         "▶ INHERITED CONSTRAINTS",
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
                     )));
                     for c in &contract.constraints {
                         inspect_lines.push(Line::from(Span::styled(
@@ -420,14 +458,14 @@ impl Tui {
 
                 // Decisions section
                 if let Ok(decisions) = std::fs::read_to_string(node.decisions_path()) {
-                    let d_lines: Vec<&str> = decisions
-                        .lines()
-                        .filter(|l| l.starts_with("- "))
-                        .collect();
+                    let d_lines: Vec<&str> =
+                        decisions.lines().filter(|l| l.starts_with("- ")).collect();
                     if !d_lines.is_empty() {
                         inspect_lines.push(Line::from(Span::styled(
                             "▶ DECISIONS TIMELINE",
-                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
                         )));
                         for l in d_lines {
                             inspect_lines.push(Line::from(Span::styled(
@@ -441,24 +479,34 @@ impl Tui {
 
                 // Recent Events & Logs
                 if let Ok(events) = std::fs::read_to_string(node.log_path()) {
-                    let last_events: Vec<&str> = events.lines().filter(|l| !l.trim().is_empty()).collect();
+                    let last_events: Vec<&str> =
+                        events.lines().filter(|l| !l.trim().is_empty()).collect();
                     if !last_events.is_empty() {
                         inspect_lines.push(Line::from(Span::styled(
                             "▶ RECENT LOG EVENTS",
-                            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Blue)
+                                .add_modifier(Modifier::BOLD),
                         )));
                         for ev in last_events.iter().rev().take(4) {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(ev) {
-                                let event_name = v.get("event").and_then(|e| e.as_str()).unwrap_or("event");
-                                let detail = if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
-                                    format!("error: {}", truncate(err, 60))
-                                } else if let Some(reason) = v.get("reason").and_then(|r| r.as_str()) {
-                                    format!("reason: {}", truncate(reason, 60))
-                                } else {
-                                    truncate(ev, 60)
-                                };
+                                let event_name =
+                                    v.get("event").and_then(|e| e.as_str()).unwrap_or("event");
+                                let detail =
+                                    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                                        format!("error: {}", truncate(err, 60))
+                                    } else if let Some(reason) =
+                                        v.get("reason").and_then(|r| r.as_str())
+                                    {
+                                        format!("reason: {}", truncate(reason, 60))
+                                    } else {
+                                        truncate(ev, 60)
+                                    };
                                 inspect_lines.push(Line::from(vec![
-                                    Span::styled(format!("  • [{}] ", event_name), Style::default().fg(Color::DarkGray)),
+                                    Span::styled(
+                                        format!("  • [{}] ", event_name),
+                                        Style::default().fg(Color::DarkGray),
+                                    ),
                                     Span::styled(detail, Style::default().fg(Color::Gray)),
                                 ]));
                             }
@@ -471,7 +519,9 @@ impl Tui {
                 if !node.summary.is_empty() {
                     inspect_lines.push(Line::from(Span::styled(
                         "▶ SUMMARY DELIVERABLE",
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
                     )));
                     for s_line in node.summary.lines() {
                         inspect_lines.push(Line::from(Span::styled(
@@ -487,13 +537,20 @@ impl Tui {
                 if !artifacts.is_empty() {
                     inspect_lines.push(Line::from(Span::styled(
                         format!("▶ CODE ARTIFACTS ({})", artifacts.len()),
-                        Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::LightCyan)
+                            .add_modifier(Modifier::BOLD),
                     )));
                     for art_path in &artifacts {
                         let fname = art_path.file_name().unwrap_or_default().to_string_lossy();
                         inspect_lines.push(Line::from(vec![
                             Span::styled("  📁 ", Style::default().fg(Color::Yellow)),
-                            Span::styled(format!("artifacts/{}", fname), Style::default().fg(Color::White).add_modifier(Modifier::UNDERLINED)),
+                            Span::styled(
+                                format!("artifacts/{}", fname),
+                                Style::default()
+                                    .fg(Color::White)
+                                    .add_modifier(Modifier::UNDERLINED),
+                            ),
                         ]));
                         if let Ok(content) = std::fs::read_to_string(art_path) {
                             for (c_idx, c_line) in content.lines().take(15).enumerate() {
@@ -504,7 +561,10 @@ impl Tui {
                             }
                             if content.lines().count() > 15 {
                                 inspect_lines.push(Line::from(Span::styled(
-                                    format!("    ... ({} more lines)", content.lines().count() - 15),
+                                    format!(
+                                        "    ... ({} more lines)",
+                                        content.lines().count() - 15
+                                    ),
                                     Style::default().fg(Color::DarkGray),
                                 )));
                             }
@@ -513,7 +573,10 @@ impl Tui {
                     }
                 }
             } else {
-                inspect_lines.push(Line::from(Span::styled("No node selected", Style::default().fg(Color::DarkGray))));
+                inspect_lines.push(Line::from(Span::styled(
+                    "No node selected",
+                    Style::default().fg(Color::DarkGray),
+                )));
             }
 
             let inspect_p = Paragraph::new(Text::from(inspect_lines))
@@ -535,23 +598,38 @@ impl Tui {
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  Steps:     ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("{}", state.stats.steps), Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("{}", state.stats.steps),
+                        Style::default().fg(Color::White),
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled("  Completed: ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("{}", state.stats.completed), Style::default().fg(Color::Green)),
+                    Span::styled(
+                        format!("{}", state.stats.completed),
+                        Style::default().fg(Color::Green),
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled("  Split:     ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("{}", state.stats.split), Style::default().fg(Color::LightBlue)),
+                    Span::styled(
+                        format!("{}", state.stats.split),
+                        Style::default().fg(Color::LightBlue),
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled("  Failed:    ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("{}", state.stats.failed), Style::default().fg(Color::Red)),
+                    Span::styled(
+                        format!("{}", state.stats.failed),
+                        Style::default().fg(Color::Red),
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled("  Refused:   ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(format!("{}", state.stats.refused), Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("{}", state.stats.refused),
+                        Style::default().fg(Color::Yellow),
+                    ),
                 ]),
                 Line::from(""),
                 Line::from(vec![
@@ -562,23 +640,29 @@ impl Tui {
             ];
 
             if let Some(ref msg) = state.prompt_message {
-                stats_lines.push(Line::from(vec![
-                    Span::styled("  Notice:", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
-                ]));
-                stats_lines.push(Line::from(vec![
-                    Span::styled(format!("    {}", truncate(msg, 32)), Style::default().fg(Color::LightGreen)),
-                ]));
+                stats_lines.push(Line::from(vec![Span::styled(
+                    "  Notice:",
+                    Style::default()
+                        .fg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                stats_lines.push(Line::from(vec![Span::styled(
+                    format!("    {}", truncate(msg, 32)),
+                    Style::default().fg(Color::LightGreen),
+                )]));
                 stats_lines.push(Line::from(""));
             }
 
             if !state.stats.failed_goals.is_empty() {
-                stats_lines.push(Line::from(vec![
-                    Span::styled("  Failed:", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                ]));
+                stats_lines.push(Line::from(vec![Span::styled(
+                    "  Failed:",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )]));
                 for g in &state.stats.failed_goals {
-                    stats_lines.push(Line::from(vec![
-                        Span::styled(format!("    ✗ {}", truncate(g, 25)), Style::default().fg(Color::Red)),
-                    ]));
+                    stats_lines.push(Line::from(vec![Span::styled(
+                        format!("    ✗ {}", truncate(g, 25)),
+                        Style::default().fg(Color::Red),
+                    )]));
                 }
                 stats_lines.push(Line::from(""));
             }
@@ -598,9 +682,7 @@ impl Tui {
                 Line::from(vec![
                     Span::styled(
                         " ✗ ",
-                        Style::default()
-                            .fg(Color::Red)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(err.as_str(), Style::default().fg(Color::Red)),
                 ])
@@ -636,7 +718,10 @@ impl Tui {
             Line::from(vec![
                 Span::styled(format!(" {spun} "), Style::default().fg(Color::Cyan)),
                 Span::styled(truncate(action, 35), Style::default().fg(Color::White)),
-                Span::styled(format!(" [{node_time}]"), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!(" [{node_time}]"),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(activity, Style::default().fg(Color::Gray)),
             ])
         };
@@ -650,7 +735,12 @@ impl Tui {
         frame.render_widget(status_p, chunks[2]);
 
         // Input Modal if in InputPrompt mode
-        if let TuiMode::InputPrompt { ref title, ref input, .. } = state.mode {
+        if let TuiMode::InputPrompt {
+            ref title,
+            ref input,
+            ..
+        } = state.mode
+        {
             let area = centered_rect(60, 25, frame.area());
             frame.render_widget(Clear, area);
 
@@ -662,12 +752,20 @@ impl Tui {
             let input_lines = vec![
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled("> ", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "> ",
+                        Style::default()
+                            .fg(Color::LightYellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(input, Style::default().fg(Color::White)),
                     Span::styled("█", Style::default().fg(Color::Yellow)),
                 ]),
                 Line::from(""),
-                Line::from(Span::styled("[Enter: Confirm, Esc: Cancel]", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "[Enter: Confirm, Esc: Cancel]",
+                    Style::default().fg(Color::DarkGray),
+                )),
             ];
 
             let p = Paragraph::new(input_lines).block(modal_block);
@@ -676,7 +774,11 @@ impl Tui {
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
+fn centered_rect(
+    percent_x: u16,
+    percent_y: u16,
+    r: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -722,6 +824,7 @@ fn build_tree_lines(state: &TuiState, spinner_idx: usize) -> Vec<ListItem<'_>> {
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_node(
     node: &Node,
     all: &[Node],
@@ -754,10 +857,7 @@ fn render_node(
         style = style.add_modifier(Modifier::BOLD | Modifier::REVERSED);
     }
 
-    let span = Span::styled(
-        format!("{select_marker}{prefix}{icon}{spin} {goal}"),
-        style,
-    );
+    let span = Span::styled(format!("{select_marker}{prefix}{icon}{spin} {goal}"), style);
     lines.push(ListItem::new(span));
 
     if running {

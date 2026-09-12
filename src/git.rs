@@ -91,13 +91,21 @@ fn commit(root: &Path, message: &str) -> Result<String, String> {
 /// Stage everything and commit on a node's behalf.
 /// `Ok(None)` means the node changed nothing, which is a legitimate outcome for
 /// a pure decomposition step and must not be reported as a failure.
-pub fn commit_node_work(root: &Path, node_id: &str, summary: &str) -> Result<Option<String>, String> {
+pub fn commit_node_work(
+    root: &Path,
+    node_id: &str,
+    summary: &str,
+) -> Result<Option<String>, String> {
     git(root, &["add", "-A"])?;
     if is_clean(root) {
         return Ok(None);
     }
     let headline = summary.lines().next().unwrap_or("work").trim();
-    let headline = if headline.is_empty() { "work" } else { headline };
+    let headline = if headline.is_empty() {
+        "work"
+    } else {
+        headline
+    };
     let truncated: String = headline.chars().take(72).collect();
     let sha = commit(root, &format!("{node_id}: {truncated}"))?;
     Ok(Some(sha))
@@ -106,7 +114,12 @@ pub fn commit_node_work(root: &Path, node_id: &str, summary: &str) -> Result<Opt
 /// Files a node touched, relative to the repo root.
 pub fn changed_files_since(root: &Path, base: &str) -> Vec<String> {
     git(root, &["diff", "--name-only", base, "HEAD"])
-        .map(|s| s.lines().map(|l| l.to_string()).filter(|l| !l.is_empty()).collect())
+        .map(|s| {
+            s.lines()
+                .map(|l| l.to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -126,11 +139,20 @@ pub fn diff_since(root: &Path, base: &str, max_bytes: usize) -> String {
     while cut > 0 && !full.is_char_boundary(cut) {
         cut -= 1;
     }
-    format!("{}\n... [diff truncated, {} bytes total]", &full[..cut], full.len())
+    format!(
+        "{}\n... [diff truncated, {} bytes total]",
+        &full[..cut],
+        full.len()
+    )
 }
 
 /// Discard uncommitted noise so a retried attempt starts from the last known
 /// good commit instead of inheriting the failed attempt's half-written files.
+///
+/// Currently exercised only by tests; re-enabled in the scheduler by the
+/// follow-up isolation task (per-node isolation: judge each node against its own
+/// diff and revert a failed attempt).
+#[allow(dead_code)]
 pub fn reset_uncommitted(root: &Path) -> Result<(), String> {
     git(root, &["reset", "--hard", "HEAD"])?;
     git(root, &["clean", "-fd"])?;
@@ -164,7 +186,11 @@ mod tests {
         ensure_repo(&dir).unwrap();
         let first = head_sha(&dir).unwrap();
         ensure_repo(&dir).unwrap();
-        assert_eq!(first, head_sha(&dir).unwrap(), "must not add a second baseline");
+        assert_eq!(
+            first,
+            head_sha(&dir).unwrap(),
+            "must not add a second baseline"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -173,7 +199,10 @@ mod tests {
         let dir = temp_repo("noop");
         ensure_repo(&dir).unwrap();
         let sha = commit_node_work(&dir, "root-01", "did nothing").unwrap();
-        assert!(sha.is_none(), "a no-change node must not fabricate a commit");
+        assert!(
+            sha.is_none(),
+            "a no-change node must not fabricate a commit"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
