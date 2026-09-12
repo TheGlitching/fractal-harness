@@ -367,6 +367,28 @@ pub fn has_uncommitted_changes(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Auto-generated files whose contents are noise to a critic. A lockfile can be
+/// hundreds of KB and sorts before hand-written source, so previewing it consumes
+/// the whole evidence budget and hides the actual deliverable (trial 4 H2b).
+fn is_generated_file(path: &str) -> bool {
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path);
+    name.ends_with("-lock.json") || name == "Cargo.lock"
+}
+
+fn file_header(file: &str, chars: usize) -> String {
+    format!("\n--- new file: {file} ({chars} chars) ---\n")
+}
+
+/// Bytes a per-file cut marker can occupy, reserved before content is allocated
+/// so the marker of one file cannot crowd out another file's window.
+const FILE_MARKER_RESERVE: usize = 120;
+/// Bytes reserved for the explicit harness-truncation marker appended when any
+/// content had to be cut.
+const GLOBAL_MARKER_RESERVE: usize = 300;
+
 /// Human-readable evidence of the working tree's change vs HEAD, including
 /// untracked files (new files an agent wrote are the common case for a leaf).
 /// `git diff HEAD` alone shows nothing for a brand-new file, so previews of
@@ -381,33 +403,83 @@ pub fn worktree_change_summary(root: &Path, max_bytes: usize) -> String {
     }
 
     let untracked = git(root, LS_OTHERS_EXCLUDING_HARNESS).unwrap_or_default();
+    let mut generated: Vec<String> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
     for file in untracked.lines().filter(|l| !l.is_empty()) {
         let content = std::fs::read_to_string(root.join(file)).unwrap_or_default();
-        // Preview the whole file. A silent per-file cut made a complete file
-        // look like an incomplete deliverable to a strict critic, which then
-        // failed it on every retry (H2). The overall `max_bytes` cap below is
-        // the only budget, and it now carries an explicit marker.
-        let total = content.chars().count();
-        out.push_str(&format!(
-            "\n--- new file: {file} ({total} chars) ---\n{content}\n"
-        ));
+        if is_generated_file(file) {
+            generated.push(file.to_string());
+        } else {
+            files.push((file.to_string(), content));
+        }
     }
+    let generated_note = if generated.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n--- auto-generated files (content omitted; {} in total): {} ---\n",
+            generated.len(),
+            generated.join(", ")
+        )
+    };
 
-    if out.len() <= max_bytes {
+    // Preview each file whole. A silent per-file cut made a complete file look
+    // like an incomplete deliverable to a strict critic, which then failed it on
+    // every retry (H2). If everything fits, that is the entire summary.
+    let previews: Vec<String> = files
+        .iter()
+        .map(|(file, content)| format!("{}{content}\n", file_header(file, content.chars().count())))
+        .collect();
+    let whole: usize =
+        out.len() + generated_note.len() + previews.iter().map(|p| p.len()).sum::<usize>();
+    if whole <= max_bytes {
+        for p in &previews {
+            out.push_str(p);
+        }
+        out.push_str(&generated_note);
         return out;
     }
-    let mut cut = max_bytes;
-    while cut > 0 && !out.is_char_boundary(cut) {
-        cut -= 1;
+
+    // The budget cannot show every file whole. Give every hand-authored file a
+    // window so a large sibling cannot crowd it out entirely, then cut the
+    // assembled summary with an explicit harness marker. Generated files already
+    // contributed no content, so a lockfile can never starve the implementation.
+    let fixed: usize = out.len()
+        + generated_note.len()
+        + files
+            .iter()
+            .map(|(f, c)| file_header(f, c.chars().count()).len() + 1)
+            .sum::<usize>();
+    let content_budget = max_bytes
+        .saturating_sub(fixed)
+        .saturating_sub(files.len() * FILE_MARKER_RESERVE + GLOBAL_MARKER_RESERVE);
+    let share = if files.is_empty() {
+        0
+    } else {
+        content_budget / files.len()
+    };
+    for (file, content) in &files {
+        let total = content.chars().count();
+        let window = share.min(total);
+        let shown: String = content.chars().take(window).collect();
+        out.push_str(&file_header(file, total));
+        out.push_str(&shown);
+        out.push('\n');
+        if window < total {
+            out.push_str(&format!(
+                "... [{file}: preview cut by the harness at {window} of {total} chars]\n"
+            ));
+        }
     }
-    let total = out.len();
+    out.push_str(&generated_note);
+
     // Say plainly that the harness cut the evidence so a critic does not read a
     // capped preview as the node shipping a truncated deliverable.
     format!(
-        "{}\n... [evidence truncated by the harness: showing {cut} of {total} bytes. \
+        "{out}\n... [evidence truncated by the harness: showing {} of {whole} bytes. \
          The remainder was omitted for length, NOT by the node; judge the evidence \
          present and do not FAIL a deliverable merely because this preview ended.]",
-        &out[..cut],
+        out.len(),
     )
 }
 
@@ -681,6 +753,59 @@ mod tests {
         assert!(
             summary.contains("NOT by the node"),
             "the marker must not accuse the node of truncating its deliverable: {summary}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2b regression: a 142 KB lockfile sorted before the source must not
+    /// consume the whole evidence budget and hide the implementation. Trial 4's
+    /// critic saw only README and the lockfile (and not one line of `src/`).
+    #[test]
+    fn generated_lockfile_cannot_starve_evidence() {
+        let dir = temp_repo("lockstarvation");
+        ensure_repo(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"portfolio","scripts":{"build":"tsc","test":"node --test"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/main.ts"),
+            "export const PORTFOLIO_IMPLEMENTATION = 'live totals';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("package-lock.json"),
+            format!(
+                "{{\"lockfileVersion\":3,\"packages\":{{\"x\":\"{}\"}}}}",
+                "z".repeat(142_000)
+            ),
+        )
+        .unwrap();
+
+        let summary = worktree_change_summary(&dir, 12_000);
+        assert!(
+            summary.contains("src/main.ts"),
+            "the implementation must be named despite the lockfile: {} bytes",
+            summary.len()
+        );
+        assert!(
+            summary.contains("PORTFOLIO_IMPLEMENTATION"),
+            "the implementation must receive a content window, not just its name"
+        );
+        assert!(
+            summary.contains("package-lock.json"),
+            "the generated lockfile must still be named so the critic knows it changed"
+        );
+        assert!(
+            !summary.contains(&"z".repeat(200)),
+            "lockfile content must not consume the budget"
+        );
+        assert!(
+            summary.contains("tsconfig.json") && summary.contains("package.json"),
+            "every hand-authored file must receive a window: {summary}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

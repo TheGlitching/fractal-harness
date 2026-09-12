@@ -504,6 +504,24 @@ fn revert_failed_node(store: &Store, node: &Node) {
     }
 }
 
+/// Which gates a node is accountable for. An integrating node and a node that
+/// owns the whole project (a childless root, which has no parent) run the
+/// detected whole-project suite; any other leaf runs only explicit contract
+/// gates.
+///
+/// Without the root case a root that never splits is `Leaf`, its contract's
+/// verification was detected on an empty directory at init and stays empty, so
+/// no gate ever runs - the `dev`/`start` smoke gate was unreachable (trial 4
+/// §7.3). Re-resolving at verification time detects the suite the finished
+/// project actually has.
+fn gate_scope(node: &Node, aggregating: bool) -> GateScope {
+    if aggregating || node.parent.is_none() {
+        GateScope::Integration
+    } else {
+        GateScope::Leaf
+    }
+}
+
 fn run_one_node(
     store: &Store,
     node: &Node,
@@ -1011,11 +1029,7 @@ fn run_one_node(
                 // is exactly where cross-module breakage is both detectable and
                 // fixable - and where `reopen` can push it back down.
                 let contract = node.contract();
-                let scope = if aggregating {
-                    GateScope::Integration
-                } else {
-                    GateScope::Leaf
-                };
+                let scope = gate_scope(node, aggregating);
                 let gates =
                     crate::verify::resolve_gates(&store.root, &contract.verification, scope);
                 if !gates.is_empty() {
@@ -1541,6 +1555,57 @@ mod tests {
 
         let done = vec![node("root", COMPLETE, None, 1, &[])];
         assert_eq!(surface_root_status(&done), COMPLETE);
+    }
+
+    /// Section-4b regression: a root that never splits must still run the
+    /// whole-project gates. At init its contract was auto-detected on an empty
+    /// directory and stays empty, and `GateScope::Leaf` would run nothing at all
+    /// - so the `dev`/`start` smoke gate was unreachable (trial 4 §7.3).
+    #[test]
+    fn a_non_splitting_root_runs_whole_project_gates() {
+        let dir = std::env::temp_dir().join(format!("fractal_rootgates_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"vite build","test":"vitest run","start":"tsx src/index.tsx"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
+
+        let root = node("root", RUNNING, None, 1, &[]);
+        let leaf = node("root-01", RUNNING, Some("root"), 2, &[]);
+        assert_eq!(
+            gate_scope(&root, false),
+            GateScope::Integration,
+            "a childless root owns the whole project and must run its gates"
+        );
+        assert_eq!(gate_scope(&leaf, false), GateScope::Leaf);
+        assert_eq!(
+            gate_scope(&leaf, true),
+            GateScope::Integration,
+            "an aggregating node keeps the integration scope"
+        );
+
+        let gates = crate::verify::resolve_gates(&dir, &[], gate_scope(&root, false));
+        assert_eq!(
+            gates,
+            crate::verify::detect_gates(&dir),
+            "the root must run the suite detected at verification time"
+        );
+        assert!(
+            gates.iter().any(|g| g.contains("tsc --noEmit")),
+            "the root must run the project's typecheck: {gates:?}"
+        );
+        assert!(
+            gates.iter().any(|g| crate::verify::is_launch_command(g)),
+            "the launch smoke gate must be reachable on a non-splitting root: {gates:?}"
+        );
+        assert!(
+            crate::verify::resolve_gates(&dir, &[], gate_scope(&leaf, false)).is_empty(),
+            "a leaf must not inherit whole-project gates"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A split's prose or missing-binary gate is rejected at split time with the
