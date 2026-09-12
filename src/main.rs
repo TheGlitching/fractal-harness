@@ -6,6 +6,7 @@ mod tui;
 mod verify;
 
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -20,6 +21,15 @@ struct Cli {
     project: PathBuf,
     #[arg(short, long, global = true)]
     executor: Option<String>,
+    /// Model passed to the leaf executor; skips the interactive picker.
+    #[arg(short, long, global = true)]
+    model: Option<String>,
+    /// Run without the TUI or model picker. Implied when not attached to a TTY.
+    #[arg(long, global = true)]
+    yes: bool,
+    /// Run without the TUI or model picker (alias for `--yes`).
+    #[arg(long = "no-tui", global = true)]
+    no_tui: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -127,6 +137,15 @@ fn main() {
         std::env::set_var("FRACTAL_EXECUTOR", exec);
     }
 
+    // The TUI and the model picker are only safe to open on a real terminal
+    // owned by a human. A supervisor, CI job, or another agent has no way to
+    // answer either one, so they run headless and terminate on their own.
+    let interactive = !cli.yes
+        && !cli.no_tui
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal();
+    let model_override = cli.model;
+
     match cli.command {
         Commands::Init { goal } => {
             let goal = goal.join(" ");
@@ -145,7 +164,7 @@ fn main() {
                 Ok(node) => {
                     println!("initialised tree/root ({})", node.status);
                     println!("goal: {goal}");
-                    run_project(&project, &goal);
+                    run_project(&project, &goal, model_override.as_deref(), interactive);
                 }
                 Err(e) => {
                     eprintln!("fractal: {e}");
@@ -164,7 +183,7 @@ fn main() {
                 std::process::exit(2);
             }
             let goal = s.get("root").map(|n| n.goal).unwrap_or_default();
-            run_project(&project, &goal);
+            run_project(&project, &goal, model_override.as_deref(), interactive);
         }
         Commands::Status => {
             let s = store::Store::new(&project);
@@ -474,12 +493,23 @@ fn run_embedded_script(script: &str, args: &[String]) -> ! {
     }
 }
 
-fn pick_model() -> String {
+fn pick_model(model_override: Option<&str>, interactive: bool) -> String {
     let default = "default";
+    if let Some(m) = model_override {
+        if !m.is_empty() {
+            return m.to_string();
+        }
+    }
     if let Ok(m) = std::env::var("FRACTAL_MODEL") {
         if !m.is_empty() {
             return m;
         }
+    }
+
+    // The picker needs a human. Without one, fall back to the default model
+    // rather than blocking a headless run forever on a keystroke.
+    if !interactive {
+        return default.to_string();
     }
 
     let models = list_models(default);
@@ -732,9 +762,10 @@ fn run_scheduler(
     project: &Path,
     state: &std::sync::Arc<std::sync::Mutex<tui::TuiState>>,
     model: &str,
+    interactive: bool,
 ) {
     let s = store::Store::new(project);
-    match scheduler::run(&s, state, model) {
+    match scheduler::run(&s, state, model, interactive) {
         Ok(report) => {
             let mut s = state.lock().unwrap();
             s.done = true;
@@ -751,8 +782,8 @@ fn run_scheduler(
     }
 }
 
-fn run_project(project: &PathBuf, goal: &str) {
-    let model = pick_model();
+fn run_project(project: &PathBuf, goal: &str, model_override: Option<&str>, interactive: bool) {
+    let model = pick_model(model_override, interactive);
 
     let _ = ctrlc::set_handler(move || {
         scheduler::INTERRUPTED.store(true, Ordering::SeqCst);
@@ -788,16 +819,21 @@ fn run_project(project: &PathBuf, goal: &str) {
     let project_path = project.clone();
     let s = store::Store::new(project);
 
-    if let Ok(mut tui) = tui::Tui::with_state(goal, &model, state.clone()) {
-        let state2 = state.clone();
-        thread::spawn(move || run_scheduler(&project_path, &state2, &model));
-        match tui.run(&s) {
-            Ok(()) => {}
-            Err(e) => eprintln!("\nfractal: TUI error: {e}"),
+    if interactive {
+        if let Ok(mut tui) = tui::Tui::with_state(goal, &model, state.clone()) {
+            let state2 = state.clone();
+            let m = model.clone();
+            thread::spawn(move || run_scheduler(&project_path, &state2, &m, true));
+            match tui.run(&s) {
+                Ok(()) => {}
+                Err(e) => eprintln!("\nfractal: TUI error: {e}"),
+            }
+        } else {
+            eprintln!("(no TUI — running headless)");
+            run_scheduler(&project_path, &state, &model, false);
         }
     } else {
-        eprintln!("(no TUI — running headless)");
-        run_scheduler(&project_path, &state, &model);
+        run_scheduler(&project_path, &state, &model, false);
     }
 
     let final_state = state.lock().unwrap();
