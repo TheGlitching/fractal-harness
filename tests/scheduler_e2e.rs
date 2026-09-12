@@ -225,6 +225,46 @@ case "$MODE" in
       echo '{"verb":"complete","deliverable":"done","summary":"installed deps"}'
     fi
     ;;
+  prose_gate)
+    # H1: the first split states a prose "verification" entry. The orchestrator
+    # must refuse it and ask for a real command; the corrected split moves the
+    # visual check to manual_verification.
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      if [ ! -f "$ROOT/.prose_refused" ]; then
+        touch "$ROOT/.prose_refused"
+        echo '{"verb":"split","subtasks":[{"id":"a","goal":"build a TUI","acceptance_criteria":["the task is done"],"verification":["manual smoke test"]}]}'
+      else
+        echo '{"verb":"split","subtasks":[{"id":"a","goal":"build a TUI","acceptance_criteria":["the task is done"],"verification":["true"],"manual_verification":["the layout is clean"]}]}'
+      fi
+    elif [ "$NODE" = "root" ]; then
+      echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+    else
+      complete
+    fi
+    ;;
+  runtime_unrunnable_gate)
+    # H1: the entry's first token resolves (env) but the shell cannot execute it
+    # (exit 127). It must be downgraded to a manual check, not fail the node.
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["the task is done"],"verification":["env definitely-missing-fractal-xyz"]}]}'
+    elif [ "$NODE" = "root" ]; then
+      echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+    else
+      complete
+    fi
+    ;;
+  manual_gate_with_real_failure)
+    # H1 recovery: one gate cannot execute, another genuinely fails. The node
+    # must still fail, but its real diff must survive as a checkpoint, not be
+    # reverted.
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["the task is done"],"verification":["env definitely-missing-fractal-xyz","false"]}]}'
+    elif [ "$NODE" = "root" ]; then
+      echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+    else
+      complete
+    fi
+    ;;
   hang)
     echo "$$" > "$ROOT/.fake_omp_pid"
     exec sleep 120
@@ -989,5 +1029,102 @@ fn interrupt_reaps_the_running_executor() {
     assert!(
         !still_alive,
         "executor child {fake_pid} was left running after the interrupt"
+    );
+}
+
+/// H1: a split whose `verification` entry is prose is refused with feedback, and
+/// the recovered split moves the visual check to `manual_verification` so the
+/// node can complete. Before this fix, `sh -c "manual smoke test"` failed on
+/// every retry and the node's correct work was reverted.
+#[test]
+fn prose_verification_entry_is_refused_then_moved_to_manual() {
+    let p = Project::new("prosegate", "prose_gate");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert_eq!(
+        code,
+        Some(0),
+        "the run must recover from the refused split; stderr:\n{err}"
+    );
+
+    let decisions = fs::read_to_string(p.dir.join("tree/root/decisions.md")).unwrap_or_default();
+    assert!(
+        decisions.to_lowercase().contains("split refused"),
+        "the prose verification entry was not refused with feedback:\n{decisions}"
+    );
+
+    let contract = fs::read_to_string(p.dir.join("tree/root/children/root-01/contract.md"))
+        .unwrap_or_default();
+    assert!(
+        contract.contains("the layout is clean"),
+        "the manual check was lost from the corrected contract:\n{contract}"
+    );
+    let verif = contract
+        .split("## verification")
+        .nth(1)
+        .and_then(|s| s.split("## manual verification").next())
+        .unwrap_or("");
+    assert!(
+        !verif.contains("the layout is clean"),
+        "a manual check leaked into the executable gates:\n{contract}"
+    );
+
+    let status = p.status();
+    assert!(
+        status.contains("[complete]") && !status.contains("[failed]"),
+        "the recovered run did not complete cleanly:\n{status}"
+    );
+}
+
+/// H1 regression: a gate the shell cannot execute (exit 127) must not doom a
+/// node whose work is real. The correct diff survives and the node completes;
+/// before the fix it failed six times and was reverted.
+#[test]
+fn unexecutable_gate_does_not_revert_correct_work() {
+    let p = Project::new("rungate", "runtime_unrunnable_gate");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert_eq!(
+        code,
+        Some(0),
+        "an unexecutable gate must not fail the whole run; stderr:\n{err}"
+    );
+    assert!(
+        p.dir.join("src/root-01.txt").exists(),
+        "the node's correct work was reverted because a gate could not execute"
+    );
+    let status = p.status();
+    assert!(
+        status.contains("[complete]") && !status.contains("[failed]"),
+        "the node was failed over an unexecutable gate:\n{status}"
+    );
+    let decisions = fs::read_to_string(p.dir.join("tree/root/children/root-01/decisions.md"))
+        .unwrap_or_default();
+    assert!(
+        decisions.contains("manual verification"),
+        "the skipped gate was not recorded as a manual check:\n{decisions}"
+    );
+}
+
+/// H1: when a node has a gate that cannot execute and also a gate that genuinely
+/// fails, it still fails - but its real diff is kept as an unverified checkpoint
+/// rather than reverted.
+#[test]
+fn work_survives_when_gates_cannot_execute() {
+    let p = Project::new("manualfail", "manual_gate_with_real_failure");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert!(code.is_some(), "run did not terminate; stderr:\n{err}");
+    assert_ne!(code, Some(0), "a genuinely failing gate must still fail");
+    assert!(
+        p.dir.join("src/root-01.txt").exists(),
+        "work was reverted even though a gate could not execute"
+    );
+    let status = p.status();
+    assert!(
+        status.contains("[failed]"),
+        "the node should have failed on the real gate:\n{status}"
+    );
+    let log = p.git(&["log", "--format=%s"]);
+    assert!(
+        log.contains("unverified checkpoint"),
+        "the work was not checkpointed:\n{log}"
     );
 }

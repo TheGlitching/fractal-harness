@@ -92,6 +92,9 @@ pub struct Contract {
     /// Shell commands that must exit 0 before this node may complete.
     /// Explicit gates apply at every scope, including leaves.
     pub verification: Vec<String>,
+    /// Checks that are not runnable commands (visual/UX/behavioural), judged by
+    /// the critic. Never executed as a gate.
+    pub manual_verification: Vec<String>,
     pub allocation: i64,
 }
 
@@ -112,7 +115,8 @@ impl Contract {
              ## Interfaces\n\n{iface}\
              ## Inherited constraints\n\n{cons}\
              ## depends_on\n\n{deps}\
-             ## verification\n\n{verif}",
+             ## verification\n\n{verif}\
+             ## manual verification\n\n{manual}",
             nid = node_id,
             p = parent.unwrap_or("(none)"),
             depth = depth,
@@ -123,6 +127,7 @@ impl Contract {
             cons = bullets(&self.constraints),
             deps = bullets(&self.depends_on),
             verif = bullets(&self.verification),
+            manual = bullets(&self.manual_verification),
         )
     }
 
@@ -170,6 +175,7 @@ impl Contract {
             id: body("id"),
             depends_on: unbullet("depends_on"),
             verification: unbullet("verification"),
+            manual_verification: unbullet("manual verification"),
             allocation: 0,
         };
         if c.goal.is_empty() {
@@ -224,6 +230,7 @@ impl Node {
                 id: self.id.clone(),
                 depends_on: self.depends_on.clone(),
                 verification: vec![],
+                manual_verification: vec![],
                 allocation: 0,
             }
         }
@@ -414,6 +421,7 @@ impl Store {
             depends_on: vec![],
             // The root always answers to the project's real commands.
             verification: crate::verify::detect_gates(&self.root),
+            manual_verification: vec![],
             allocation: 0,
         };
 
@@ -1691,6 +1699,29 @@ mod tests {
         };
         let parsed = Contract::parse(&contract.render("root-01", 2, Some("root")));
         assert_eq!(parsed.verification, contract.verification);
+    }
+
+    /// Manual checks are a distinct contract list: they render and parse without
+    /// leaking into the executable `verification` gates.
+    #[test]
+    fn contract_roundtrips_manual_verification() {
+        let contract = Contract {
+            goal: "do it".into(),
+            verification: vec!["cargo test".into()],
+            manual_verification: vec![
+                "the TUI renders cleanly at 80x24".into(),
+                "keys navigate without flicker".into(),
+            ],
+            ..Default::default()
+        };
+        let parsed = Contract::parse(&contract.render("root-01", 2, Some("root")));
+        assert_eq!(parsed.manual_verification, contract.manual_verification);
+        assert_eq!(parsed.verification, contract.verification);
+        assert!(
+            !parsed.verification.iter().any(|v| v.contains("renders")),
+            "a manual check leaked into executable gates: {:?}",
+            parsed.verification
+        );
     }
 
     fn tree_with_child(name: &str) -> (Store, Node, Node, PathBuf) {

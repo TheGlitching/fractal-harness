@@ -78,7 +78,9 @@ impl RunReport {
         }
         let max_depth = self.node_depths.iter().max().copied().unwrap_or(1);
         let verify_catch = if self.verifications > 0 {
-            self.verify_failures as f64 / self.verifications as f64
+            // A single verification can fail more than once across retries, so
+            // the ratio can exceed 1; it is a catch rate and is bounded to [0,1].
+            (self.verify_failures as f64 / self.verifications as f64).min(1.0)
         } else {
             0.0
         };
@@ -462,6 +464,32 @@ fn reject_split_topology(contracts: &[Contract], existing: &[String]) -> Option<
     None
 }
 
+/// Reject a split whose `verification` lists name commands this machine cannot
+/// execute. Left unchecked, such a gate fails identically on every retry and the
+/// node's correct work is reverted. The offending entry is fed back so the model
+/// can supply a real command or move a visual check to `manual_verification`.
+fn reject_unrunnable_gates(root: &std::path::Path, contracts: &[Contract]) -> Option<String> {
+    let mut offenders: Vec<String> = Vec::new();
+    for c in contracts {
+        for bad in crate::verify::unrunnable_entries(root, &c.verification) {
+            let label = if c.id.trim().is_empty() {
+                c.goal.lines().next().unwrap_or("subtask").to_string()
+            } else {
+                c.id.trim().to_string()
+            };
+            offenders.push(format!("{label}: {bad:?}"));
+        }
+    }
+    if offenders.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "these verification entries are not executable commands: {}",
+            offenders.join(", ")
+        ))
+    }
+}
+
 /// A terminally failed node must not leave its half-written work in the shared
 /// tree. Revert its uncommitted files so the next node's diff, verification and
 /// commit see only that next node's work. Ignored harness paths survive.
@@ -526,6 +554,10 @@ fn run_one_node(
     // objective gate passed - the work is substantially correct even if the
     // critic rejects it, and must not be wiped on terminal failure.
     let mut critic_contested = false;
+    // Sticky: an attempt saw a verification entry that could not execute. Even if
+    // the node later fails for another reason, its real diff is evidence worth
+    // keeping rather than reverting.
+    let mut manual_gate_seen = false;
     let max_attempts = max_attempts();
 
     for attempt in 0..max_attempts {
@@ -857,6 +889,26 @@ fn run_one_node(
                     ));
                     continue;
                 }
+                if let Some(reason) = reject_unrunnable_gates(&store.root, &result.subtasks) {
+                    report.refused += 1;
+                    store
+                        .append_log(
+                            node,
+                            &serde_json::json!({"event":"split_refused","reason":&reason}),
+                        )
+                        .ok();
+                    store
+                        .append_decision(node, &format!("split refused: {reason}"))
+                        .ok();
+                    feedback = Some(format!(
+                        "SPLIT refused by the orchestrator: {reason}. No child nodes were created. \
+                         Every `verification` entry must be a command that runs on this machine \
+                         (e.g. `npm test`, `cargo test`, `python3 -m pytest`). Put visual or \
+                         behavioural checks like \"clean rendering\" in `manual_verification` \
+                         instead, then answer again."
+                    ));
+                    continue;
+                }
                 if store.budget_enabled() {
                     // The split-fee plus the child allocations must fit inside
                     // the allowance the node had when it started. This is what
@@ -979,6 +1031,33 @@ fn run_one_node(
                     // not enter the diff, the critic's evidence or history.
                     let pre_gate_untracked = crate::git::untracked_files(&store.root);
                     let outcomes = crate::verify::run_gates(&store.root, &gates, GATE_TIMEOUT_SECS);
+                    let manual: Vec<String> = outcomes
+                        .iter()
+                        .filter(|o| o.manual)
+                        .map(|o| o.command.clone())
+                        .collect();
+                    if !manual.is_empty() {
+                        manual_gate_seen = true;
+                        store
+                            .append_log(
+                                node,
+                                &serde_json::json!({
+                                    "event":"gate_manual",
+                                    "commands": manual,
+                                    "note":"not executable on this machine; deferred to the critic",
+                                }),
+                            )
+                            .ok();
+                        store
+                            .append_decision(
+                                node,
+                                &format!(
+                                    "manual verification (critic-owned, not executed): {}",
+                                    manual.join(", ")
+                                ),
+                            )
+                            .ok();
+                    }
                     let runtime: Vec<String> = crate::git::untracked_files(&store.root)
                         .difference(&pre_gate_untracked)
                         .cloned()
@@ -1020,7 +1099,11 @@ fn run_one_node(
                         .ok();
                 }
 
-                let criteria = contract.acceptance_criteria;
+                // Manual checks (visual/UX) carry no exit code, so the critic is
+                // the only honest judge: they are appended to the criteria it
+                // grades. They are never executed as gates.
+                let mut criteria = contract.acceptance_criteria;
+                criteria.extend(contract.manual_verification.iter().cloned());
                 report.verifications += 1;
                 match verify_node(
                     store,
@@ -1185,35 +1268,47 @@ fn run_one_node(
     }
 
     // A retries-exhausted node normally has its uncommitted work reverted, so it
-    // cannot contaminate a sibling's diff. The exception is a node the objective
-    // gates accepted and only the critic rejected: that work is substantially
-    // correct, so commit it as an explicit unverified checkpoint and let the
-    // scheduler skip the revert. A later retry or reopen builds on it instead of
-    // starting from zero, which is exactly what the trial lost.
-    if critic_contested && crate::git::has_uncommitted_changes(&store.root) {
-        match crate::git::commit_node_work(
-            &store.root,
-            &node.id,
-            "unverified checkpoint (critic contested)",
-        ) {
-            Ok(Some(sha)) => {
-                let short: String = sha.chars().take(8).collect();
-                store
-                    .append_decision(
-                        node,
-                        &format!("committed unverified checkpoint {short} (critic contested)"),
-                    )
-                    .ok();
-                report.checkpoint_committed = true;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                store
-                    .append_log(
-                        node,
-                        &serde_json::json!({"event":"checkpoint_failed","error":e}),
-                    )
-                    .ok();
+    // cannot contaminate a sibling's diff. The exception is work that is
+    // substantially correct even though the node failed: a node the objective
+    // gates accepted and only the critic rejected, or a node whose gates could
+    // not execute at all. Commit that as an explicit unverified checkpoint and
+    // let the scheduler skip the revert, so a later retry or reopen builds on it
+    // instead of starting from zero - which is exactly what the trial lost.
+    let checkpoint_reason = if critic_contested {
+        Some("critic contested")
+    } else if manual_gate_seen {
+        Some("gate could not execute")
+    } else {
+        None
+    };
+    if let Some(reason) = checkpoint_reason {
+        if !crate::git::has_uncommitted_changes(&store.root) {
+            // Nothing to preserve; fall through to the terminal failure.
+        } else {
+            match crate::git::commit_node_work(
+                &store.root,
+                &node.id,
+                &format!("unverified checkpoint ({reason})"),
+            ) {
+                Ok(Some(sha)) => {
+                    let short: String = sha.chars().take(8).collect();
+                    store
+                        .append_decision(
+                            node,
+                            &format!("committed unverified checkpoint {short} ({reason})"),
+                        )
+                        .ok();
+                    report.checkpoint_committed = true;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    store
+                        .append_log(
+                            node,
+                            &serde_json::json!({"event":"checkpoint_failed","error":e}),
+                        )
+                        .ok();
+                }
             }
         }
     }
@@ -1446,5 +1541,60 @@ mod tests {
 
         let done = vec![node("root", COMPLETE, None, 1, &[])];
         assert_eq!(surface_root_status(&done), COMPLETE);
+    }
+
+    /// A split's prose or missing-binary gate is rejected at split time with the
+    /// offending entry named, so the model can supply a real command.
+    #[test]
+    fn split_with_unrunnable_gate_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("fractal_splitgate_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = vec![Contract {
+            id: "a".into(),
+            goal: "build the TUI".into(),
+            verification: vec!["manual smoke test".into()],
+            ..Default::default()
+        }];
+        let reason = reject_unrunnable_gates(&dir, &bad).expect("must reject");
+        assert!(
+            reason.contains("manual smoke test") && reason.contains('a'),
+            "the offending entry and child must be named: {reason}"
+        );
+
+        let good = vec![Contract {
+            id: "a".into(),
+            goal: "build the TUI".into(),
+            verification: vec!["true".into()],
+            manual_verification: vec!["the layout is clean".into()],
+            ..Default::default()
+        }];
+        assert!(reject_unrunnable_gates(&dir, &good).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A single verification may fail across several retries, so the trace's
+    /// catch rate must be reported as a bounded rate, never above 1.
+    #[test]
+    fn verify_catch_rate_is_bounded_to_one() {
+        let r = RunReport {
+            verifications: 5,
+            verify_failures: 6,
+            ..Default::default()
+        };
+        let path = std::env::temp_dir().join(format!(
+            "fractal_trace_bound_{}_{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        r.write_trace(path.to_str().unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let rate = v.get("verify_catch_rate").unwrap().as_f64().unwrap();
+        assert!(rate <= 1.0, "catch rate exceeded 1: {rate}");
+        let _ = std::fs::remove_file(&path);
     }
 }

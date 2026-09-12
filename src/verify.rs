@@ -11,12 +11,17 @@
 //! commands and believes only their exit codes.
 
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const OUTPUT_CAP: usize = 4000;
+/// POSIX shell exit codes meaning the command itself could not be executed
+/// (126 = found but not executable, 127 = command not found). A gate that exits
+/// this way is malformed or unavailable, not failed work, so it is downgraded to
+/// a manual check instead of dooming the node.
+const SHELL_CANNOT_EXECUTE: [i32; 2] = [126, 127];
 
 /// How long a "launches and displays" gate is allowed to run before it is
 /// considered to have launched successfully. A terminal app or dev server never
@@ -36,6 +41,10 @@ pub struct GateOutcome {
     pub command: String,
     pub passed: bool,
     pub output: String,
+    /// The entry named no executable command (or the shell could not execute
+    /// it). It is skipped rather than failed, and the critic owns the
+    /// corresponding acceptance criterion.
+    pub manual: bool,
 }
 
 /// Which gates a node is accountable for.
@@ -83,27 +92,166 @@ pub fn detect_gates(root: &Path) -> Vec<String> {
             .unwrap_or("");
         // A typecheck is the cheapest way to catch the cross-module drift that
         // per-module unit tests structurally cannot see.
-        if root.join("tsconfig.json").exists() {
+        if root.join("tsconfig.json").exists() && binary_on_path("npx") {
             gates.push("npx tsc --noEmit".to_string());
         }
-        if scripts.contains("\"build\"") {
+        if scripts.contains("\"build\"") && binary_on_path("npm") {
             gates.push("npm run build".to_string());
         }
-        if scripts.contains("\"test\"") {
+        if scripts.contains("\"test\"") && binary_on_path("npm") {
             gates.push("npm test --silent".to_string());
         }
     }
 
-    if root.join("Cargo.toml").exists() {
+    if root.join("Cargo.toml").exists() && binary_on_path("cargo") {
         gates.push("cargo check --all-targets".to_string());
         gates.push("cargo test".to_string());
     }
 
     if root.join("pyproject.toml").exists() && root.join("tests").exists() {
-        gates.push("python -m pytest -q".to_string());
+        if let Some(python) = python_interpreter() {
+            gates.push(format!("{python} -m pytest -q"));
+        }
     }
 
     gates
+}
+
+/// The Python interpreter actually present on this machine. `python` is absent
+/// on many modern systems while `python3` is not, and a gate naming an absent
+/// interpreter fails identically forever.
+fn python_interpreter() -> Option<&'static str> {
+    if binary_on_path("python") {
+        Some("python")
+    } else if binary_on_path("python3") {
+        Some("python3")
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Is `name` an executable on PATH? Equivalent to `which name`, implemented by
+/// scanning PATH so the harness needs no external `which`.
+pub fn binary_on_path(name: &str) -> bool {
+    if name.is_empty() || name.contains('/') {
+        return false;
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| is_executable_file(&dir.join(name)))
+}
+
+/// A leading `VAR=value` assignment; the command is the first non-assignment.
+fn is_assignment(token: &str) -> bool {
+    match token.split_once('=') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && !name.chars().next().unwrap().is_ascii_digit()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        None => false,
+    }
+}
+
+/// Commands `/bin/sh -c` runs itself, with no binary to resolve.
+fn is_shell_builtin(token: &str) -> bool {
+    matches!(
+        token,
+        "cd" | "test"
+            | "["
+            | ":"
+            | "true"
+            | "false"
+            | "echo"
+            | "export"
+            | "set"
+            | "unset"
+            | "source"
+            | "."
+            | "exec"
+            | "exit"
+            | "command"
+            | "which"
+            | "printf"
+            | "read"
+            | "shift"
+            | "trap"
+            | "wait"
+            | "type"
+            | "hash"
+            | "pwd"
+            | "return"
+            | "break"
+            | "continue"
+            | "eval"
+            | "umask"
+            | "ulimit"
+            | "times"
+            | "getopts"
+            | "if"
+            | "for"
+            | "while"
+            | "until"
+            | "case"
+            | "then"
+            | "do"
+            | "done"
+            | "fi"
+            | "esac"
+    )
+}
+
+/// Can this `verification` entry actually be executed?
+///
+/// Prose (`manual smoke test`) and an interpreter this machine lacks (`python`
+/// where only `python3` exists) name no command: running them fails identically
+/// forever, exhausting a node's retries and reverting work that may be correct.
+/// Such entries are downgraded to a manual check the critic judges, rather than
+/// run as a gate.
+pub fn entry_is_runnable(root: &Path, command: &str) -> bool {
+    let command = command.trim();
+    if command.is_empty() {
+        return false;
+    }
+    let Some(token) = command.split_whitespace().find(|t| !is_assignment(t)) else {
+        return false;
+    };
+    if token.contains('/') {
+        // A path command runs relative to the project root (the gate's cwd).
+        let path = if token.starts_with('/') {
+            PathBuf::from(token)
+        } else {
+            root.join(token)
+        };
+        return is_executable_file(&path);
+    }
+    if is_shell_builtin(token) {
+        return true;
+    }
+    binary_on_path(token)
+}
+
+/// The verification entries that name no executable command.
+pub fn unrunnable_entries(root: &Path, entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| !entry_is_runnable(root, e))
+        .cloned()
+        .collect()
 }
 
 fn truncate_tail(text: &str) -> String {
@@ -206,6 +354,7 @@ fn run_launch_gate(root: &Path, command: &str, smoke_secs: u64) -> GateOutcome {
                 command: command.to_string(),
                 passed: false,
                 output: format!("could not create launch log: {e}"),
+                manual: false,
             }
         }
     };
@@ -234,6 +383,7 @@ fn run_launch_gate(root: &Path, command: &str, smoke_secs: u64) -> GateOutcome {
                 command: command.to_string(),
                 passed: false,
                 output: format!("could not start gate: {e}"),
+                manual: false,
             };
         }
     };
@@ -251,6 +401,7 @@ fn run_launch_gate(root: &Path, command: &str, smoke_secs: u64) -> GateOutcome {
                     command: command.to_string(),
                     passed: status.success(),
                     output: truncate_tail(text.trim()),
+                    manual: false,
                 };
             }
             Ok(None) => {
@@ -268,6 +419,7 @@ fn run_launch_gate(root: &Path, command: &str, smoke_secs: u64) -> GateOutcome {
                             )
                             .trim(),
                         ),
+                        manual: false,
                     };
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -278,6 +430,7 @@ fn run_launch_gate(root: &Path, command: &str, smoke_secs: u64) -> GateOutcome {
                     command: command.to_string(),
                     passed: false,
                     output: format!("gate wait failed: {e}"),
+                    manual: false,
                 };
             }
         }
@@ -285,6 +438,20 @@ fn run_launch_gate(root: &Path, command: &str, smoke_secs: u64) -> GateOutcome {
 }
 
 pub fn run_gate(root: &Path, command: &str, timeout_secs: u64) -> GateOutcome {
+    // An entry that names no executable command is a manual/visual check, not a
+    // gate: running it would fail identically on every retry and revert work that
+    // may be correct. Skip it and let the critic own the criterion.
+    if !entry_is_runnable(root, command) {
+        return GateOutcome {
+            command: command.to_string(),
+            passed: false,
+            output: format!(
+                "{command:?} is not an executable command on this machine; \
+                 skipped as a manual check for the critic"
+            ),
+            manual: true,
+        };
+    }
     if is_launch_command(command) {
         return run_launch_gate(root, command, launch_smoke_secs());
     }
@@ -303,6 +470,7 @@ pub fn run_gate(root: &Path, command: &str, timeout_secs: u64) -> GateOutcome {
                 command: command.to_string(),
                 passed: false,
                 output: format!("could not start gate: {e}"),
+                manual: false,
             }
         }
     };
@@ -317,10 +485,14 @@ pub fn run_gate(root: &Path, command: &str, timeout_secs: u64) -> GateOutcome {
                     text.push_str(&String::from_utf8_lossy(&o.stdout));
                     text.push_str(&String::from_utf8_lossy(&o.stderr));
                 }
+                // The shell could not execute the command (missing/not
+                // executable). That is a broken gate, not failed work.
+                let manual = matches!(status.code(), Some(c) if SHELL_CANNOT_EXECUTE.contains(&c));
                 return GateOutcome {
                     command: command.to_string(),
-                    passed: status.success(),
+                    passed: !manual && status.success(),
                     output: truncate_tail(text.trim()),
+                    manual,
                 };
             }
             Ok(None) => {
@@ -330,6 +502,7 @@ pub fn run_gate(root: &Path, command: &str, timeout_secs: u64) -> GateOutcome {
                         command: command.to_string(),
                         passed: false,
                         output: format!("gate timed out after {timeout_secs}s"),
+                        manual: false,
                     };
                 }
                 std::thread::sleep(std::time::Duration::from_millis(120));
@@ -339,6 +512,7 @@ pub fn run_gate(root: &Path, command: &str, timeout_secs: u64) -> GateOutcome {
                     command: command.to_string(),
                     passed: false,
                     output: format!("gate wait failed: {e}"),
+                    manual: false,
                 }
             }
         }
@@ -347,12 +521,13 @@ pub fn run_gate(root: &Path, command: &str, timeout_secs: u64) -> GateOutcome {
 
 /// Run every gate. Stops at the first failure: later gates are usually
 /// meaningless once the build is broken, and the first error is the actionable
-/// one to feed back to the agent.
+/// one to feed back to the agent. A manual (unexecutable) entry is skipped, not
+/// stopped on.
 pub fn run_gates(root: &Path, gates: &[String], timeout_secs: u64) -> Vec<GateOutcome> {
     let mut outcomes = Vec::new();
     for gate in gates {
         let outcome = run_gate(root, gate, timeout_secs);
-        let failed = !outcome.passed;
+        let failed = !outcome.passed && !outcome.manual;
         outcomes.push(outcome);
         if failed {
             break;
@@ -362,8 +537,9 @@ pub fn run_gates(root: &Path, gates: &[String], timeout_secs: u64) -> Vec<GateOu
 }
 
 /// Feedback an agent can act on: the exact command and the tail of its output.
+/// Manual (unexecutable) entries are not failures and are omitted.
 pub fn format_failures(outcomes: &[GateOutcome]) -> Option<String> {
-    let failures: Vec<&GateOutcome> = outcomes.iter().filter(|o| !o.passed).collect();
+    let failures: Vec<&GateOutcome> = outcomes.iter().filter(|o| !o.passed && !o.manual).collect();
     if failures.is_empty() {
         return None;
     }
@@ -487,6 +663,7 @@ mod tests {
             command: "true".into(),
             passed: true,
             output: String::new(),
+            manual: false,
         }];
         assert!(format_failures(&outcomes).is_none());
     }
@@ -497,10 +674,159 @@ mod tests {
             command: "npx tsc --noEmit".into(),
             passed: false,
             output: "error TS2322".into(),
+            manual: false,
         }];
         let text = format_failures(&outcomes).unwrap();
         assert!(text.contains("npx tsc --noEmit"));
         assert!(text.contains("error TS2322"));
+    }
+
+    /// H1 regression: a prose entry is not a command. It must be skipped as a
+    /// manual check rather than run and failed forever.
+    #[test]
+    fn unrunnable_prose_entry_is_a_manual_check_not_a_failure() {
+        let dir = temp_dir("prosegate");
+        let outcome = run_gate(&dir, "manual smoke test", 10);
+        assert!(outcome.manual, "prose must be downgraded to manual");
+        assert!(
+            format_failures(std::slice::from_ref(&outcome)).is_none(),
+            "a manual check must never be reported as a gate failure"
+        );
+        // The pre-flight is what drives this, without spawning a shell.
+        assert!(!entry_is_runnable(&dir, "manual smoke test"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H1: a command whose binary is absent (the trial's `python`, or an
+    /// unknown tool) is likewise skipped instead of dooming the node.
+    #[test]
+    fn unrunnable_missing_binary_entry_is_a_manual_check() {
+        let dir = temp_dir("missingbin");
+        let outcome = run_gate(&dir, "definitely-not-a-real-binary-xyz --check", 10);
+        assert!(outcome.manual, "a missing binary must be manual");
+        assert!(!entry_is_runnable(
+            &dir,
+            "definitely-not-a-real-binary-xyz --check"
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Even when the first token resolves, a shell that cannot execute the
+    /// command (exit 127) is reported as a manual check, not failed work.
+    #[test]
+    fn shell_command_not_found_is_a_manual_check() {
+        let dir = temp_dir("cf127");
+        let outcome = run_gate(&dir, "env definitely-missing-inside-xyz", 10);
+        assert!(
+            outcome.manual,
+            "shell exit 127 must downgrade to manual: {}",
+            outcome.output
+        );
+        assert!(
+            format_failures(std::slice::from_ref(&outcome)).is_none(),
+            "a 127 gate must not fail the node"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A genuine failing gate still fails: the downgrade must not swallow real
+    /// verification.
+    #[test]
+    fn genuine_failing_gate_is_still_a_failure() {
+        let dir = temp_dir("realgate");
+        let outcome = run_gate(&dir, "exit 3", 10);
+        assert!(!outcome.passed && !outcome.manual);
+        assert!(format_failures(std::slice::from_ref(&outcome)).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn entry_runnable_recognises_builtins_assignments_and_paths() {
+        let dir = temp_dir("runnable");
+        assert!(entry_is_runnable(&dir, "cd sub && cargo test"));
+        assert!(entry_is_runnable(&dir, "FOO=bar echo hi"));
+        assert!(entry_is_runnable(&dir, "true"));
+        assert!(entry_is_runnable(&dir, "exit 0"));
+        assert!(!entry_is_runnable(&dir, ""));
+        assert!(!entry_is_runnable(&dir, "   "));
+        // A path must exist and be executable relative to the project root.
+        assert!(!entry_is_runnable(&dir, "./script.sh"));
+        let script = dir.join("script.sh");
+        std::fs::write(&script, "#!/bin/sh\ntrue\n").unwrap();
+        assert!(
+            !entry_is_runnable(&dir, "./script.sh"),
+            "a non-executable file is not runnable"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(entry_is_runnable(&dir, "./script.sh"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unrunnable_entries_reports_each_offender() {
+        let dir = temp_dir("offenders");
+        let entries = vec![
+            "true".to_string(),
+            "manual smoke test".to_string(),
+            "python -c \"print(1)\"".to_string(),
+        ];
+        // `python` may or may not exist on the test box; whichever it is, the
+        // invariant is that anything reported is genuinely unrunnable.
+        let bad = unrunnable_entries(&dir, &entries);
+        assert!(bad.contains(&"manual smoke test".to_string()));
+        assert!(bad.iter().all(|e| !entry_is_runnable(&dir, e)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every gate `detect_gates` emits must actually be runnable, so an
+    /// inferred gate can never doom a valid project.
+    #[test]
+    fn detect_gates_only_emits_runnable_commands() {
+        let dir = temp_dir("detectrunnable");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"vite build","test":"vitest run"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "[project]").unwrap();
+        for gate in detect_gates(&dir) {
+            assert!(
+                entry_is_runnable(&dir, &gate),
+                "detect_gates emitted an unexecutable gate: {gate}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Python is probed, not assumed: when only `python3` exists the gate uses
+    /// it rather than the absent `python`.
+    #[test]
+    fn python_gate_uses_an_available_interpreter() {
+        let dir = temp_dir("pythongate");
+        std::fs::write(dir.join("pyproject.toml"), "[project]").unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        let gates = detect_gates(&dir);
+        let py = gates.iter().find(|g| g.contains("pytest"));
+        match py {
+            Some(gate) => {
+                assert!(
+                    entry_is_runnable(&dir, gate),
+                    "python gate must name an installed interpreter: {gate}"
+                );
+            }
+            None => {
+                assert!(
+                    python_interpreter().is_none(),
+                    "a python gate must be emitted when an interpreter exists"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
