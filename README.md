@@ -151,6 +151,7 @@ The picker is only opened on a real terminal; headless runs never prompt.
 | `FRACTAL_CALL_TOKENS` | unset | Tokens charged per model call, overriding the character-based estimate |
 | `FRACTAL_MAX_STEPS` | `500` | Backstop loop bound for a single run |
 | `FRACTAL_TIMEOUT` | `300` | Seconds before a stuck node is killed |
+| `FRACTAL_MAX_ATTEMPTS` | `6` | Retries per node before it fails closed; also how many times a narrated-but-unparsed decision is retried |
 | `FRACTAL_PARALLEL` | `4` | Nodes selected per scheduling batch; execution is serialized (see Per-Node Isolation) |
 
 ### Budgets
@@ -188,6 +189,25 @@ diff the harness runs. A pre-existing `.gitignore` is never modified or replaced
 so running inside a real repository cannot pollute its history with harness
 internals.
 
+The same exclusion covers dependency trees and build junk (`node_modules/`,
+`.pnpm-store/`, `__pycache__/`, `.venv/`, `coverage/`, `.next/`, `*.log`, ...), so
+a leaf running `npm install` commits its source, not 5000 dependency files. Runtime
+state an app writes while a verification gate runs (for example `.portfolio.json`)
+is detected as newly-untracked across the gate and added to `.git/info/exclude`
+too, keeping it out of the diff, the critic's evidence and history.
+
+### Failure isolation and recovery
+
+A node that exhausts its retries fails closed: its own uncommitted files are
+reverted so they cannot leak into a sibling's diff, and the run keeps going. In a
+headless run, a failure no longer ends the whole tree - independent and deferred
+siblings still run, dependents simply wait, and the completed run reports its root
+as `failed` (the root node itself stays `split` so `fractal retry` can still
+aggregate it later). When a node's objective gates all passed and only the critic
+rejected it, that substantially-correct work is committed as an explicit
+*unverified checkpoint* instead of being wiped, so a retry or `reopen` builds on
+it rather than starting over.
+
 ### Durability and trust boundary
 
 The SQLite index uses a rollback journal with `synchronous=FULL`, so a committed
@@ -208,8 +228,10 @@ The canonical implementation is Rust. The design spec is `docs/SPEC.md` and the
 build contracts are in `contracts/`. Upward escalation, fail-closed completion
 and verification, deterministic non-interactive termination, enforced budgets,
 dependency staleness, per-node isolation, workspace exclusion, bounded per-node
-context, and the `omp`/`pi`/`opencode` executors are implemented. Known gaps
-tracked for follow-up work: crash-safe reaping of gate subprocesses.
+context, failure isolation with unverified checkpointing, a tolerant
+transcript-command completion channel, and the `omp`/`pi`/`opencode` executors are
+implemented. Known gaps tracked for follow-up work: crash-safe reaping of gate
+subprocesses.
 
 ## License
 

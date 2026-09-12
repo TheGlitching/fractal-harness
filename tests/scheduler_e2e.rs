@@ -37,11 +37,23 @@ complete() {
   echo "{\"verb\":\"complete\",\"deliverable\":\"done\",\"summary\":\"did the task\"}"
 }
 
+# M1: do the work, then narrate the completion command as prose with the escaped
+# quotes opencode's tool framing leaves behind, instead of emitting JSON.
+narrated_complete() {
+  mkdir -p "$ROOT/src"
+  echo "delivered by ${NODE:-critic}" > "$ROOT/src/${NODE:-out}.txt"
+  echo 'fractal done --summary \"narrated completion for this node\"</arg_value>'
+}
+
 # Critic invocations carry no FRACTAL_NODE_ID. The full critic prompt is passed
 # inline as the last argument, so echo the node's own acceptance criteria back
 # verbatim (a verdict grading foreign criteria is now rejected, and a bare PASS
 # with no criteria has always been a FAIL).
 if [ -z "$NODE" ]; then
+  if [ "$MODE" = "critic_fail" ]; then
+    echo '{"verdict":"FAIL","reason":"fake critic rejects the work","criteria":[{"name":"the task is done","pass":false,"reason":"fake rejection"}]}'
+    exit 0
+  fi
   CRIT="$(printf '%s' "${!#}" | awk '
     /^Acceptance criteria:/ {grab=1; next}
     /^Deliverable summary:/ {grab=0}
@@ -158,6 +170,59 @@ case "$MODE" in
       fi
     else
       complete
+    fi
+    ;;
+  two_leaves_one_fails)
+    if [ "$NODE" = "root" ]; then
+      if [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+        echo '{"verb":"split","subtasks":[{"id":"a","goal":"fails always","acceptance_criteria":["the task is done"]},{"id":"b","goal":"independent success","acceptance_criteria":["the task is done"]}]}'
+      else
+        echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+      fi
+    elif [ "$NODE" = "root-01" ]; then
+      mkdir -p "$ROOT/src"
+      echo "half written" > "$ROOT/src/leftover_${NODE}.txt"
+      echo '{"verb":"not_a_real_verb"}'
+    else
+      complete
+    fi
+    ;;
+  narrated_done)
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"narrate completion","acceptance_criteria":["the task is done"]}]}'
+    else
+      narrated_complete
+    fi
+    ;;
+  narrated_split)
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo 'fractal split --subtasks '"'"'[{"id":"a","goal":"narrated child","acceptance_criteria":["the task is done"]}]'"'"''
+    elif [ "$NODE" = "root" ]; then
+      echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+    else
+      complete
+    fi
+    ;;
+  critic_fail)
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"build a contested module","acceptance_criteria":["the task is done"]}]}'
+    elif [ "$NODE" = "root" ]; then
+      echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+    else
+      complete
+    fi
+    ;;
+  runtime_state)
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"install deps","acceptance_criteria":["the task is done"],"verification":["touch .portfolio.json"]}]}'
+    elif [ "$NODE" = "root" ]; then
+      echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+    else
+      mkdir -p "$ROOT/src" "$ROOT/node_modules/dep"
+      echo '{"name":"fake-app"}' > "$ROOT/package.json"
+      echo "module.exports = 1" > "$ROOT/node_modules/dep/index.js"
+      echo "delivered" > "$ROOT/src/app.js"
+      echo '{"verb":"complete","deliverable":"done","summary":"installed deps"}'
     fi
     ;;
   hang)
@@ -754,6 +819,138 @@ fn nodes_commit_only_their_own_work() {
         }
     }
     assert_eq!(seen, 2, "expected a commit for each leaf; log:\n{log}");
+}
+
+/// D3: one node failing terminally must not abandon its independent sibling, and
+/// the run must report the failure at the root. The failed node's own files are
+/// reverted; the independent sibling's committed work survives.
+#[test]
+fn one_node_failure_does_not_abandon_independent_siblings() {
+    let p = Project::new("siblingfail", "two_leaves_one_fails");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert!(code.is_some(), "run did not terminate; stderr:\n{err}");
+    assert_ne!(code, Some(0), "a failed branch must not report success");
+    let status = p.status();
+    assert!(
+        status.contains("[complete]"),
+        "the independent sibling never ran:\n{status}"
+    );
+    assert!(
+        status.contains("[failed]"),
+        "the failure was not recorded:\n{status}"
+    );
+    assert!(
+        !p.dir.join("src/leftover_root-01.txt").exists(),
+        "the failed node's file was left in the shared tree"
+    );
+    assert!(
+        p.dir.join("src/root-02.txt").exists(),
+        "the independent sibling's committed work was lost to the failure"
+    );
+    let log = p.git(&["log", "--format=%s"]);
+    assert!(
+        log.contains("root-02"),
+        "the independent sibling produced no commit:\n{log}"
+    );
+}
+
+/// M1: work is real, but the model prints `fractal done --summary "..."` as
+/// prose with escaped quotes rather than emitting a JSON decision. The command
+/// must be recovered and still pass the normal diff/critic gates.
+#[test]
+fn narrated_done_is_recovered_and_verified() {
+    let p = Project::new("narrateddone", "narrated_done");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert_eq!(
+        code,
+        Some(0),
+        "a narrated completion must be recovered; stderr:\n{err}"
+    );
+    let status = p.status();
+    assert!(
+        status.contains("[complete]"),
+        "narrated run did not complete:\n{status}"
+    );
+    assert!(
+        p.dir.join("src/root-01.txt").exists(),
+        "the narrated node's work is missing"
+    );
+}
+
+/// M1: the same tolerance for a narrated `fractal split --subtasks '[...]'`.
+#[test]
+fn narrated_split_is_recovered() {
+    let p = Project::new("narratedsplit", "narrated_split");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert_eq!(
+        code,
+        Some(0),
+        "a narrated split must be recovered; stderr:\n{err}"
+    );
+    let status = p.status();
+    assert!(
+        status.contains("[complete]"),
+        "narrated split run did not complete:\n{status}"
+    );
+    assert!(
+        p.dir.join("tree/root/children/root-01").exists(),
+        "the narrated split created no child"
+    );
+}
+
+/// D3: a node whose objective gates passed and only the critic rejected is
+/// substantially correct. It still fails, but its work is checkpointed rather
+/// than wiped, so a later retry or reopen can build on it.
+#[test]
+fn critic_contested_work_survives_as_a_checkpoint() {
+    let p = Project::new("criticfail", "critic_fail");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(90));
+    assert!(code.is_some(), "run did not terminate; stderr:\n{err}");
+    assert_ne!(
+        code,
+        Some(0),
+        "a critic-rejected node must not report success"
+    );
+    let status = p.status();
+    assert!(
+        status.contains("[failed]"),
+        "the contested node was not failed:\n{status}"
+    );
+    assert!(
+        p.dir.join("src/root-01.txt").exists(),
+        "gate-passing-but-contested work was wiped instead of checkpointed"
+    );
+    let log = p.git(&["log", "--format=%s"]);
+    assert!(
+        log.contains("unverified checkpoint"),
+        "no checkpoint commit was recorded:\n{log}"
+    );
+}
+
+/// D5: dependency trees and app runtime state an agent's gate produced must
+/// never enter the generated project's history, while real work still does.
+#[test]
+fn dependency_trees_and_runtime_state_stay_out_of_history() {
+    let p = Project::new("runtimestate", "runtime_state");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert_eq!(code, Some(0), "runtime-state run failed; stderr:\n{err}");
+    let tracked = p.git(&["ls-files"]);
+    assert!(
+        !tracked.contains("node_modules/"),
+        "node_modules entered history:\n{tracked}"
+    );
+    assert!(
+        !tracked.contains(".portfolio.json"),
+        "runtime state entered history:\n{tracked}"
+    );
+    assert!(
+        tracked.contains("src/app.js"),
+        "the node's real work was not committed:\n{tracked}"
+    );
+    assert!(
+        p.dir.join(".portfolio.json").exists(),
+        "runtime state was deleted instead of left untracked"
+    );
 }
 
 /// Interrupting the harness must kill and reap the running executor child

@@ -870,6 +870,14 @@ fn run_project(project: &PathBuf, goal: &str, model_override: Option<&str>, inte
         .filter(|n| n.status == "pending" || n.status == store::RUNNING)
         .count();
 
+    // A failed branch surfaces at the root in the run report, even though the
+    // root node itself stays `split` so a later retry can still aggregate it.
+    let display_root = if root_status != store::COMPLETE && failed > 0 {
+        store::FAILED
+    } else {
+        root_status
+    };
+
     eprintln!("\n Summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     if let Some(root) = nodes.first() {
         let g = root.goal.lines().next().unwrap_or(&root.goal);
@@ -885,7 +893,7 @@ fn run_project(project: &PathBuf, goal: &str, model_override: Option<&str>, inte
             eprintln!("  {line}");
         }
     }
-    eprintln!("  result:  root {root_status}");
+    eprintln!("  result:  root {display_root}");
     eprintln!(
         "  {completed} completed · {failed} failed · {pending} pending · {} total",
         nodes.len()

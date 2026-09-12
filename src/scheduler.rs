@@ -15,11 +15,22 @@ use std::sync::{Arc, Mutex};
 pub(crate) static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 const MAX_DEPTH: i64 = 4;
-const MAX_ATTEMPTS: usize = 3;
+/// Retries per node before it fails closed. Six gives a small model room to
+/// recover from a missed decision (the trial needed exactly that many); an
+/// override lets a cheap or expensive model be tuned without a rebuild.
+const DEFAULT_MAX_ATTEMPTS: usize = 6;
 const MAX_STEPS: usize = 500;
 /// Builds and test suites are slow; a gate needs a far longer leash than an
 /// agent turn.
 const GATE_TIMEOUT_SECS: u64 = 900;
+
+fn max_attempts() -> usize {
+    std::env::var("FRACTAL_MAX_ATTEMPTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_MAX_ATTEMPTS)
+}
 
 pub struct RunReport {
     pub steps: usize,
@@ -32,6 +43,9 @@ pub struct RunReport {
     pub verifications: usize,
     pub verify_failures: usize,
     pub node_depths: Vec<i64>,
+    /// A failed node's gate-passing-but-critic-contested work was committed as a
+    /// checkpoint rather than reverted, so it survives for a later retry.
+    pub checkpoint_committed: bool,
 }
 
 impl Default for RunReport {
@@ -47,6 +61,7 @@ impl Default for RunReport {
             verifications: 0,
             verify_failures: 0,
             node_depths: vec![],
+            checkpoint_committed: false,
         }
     }
 }
@@ -90,6 +105,7 @@ impl RunReport {
         self.verifications += other.verifications;
         self.verify_failures += other.verify_failures;
         self.node_depths.extend_from_slice(&other.node_depths);
+        self.checkpoint_committed |= other.checkpoint_committed;
     }
 }
 
@@ -224,7 +240,10 @@ pub fn run(
                 Ok(sub) => {
                     let failed = sub.failed > 0;
                     report.merge(&sub);
-                    if failed {
+                    // Revert the failed node's own files so they cannot leak
+                    // into a sibling's diff. A checkpointed node's work is
+                    // deliberately kept in history instead.
+                    if failed && !sub.checkpoint_committed {
                         let nodes = store.walk().unwrap_or_default();
                         if let Some(n) = nodes.iter().find(|n2| n2.id == node.id) {
                             revert_failed_node(store, n);
@@ -250,10 +269,7 @@ pub fn run(
     }
 
     let nodes = store.walk()?;
-    report.root_status = nodes
-        .first()
-        .map(|n| n.status.clone())
-        .unwrap_or_else(|| PENDING.into());
+    report.root_status = surface_root_status(&nodes);
     if let Some(project) = store.tree_dir.parent() {
         report.write_trace(&project.join("trace.json").to_string_lossy());
     }
@@ -273,6 +289,25 @@ pub fn run(
         }
     }
     Ok(report)
+}
+
+/// The status a completed run reports for its root. A failed node anywhere in
+/// the tree means the goal was not delivered in full, even though the root
+/// itself may still be `split` and individually retryable. Surfacing the failure
+/// here makes the run report and exit say `failed` instead of hiding it behind a
+/// non-terminal root status.
+fn surface_root_status(nodes: &[Node]) -> String {
+    let root = nodes
+        .first()
+        .map(|n| n.status.clone())
+        .unwrap_or_else(|| PENDING.into());
+    if root == COMPLETE {
+        return root;
+    }
+    if nodes.iter().any(|n| n.status == FAILED) {
+        return FAILED.to_string();
+    }
+    root
 }
 
 fn snapshot(report: &RunReport, nodes: &[Node]) -> StatsSnapshot {
@@ -487,8 +522,13 @@ fn run_one_node(
     }
 
     let mut feedback: Option<String> = None;
+    // Sticky: once an attempt got as far as the critic - which means every
+    // objective gate passed - the work is substantially correct even if the
+    // critic rejects it, and must not be wiped on terminal failure.
+    let mut critic_contested = false;
+    let max_attempts = max_attempts();
 
-    for attempt in 0..MAX_ATTEMPTS {
+    for attempt in 0..max_attempts {
         if INTERRUPTED.load(Ordering::SeqCst) {
             return Ok(report);
         }
@@ -497,7 +537,7 @@ fn run_one_node(
                 "  [{}] retry attempt {}/{}",
                 node.id,
                 attempt + 1,
-                MAX_ATTEMPTS
+                max_attempts
             ));
         }
 
@@ -932,7 +972,37 @@ fn run_one_node(
                         node.id,
                         gates.len()
                     ));
+                    // A gate that launches the app writes runtime state
+                    // (`.portfolio.json` and friends). Snapshot the untracked set
+                    // before the gates run, then exclude whatever they created:
+                    // that is the app's state, not this node's work, and it must
+                    // not enter the diff, the critic's evidence or history.
+                    let pre_gate_untracked = crate::git::untracked_files(&store.root);
                     let outcomes = crate::verify::run_gates(&store.root, &gates, GATE_TIMEOUT_SECS);
+                    let runtime: Vec<String> = crate::git::untracked_files(&store.root)
+                        .difference(&pre_gate_untracked)
+                        .cloned()
+                        .collect();
+                    if !runtime.is_empty() {
+                        if let Err(e) = crate::git::ignore_runtime_paths(&store.root, &runtime) {
+                            store
+                                .append_log(
+                                    node,
+                                    &serde_json::json!({"event":"runtime_ignore_failed","error":e}),
+                                )
+                                .ok();
+                        } else {
+                            store
+                                .append_log(
+                                    node,
+                                    &serde_json::json!({
+                                        "event":"runtime_state_ignored",
+                                        "files": runtime,
+                                    }),
+                                )
+                                .ok();
+                        }
+                    }
                     if let Some(failures) = crate::verify::format_failures(&outcomes) {
                         report.verify_failures += 1;
                         report.refused += 1;
@@ -1011,6 +1081,7 @@ fn run_one_node(
                         return Ok(report);
                     }
                     Ok((_, crit_details)) => {
+                        critic_contested = true;
                         report.verify_failures += 1;
                         report.refused += 1;
                         let reasons: Vec<String> = crit_details
@@ -1109,6 +1180,40 @@ fn run_one_node(
                 report.refused += 1;
                 feedback = Some(format!("Unknown or unhandled verb: {}", result.verb));
                 continue;
+            }
+        }
+    }
+
+    // A retries-exhausted node normally has its uncommitted work reverted, so it
+    // cannot contaminate a sibling's diff. The exception is a node the objective
+    // gates accepted and only the critic rejected: that work is substantially
+    // correct, so commit it as an explicit unverified checkpoint and let the
+    // scheduler skip the revert. A later retry or reopen builds on it instead of
+    // starting from zero, which is exactly what the trial lost.
+    if critic_contested && crate::git::has_uncommitted_changes(&store.root) {
+        match crate::git::commit_node_work(
+            &store.root,
+            &node.id,
+            "unverified checkpoint (critic contested)",
+        ) {
+            Ok(Some(sha)) => {
+                let short: String = sha.chars().take(8).collect();
+                store
+                    .append_decision(
+                        node,
+                        &format!("committed unverified checkpoint {short} (critic contested)"),
+                    )
+                    .ok();
+                report.checkpoint_committed = true;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                store
+                    .append_log(
+                        node,
+                        &serde_json::json!({"event":"checkpoint_failed","error":e}),
+                    )
+                    .ok();
             }
         }
     }
@@ -1320,5 +1425,26 @@ mod tests {
         assert!(reject_split_topology(&cyclic, &[])
             .unwrap()
             .contains("cycle"));
+    }
+
+    /// D3: a failed descendant must make the run report its root as failed, even
+    /// though the root itself stays `split` so it can still be retried.
+    #[test]
+    fn a_failed_branch_surfaces_as_a_failed_root_report() {
+        let nodes = vec![
+            node("root", SPLIT_STATUS, None, 1, &[]),
+            node("root-01", COMPLETE, Some("root"), 2, &[]),
+            node("root-02", FAILED, Some("root"), 2, &[]),
+        ];
+        assert_eq!(surface_root_status(&nodes), FAILED);
+
+        let healthy = vec![
+            node("root", SPLIT_STATUS, None, 1, &[]),
+            node("root-01", COMPLETE, Some("root"), 2, &[]),
+        ];
+        assert_eq!(surface_root_status(&healthy), SPLIT_STATUS);
+
+        let done = vec![node("root", COMPLETE, None, 1, &[])];
+        assert_eq!(surface_root_status(&done), COMPLETE);
     }
 }
