@@ -21,6 +21,13 @@ if [ ! -d src ]; then
   exit 0
 fi
 
+# This check is a JS/TS import graph analyser; it has no meaning for other
+# stacks. Say so instead of reporting a vacuous "every module is referenced".
+if ! find src -type f \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \) -print -quit | grep -q .; then
+  echo "fractal-integrate-check: no JS/TS sources in $PROJECT/src; check skipped"
+  exit 0
+fi
+
 # Entry points are referenced by manifests/HTML, not by other modules.
 is_entry() {
   case "$1" in

@@ -5,7 +5,6 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 
 pub const SPLIT: &str = "split";
 pub const COMPLETE_VERB: &str = "complete";
@@ -16,20 +15,15 @@ pub const NOTE_GLOBAL: &str = "note_global";
 /// down the tree, instead of the parent itself failing after N attempts.
 pub const REOPEN: &str = "reopen";
 
-static DECISION_RE: OnceLock<Regex> = OnceLock::new();
-fn decision_re() -> &'static Regex {
-    DECISION_RE.get_or_init(|| {
-        Regex::new(
-            r#"\{"verb":\s*"(split|complete|escalate|escalate_resolve|note_global|reopen)""#,
-        )
-        .unwrap()
-    })
-}
-
 #[derive(Debug)]
 pub enum RunnerError {
     Timeout,
     NotFound(String),
+    /// Returned when an executor produces no parseable decision. The scheduler
+    /// already retries on this variant; it becomes reachable when the
+    /// fail-closed completion work lands (follow-up reliability task: "no
+    /// decision is an error+retry, not an implicit complete").
+    #[allow(dead_code)]
     NoDecision(String),
     Other(String),
 }
@@ -50,17 +44,6 @@ pub fn get_executor() -> String {
     std::env::var("FRACTAL_EXECUTOR")
         .unwrap_or_else(|_| "omp".to_string())
         .to_lowercase()
-}
-
-pub fn pick_model(default: &str) -> String {
-    if !default.is_empty() && default != "default" {
-        return default.to_string();
-    }
-    match get_executor().as_str() {
-        "omp" | "pi" => "openrouter/google/gemini-3.7-flash".to_string(),
-        "opencode" => "claude-sonnet-4-6".to_string(),
-        _ => "openrouter/google/gemini-3.7-flash".to_string(),
-    }
 }
 
 const OP_SYSTEM: &str = "\
@@ -116,7 +99,12 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
                     } else {
                         preview
                     };
-                    dep_artifacts.push(format!("### Dependency artifact: {} (from {})\n```\n{}\n```\n", rel.display(), dep_node.id, head));
+                    dep_artifacts.push(format!(
+                        "### Dependency artifact: {} (from {})\n```\n{}\n```\n",
+                        rel.display(),
+                        dep_node.id,
+                        head
+                    ));
                 }
             }
         }
@@ -260,8 +248,8 @@ from the child that owns it.
 
 1. Run the real verification: `fractal verify`.
 2. Look at what was actually produced, never at what was claimed:
-     fractal-node-diff.sh --stat <child-id>
-     fractal-integrate-check.sh
+     fractal node-diff --stat <child-id>
+     fractal integrate-check        (JS/TS projects only)
 3. Then do exactly one of:
 
    a. It works -> report it:
@@ -441,7 +429,8 @@ pub fn run_node(
     on_output: OutputFn,
     feedback: Option<&str>,
 ) -> std::result::Result<VerbResult, RunnerError> {
-    let mut prompt = assemble_context(store, node).map_err(|e| RunnerError::Other(e.to_string()))?;
+    let mut prompt =
+        assemble_context(store, node).map_err(|e| RunnerError::Other(e.to_string()))?;
     if let Some(fb) = feedback {
         prompt.push_str(&format!("\n\n## Feedback from previous attempt\n{fb}\n"));
     }
@@ -498,7 +487,7 @@ pub fn call_via_omp(
     let node_name_out = node_name.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             let log_line = format!(" [{}] {}", node_name_out, line);
             let _ = std_tx.send((false, log_line, line));
         }
@@ -506,7 +495,7 @@ pub fn call_via_omp(
     let node_name_err = node_name.clone();
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             let log_line = format!(" [{}] ERR: {}", node_name_err, line);
             let _ = std_tx_err.send((true, log_line, line));
         }
@@ -573,10 +562,7 @@ pub fn call_via_omp(
     result_from_payload(verb, &val)
 }
 
-pub fn call_critic(
-    prompt: &str,
-    model: &str,
-) -> std::result::Result<Value, RunnerError> {
+pub fn call_critic(prompt: &str, model: &str) -> std::result::Result<Value, RunnerError> {
     let temp_dir = std::env::temp_dir().join(format!("fractal_critic_{}", std::process::id()));
     let _ = fs::create_dir_all(&temp_dir);
     let claude_md = format!("{CRITIC_SYSTEM}\n\nReview against acceptance criteria. Output JSON verdict with PASS or FAIL.\n\n{prompt}");
@@ -595,7 +581,9 @@ pub fn call_critic(
     cmd.arg("Review against acceptance criteria. Output JSON verdict.");
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let output = cmd.output().map_err(|e| RunnerError::Other(format!("critic: {e}")))?;
+    let output = cmd
+        .output()
+        .map_err(|e| RunnerError::Other(format!("critic: {e}")))?;
     let _ = fs::remove_dir_all(&temp_dir);
     let text = format!(
         "{}\n{}",
@@ -662,8 +650,18 @@ pub fn verify_node(
         children_summary.push_str("Child Subtasks Completed & Verified:\n");
         for c in &children {
             let art_list = c.find_artifacts();
-            let names: Vec<_> = art_list.iter().filter_map(|p| p.file_name()).map(|f| f.to_string_lossy()).collect();
-            children_summary.push_str(&format!("- Subtask {} ({}): {} [Artifacts: {}]\n", c.id, c.status, c.summary, names.join(", ")));
+            let names: Vec<_> = art_list
+                .iter()
+                .filter_map(|p| p.file_name())
+                .map(|f| f.to_string_lossy())
+                .collect();
+            children_summary.push_str(&format!(
+                "- Subtask {} ({}): {} [Artifacts: {}]\n",
+                c.id,
+                c.status,
+                c.summary,
+                names.join(", ")
+            ));
         }
     }
 
@@ -869,9 +867,8 @@ fn parse_verdict(msg: &Value) -> std::result::Result<(String, Vec<Value>), Runne
         .and_then(|b| b.get("text"))
         .and_then(|t| t.as_str())
         .unwrap_or("");
-    let d = extract_decision(content).ok_or_else(|| {
-        RunnerError::Other(format!("unparseable critic response: {content}"))
-    })?;
+    let d = extract_decision(content)
+        .ok_or_else(|| RunnerError::Other(format!("unparseable critic response: {content}")))?;
     let verdict = d
         .get("verdict")
         .and_then(|v| v.as_str())

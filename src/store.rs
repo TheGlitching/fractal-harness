@@ -120,11 +120,16 @@ impl Contract {
         let mut sections: std::collections::HashMap<String, Vec<String>> = Default::default();
         let mut current: Option<String> = None;
         for line in text.lines() {
-            if line.starts_with("## ") {
-                current = Some(line[3..].trim().to_lowercase());
-                sections.entry(current.clone().unwrap_or_default()).or_default();
+            if let Some(stripped) = line.strip_prefix("## ") {
+                current = Some(stripped.trim().to_lowercase());
+                sections
+                    .entry(current.clone().unwrap_or_default())
+                    .or_default();
             } else if let Some(ref cur) = current {
-                sections.entry(cur.clone()).or_default().push(line.to_string());
+                sections
+                    .entry(cur.clone())
+                    .or_default()
+                    .push(line.to_string());
             }
         }
         let unbullet = |key: &str| -> Vec<String> {
@@ -601,11 +606,27 @@ impl Store {
         // route it automatically into src/ or tests/ if not already qualified
         if out.components().count() == 1 {
             let name = out.to_string_lossy().to_string();
-            if name.ends_with(".test.ts") || name.ends_with(".test.tsx") || name.ends_with(".spec.ts") || name.ends_with(".spec.tsx") {
+            if name.ends_with(".test.ts")
+                || name.ends_with(".test.tsx")
+                || name.ends_with(".spec.ts")
+                || name.ends_with(".spec.tsx")
+            {
                 return PathBuf::from("tests").join(&name);
-            } else if name.ends_with(".ts") || name.ends_with(".tsx") || name.ends_with(".css") || name.ends_with(".html") {
+            } else if name.ends_with(".ts")
+                || name.ends_with(".tsx")
+                || name.ends_with(".css")
+                || name.ends_with(".html")
+            {
                 // Keep root configs at root
-                if !["vite.config.ts", "tailwind.config.ts", "postcss.config.js", "tsconfig.json", "package.json"].contains(&name.as_str()) {
+                if ![
+                    "vite.config.ts",
+                    "tailwind.config.ts",
+                    "postcss.config.js",
+                    "tsconfig.json",
+                    "package.json",
+                ]
+                .contains(&name.as_str())
+                {
                     return PathBuf::from("src").join(&name);
                 }
             }
@@ -613,7 +634,10 @@ impl Store {
         out
     }
     pub fn unified_dir(&self) -> PathBuf {
-        self.tree_dir.parent().unwrap_or(&self.tree_dir).join(UNIFIED_DIRNAME)
+        self.tree_dir
+            .parent()
+            .unwrap_or(&self.tree_dir)
+            .join(UNIFIED_DIRNAME)
     }
 
     pub fn sync_unified_workspace(
@@ -666,10 +690,8 @@ impl Store {
                         if let Some(parent) = dest.parent() {
                             fs::create_dir_all(parent)?;
                         }
-                        if art.is_file() {
-                            if fs::copy(&art, &dest).is_ok() {
-                                count += 1;
-                            }
+                        if art.is_file() && fs::copy(&art, &dest).is_ok() {
+                            count += 1;
                         }
                     }
                 }
@@ -681,7 +703,10 @@ impl Store {
     pub fn append_decision(&self, node: &Node, text: &str) -> Result<(), StoreError> {
         let line = format!("- {} {}\n", now(), text.trim());
         let path = node.decisions_path();
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         file.write_all(line.as_bytes())?;
         Ok(())
     }
@@ -697,7 +722,10 @@ impl Store {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         file.write_all(format!("{line}\n").as_bytes())?;
         Ok(())
     }
@@ -738,7 +766,13 @@ impl Store {
                         n.contract_path(),
                         nc.render(&n.id, n.depth, n.parent.as_deref()),
                     )?;
-                    self.append_decision(n, &format!("inherited constraint from {origin_node_id}: {}", constraint.trim()))?;
+                    self.append_decision(
+                        n,
+                        &format!(
+                            "inherited constraint from {origin_node_id}: {}",
+                            constraint.trim()
+                        ),
+                    )?;
                     affected += 1;
                 }
             }
@@ -761,10 +795,9 @@ impl Store {
 
     pub fn drain_steer_queue(&self) -> Result<Vec<(i64, String, String)>, StoreError> {
         self.with_conn(|conn| {
-            let mut stmt = conn.prepare("SELECT id, command, payload FROM steer_queue ORDER BY id ASC")?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+            let mut stmt =
+                conn.prepare("SELECT id, command, payload FROM steer_queue ORDER BY id ASC")?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             let items: Vec<(i64, String, String)> = rows.collect::<Result<Vec<_>, _>>()?;
             if !items.is_empty() {
                 conn.execute("DELETE FROM steer_queue", [])?;
@@ -789,7 +822,12 @@ impl Store {
         depth: i64,
         out: &mut Vec<(PathBuf, String, Option<String>, i64)>,
     ) {
-        out.push((dir.to_path_buf(), node_id.to_string(), parent.map(|s| s.to_string()), depth));
+        out.push((
+            dir.to_path_buf(),
+            node_id.to_string(),
+            parent.map(|s| s.to_string()),
+            depth,
+        ));
         let cdir = dir.join(CHILDREN_DIRNAME);
         for child_dir in Self::child_dirs(&cdir) {
             let cid = child_dir.file_name().unwrap().to_string_lossy().to_string();
@@ -856,37 +894,32 @@ impl Store {
         let disk = self.walk_disk();
         let mut nodes = Vec::new();
         for (path, node_id, parent, depth) in &disk {
-            let (status, goal, summary, deps_s, dep_fp): (
-                String,
-                String,
-                String,
-                String,
-                String,
-            ) = self.with_conn(|conn| {
-                let r = conn.query_row(
-                    "SELECT status,goal,summary,depends_on,dep_fp FROM nodes WHERE id=?1",
-                    params![node_id],
-                    |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, String>(2)?,
-                            r.get::<_, String>(3)?,
-                            r.get::<_, String>(4)?,
-                        ))
-                    },
-                );
-                match r {
-                    Ok(v) => Ok(v),
-                    Err(_) => Ok((
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                    )),
-                }
-            })?;
+            let (status, goal, summary, deps_s, dep_fp): (String, String, String, String, String) =
+                self.with_conn(|conn| {
+                    let r = conn.query_row(
+                        "SELECT status,goal,summary,depends_on,dep_fp FROM nodes WHERE id=?1",
+                        params![node_id],
+                        |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                                r.get::<_, String>(3)?,
+                                r.get::<_, String>(4)?,
+                            ))
+                        },
+                    );
+                    match r {
+                        Ok(v) => Ok(v),
+                        Err(_) => Ok((
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                        )),
+                    }
+                })?;
             let deps: Vec<String> = serde_json::from_str(&deps_s).unwrap_or_default();
             nodes.push(Node {
                 id: node_id.clone(),
@@ -921,22 +954,41 @@ impl Store {
 
     pub fn children_of(&self, node: &Node) -> Result<Vec<Node>, StoreError> {
         let all = self.walk()?;
-        Ok(all.into_iter().filter(|n| n.parent.as_deref() == Some(&node.id)).collect())
+        Ok(all
+            .into_iter()
+            .filter(|n| n.parent.as_deref() == Some(&node.id))
+            .collect())
     }
 
     pub fn generate_digest(&self) -> Result<String, StoreError> {
         let nodes = self.walk()?;
         let mut out = String::from("# Digest\n\n## Done\n");
         for d in nodes.iter().filter(|n| n.status == COMPLETE) {
-            out.push_str(&format!("- **{}**: {}\n", d.id, d.goal.lines().next().unwrap_or(&d.goal)));
+            out.push_str(&format!(
+                "- **{}**: {}\n",
+                d.id,
+                d.goal.lines().next().unwrap_or(&d.goal)
+            ));
         }
         out.push_str("\n## Blocked\n");
-        for b in nodes.iter().filter(|n| n.status == SUSPENDED || n.status == FAILED) {
-            out.push_str(&format!("- **{}** ({}): {}\n", b.id, b.status, b.goal.lines().next().unwrap_or(&b.goal)));
+        for b in nodes
+            .iter()
+            .filter(|n| n.status == SUSPENDED || n.status == FAILED)
+        {
+            out.push_str(&format!(
+                "- **{}** ({}): {}\n",
+                b.id,
+                b.status,
+                b.goal.lines().next().unwrap_or(&b.goal)
+            ));
         }
         out.push_str("\n## Next\n");
         for p in nodes.iter().filter(|n| n.status == PENDING) {
-            out.push_str(&format!("- **{}**: {}\n", p.id, p.goal.lines().next().unwrap_or(&p.goal)));
+            out.push_str(&format!(
+                "- **{}**: {}\n",
+                p.id,
+                p.goal.lines().next().unwrap_or(&p.goal)
+            ));
         }
         Ok(out)
     }
@@ -998,7 +1050,10 @@ impl Store {
                 self.set_status(node, PENDING)?;
             }
 
-            self.append_decision(child, &format!("reopened by {}: {}", parent.id, reason.trim()))?;
+            self.append_decision(
+                child,
+                &format!("reopened by {}: {}", parent.id, reason.trim()),
+            )?;
             reopened.push(child.id.clone());
         }
 
@@ -1006,7 +1061,11 @@ impl Store {
             self.set_status(parent, SPLIT)?;
             self.append_decision(
                 parent,
-                &format!("reopened children {}: {}", reopened.join(", "), reason.trim()),
+                &format!(
+                    "reopened children {}: {}",
+                    reopened.join(", "),
+                    reason.trim()
+                ),
             )?;
         }
 
@@ -1077,7 +1136,11 @@ impl Store {
         Ok(eid)
     }
 
-    pub fn retrieve_global(&self, query: &str, limit: usize) -> Result<Vec<GlobalEntry>, StoreError> {
+    pub fn retrieve_global(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<GlobalEntry>, StoreError> {
         let terms: Vec<String> = query
             .split_whitespace()
             .map(|s| s.to_lowercase())
@@ -1085,13 +1148,12 @@ impl Store {
             .collect();
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, entry_type, content FROM global_entries WHERE superseded=0 ORDER BY created_at DESC",
+                "SELECT entry_type, content FROM global_entries WHERE superseded=0 ORDER BY created_at DESC",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok(GlobalEntry {
-                    id: row.get(0)?,
-                    entry_type: row.get(1)?,
-                    content: row.get(2)?,
+                    entry_type: row.get(0)?,
+                    content: row.get(1)?,
                 })
             })?;
             let mut scored: Vec<(usize, GlobalEntry)> = Vec::new();
@@ -1103,7 +1165,7 @@ impl Store {
                     scored.push((score, entry));
                 }
             }
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.sort_by_key(|b| std::cmp::Reverse(b.0));
             Ok(scored.into_iter().take(limit).map(|s| s.1).collect())
         })
     }
@@ -1111,7 +1173,6 @@ impl Store {
 
 #[derive(Debug, Clone)]
 pub struct GlobalEntry {
-    pub id: String,
     pub entry_type: String,
     pub content: String,
 }
@@ -1121,7 +1182,8 @@ mod tests {
     use super::*;
 
     fn temp_store(name: &str) -> (Store, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("fractal_store_{}_{}", name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("fractal_store_{}_{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         (Store::new(&dir), dir)
@@ -1138,7 +1200,11 @@ mod tests {
         let first = store
             .add_children(
                 &root,
-                &[Contract { goal: "produce a module".into(), id: "producer".into(), ..Default::default() }],
+                &[Contract {
+                    goal: "produce a module".into(),
+                    id: "producer".into(),
+                    ..Default::default()
+                }],
             )
             .unwrap();
         assert_eq!(first.len(), 1);
@@ -1174,8 +1240,16 @@ mod tests {
             .add_children(
                 &root,
                 &[
-                    Contract { goal: "a".into(), id: "a".into(), ..Default::default() },
-                    Contract { goal: "b".into(), id: "b".into(), ..Default::default() },
+                    Contract {
+                        goal: "a".into(),
+                        id: "a".into(),
+                        ..Default::default()
+                    },
+                    Contract {
+                        goal: "b".into(),
+                        id: "b".into(),
+                        ..Default::default()
+                    },
                 ],
             )
             .unwrap();
@@ -1203,10 +1277,24 @@ mod tests {
         let (store, dir) = temp_store("notmine");
         let root = store.init("goal").unwrap();
         let kids = store
-            .add_children(&root, &[Contract { goal: "a".into(), id: "a".into(), ..Default::default() }])
+            .add_children(
+                &root,
+                &[Contract {
+                    goal: "a".into(),
+                    id: "a".into(),
+                    ..Default::default()
+                }],
+            )
             .unwrap();
         let grandkids = store
-            .add_children(&kids[0], &[Contract { goal: "deep".into(), id: "deep".into(), ..Default::default() }])
+            .add_children(
+                &kids[0],
+                &[Contract {
+                    goal: "deep".into(),
+                    id: "deep".into(),
+                    ..Default::default()
+                }],
+            )
             .unwrap();
         store.set_status(&grandkids[0], COMPLETE).unwrap();
 
@@ -1214,7 +1302,10 @@ mod tests {
         let reopened = store
             .reopen_children(&root, &[grandkids[0].id.clone()], "nope")
             .unwrap();
-        assert!(reopened.is_empty(), "a parent may only reopen its own direct children");
+        assert!(
+            reopened.is_empty(),
+            "a parent may only reopen its own direct children"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

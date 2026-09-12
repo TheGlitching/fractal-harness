@@ -6,20 +6,22 @@ context window, the harness grows a tree of nodes, each with its own contract,
 decisions, logs, and artifacts. Agents are stateless workers hydrated from a
 node; the tree is the memory.
 
-Agents answer with one of five verbs, all enforced by orchestrator code, not
-by prompting:
+Agents answer with a verb; the scheduler parses and routes the node, rather than
+trusting prose:
 
-| Verb | Meaning |
-|------|---------|
-| `split(subtasks)` | the task is too big for one agent; propose child contracts |
-| `complete(deliverable, summary)` | submit work for verification against the contract |
-| `escalate(assumption, evidence)` | an inherited constraint or blocker; propagates up to parent |
-| `escalate_resolve(resolution)` | settle an escalation |
-| `note_global(type, content)` | write a lesson, convention, or skill to the shared global store |
+| Verb | Meaning | Status |
+|------|---------|--------|
+| `split(subtasks)` | the task is too big for one agent; propose child contracts | implemented |
+| `complete(deliverable, summary)` | submit work for verification against the contract | implemented |
+| `escalate(assumption, evidence)` | raise an invalid inherited assumption to the parent | implemented; resolution path not yet |
+| `reopen(children, reason)` | return specific children for rework after integration fails | implemented |
+| `note_global(type, content)` | write a lesson, convention, or skill to the shared global store | implemented |
+| `escalate_resolve(resolution)` | settle an escalation | **not yet implemented** |
 
-The **leaf executor** spawns `omp` (default) or `opencode` headlessly in each node directory.
+The **leaf executor** spawns `omp` (also `pi`) headlessly in each node directory.
 Agents read a generated `CLAUDE.md` (atomic contract + direct parent constraints
 + relevant global knowledge) and write deliverables as real files in `artifacts/`.
+`opencode` is **not yet implemented**: selecting it currently still runs `omp`.
 
 ## Key Modern Harness Principles
 
@@ -31,7 +33,7 @@ Agents read a generated `CLAUDE.md` (atomic contract + direct parent constraints
 
 ## Installation
 
-Requires [Rust](https://rustup.rs) and [`omp`](https://github.com/can1357/omp) (or `opencode`) on your PATH.
+Requires [Rust](https://rustup.rs) and [`omp`](https://github.com/can1357/omp) on your PATH.
 
 ```bash
 git clone https://github.com/TheGlitching/fractal-harness.git
@@ -39,7 +41,10 @@ cd fractal-harness
 cargo install --path .
 ```
 
-After installation, the `fractal` command is available globally.
+After installation, the `fractal` command is available globally. The helper
+checks described below run through that binary (`fractal node-diff`,
+`fractal integrate-check`), so they are available after `cargo install` with no
+extra PATH setup; `bin/*.sh` are the embedded sources.
 
 ## Usage
 
@@ -87,17 +92,52 @@ fractal digest
 
 Writes `digest.md` with three sections (done / blocked / next).
 
+### Inspect a node's real changes
+
+`fractal node-diff` reads git, not a node's summary of itself. Installing parents
+need the real diff to decide whether children wired their work in.
+
+```bash
+fractal node-diff --stat <child-id>   # summary only
+fractal node-diff <child-id>          # full patch
+fractal node-diff                     # list node commits
+```
+
+`fractal integrate-check` reports modules nothing imports and stub components.
+It is advisory, and only meaningful for JS/TS projects; it exits cleanly with a
+"check skipped" note for other stacks.
+
+### Model selection
+
+The model passed to the executor is chosen in this order:
+
+1. `FRACTAL_MODEL` if set and non-empty.
+2. On an interactive terminal, a picker listing available models.
+3. Otherwise the default model.
+
+There is currently no `--model` flag or non-interactive `--yes` flag; in a
+non-TTY context the default is used without prompting.
+
 ## Configuration
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `FRACTAL_EXECUTOR` | `omp` | Leaf executor (`omp` or `opencode`) |
-| `FRACTAL_BUDGET` | unset | Token allowance at the root; enables budget scaling |
-| `FRACTAL_SPLIT_FEE` | `200` | Token cost charged per split |
+| `FRACTAL_MODEL` | unset | Model for the leaf executor; skips the interactive picker |
+| `FRACTAL_EXECUTOR` | `omp` | Leaf executor (`omp`/`pi`; `opencode` not yet implemented) |
+| `FRACTAL_BUDGET` | unset | Token allowance at the root; **not yet enforced** |
+| `FRACTAL_SPLIT_FEE` | `200` | Token cost charged per split; **not yet enforced** |
 | `FRACTAL_MAX_STEPS` | `500` | Backstop loop bound for a single run |
-| `FRACTAL_TIMEOUT` | `1200` | Seconds before a stuck node is killed |
+| `FRACTAL_TIMEOUT` | `300` | Seconds before a stuck node is killed |
 | `FRACTAL_PARALLEL` | `4` | Number of concurrent nodes executed in parallel |
 
-## License / status
+## Status
 
-Single-binary Rust rewrite. Licensed under MIT.
+The canonical implementation is Rust. The design spec is `docs/SPEC.md` and the
+build contracts are in `contracts/`. Known gaps — upward escalation resolution,
+fail-closed verification, deterministic non-interactive termination, per-node
+isolation, context bounds, and an enforced budget — are tracked for follow-up
+work and are not yet reflected in the behaviour above.
+
+## License
+
+Licensed under MIT.

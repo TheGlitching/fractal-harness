@@ -51,8 +51,7 @@ impl Default for RunReport {
 
 impl RunReport {
     pub fn ok(&self) -> bool {
-        self.root_status != FAILED
-            && [COMPLETE, SPLIT_STATUS].contains(&self.root_status.as_str())
+        self.root_status != FAILED && [COMPLETE, SPLIT_STATUS].contains(&self.root_status.as_str())
     }
 
     pub fn write_trace(&self, path: &str) {
@@ -73,7 +72,10 @@ impl RunReport {
             "verify_failures": self.verify_failures, "verify_catch_rate": verify_catch,
             "depth_distribution": depths_count, "max_depth": max_depth,
         });
-        let _ = std::fs::write(path, serde_json::to_string_pretty(&record).unwrap_or_default());
+        let _ = std::fs::write(
+            path,
+            serde_json::to_string_pretty(&record).unwrap_or_default(),
+        );
     }
 
     fn merge(&mut self, other: &RunReport) {
@@ -144,7 +146,9 @@ pub fn run(
         if runnable.is_empty() {
             // Check if any failed or blocked nodes exist
             let has_failed = nodes.iter().any(|n| n.status == FAILED);
-            let all_complete = nodes.iter().all(|n| n.status == COMPLETE || n.status == SPLIT_STATUS);
+            let all_complete = nodes
+                .iter()
+                .all(|n| n.status == COMPLETE || n.status == SPLIT_STATUS);
             {
                 let mut s = state.lock().unwrap();
                 if has_failed {
@@ -153,7 +157,8 @@ pub fn run(
                     s.status_line = "All tasks completed successfully.".into();
                     break;
                 } else {
-                    s.status_line = "No runnable tasks. Waiting for dependencies or steer commands...".into();
+                    s.status_line =
+                        "No runnable tasks. Waiting for dependencies or steer commands...".into();
                 }
             }
 
@@ -214,8 +219,8 @@ pub fn run(
                 Err(e) => {
                     let nodes = store.walk().unwrap_or_default();
                     if let Some(n) = nodes.iter().find(|n2| n2.id == node_id) {
-                        let _ = store.append_decision(&n, &format!("error: {e}"));
-                        let _ = store.set_status(&n, FAILED);
+                        let _ = store.append_decision(n, &format!("error: {e}"));
+                        let _ = store.set_status(n, FAILED);
                         report.failed += 1;
                     }
                 }
@@ -245,7 +250,10 @@ pub fn run(
         if report.root_status == COMPLETE {
             s.status_line = "done — root complete".into();
         } else {
-            s.status_line = format!("stopped — root: {} (press r on a node to retry)", report.root_status);
+            s.status_line = format!(
+                "stopped — root: {} (press r on a node to retry)",
+                report.root_status
+            );
         }
     }
     Ok(report)
@@ -277,7 +285,7 @@ fn next_nodes(nodes: &[Node]) -> Vec<Node> {
         .filter(|n| n.status == PENDING && deps_satisfied(n, &by_id))
         .cloned()
         .collect();
-    runnable.sort_by(|a, b| b.depth.cmp(&a.depth));
+    runnable.sort_by_key(|b| std::cmp::Reverse(b.depth));
     if !runnable.is_empty() {
         return runnable;
     }
@@ -291,9 +299,11 @@ fn next_nodes(nodes: &[Node]) -> Vec<Node> {
 }
 
 fn deps_satisfied(node: &Node, by_id: &HashMap<&str, &Node>) -> bool {
-    node.depends_on
-        .iter()
-        .all(|dep| by_id.get(dep.as_str()).map_or(false, |n| n.status == COMPLETE))
+    node.depends_on.iter().all(|dep| {
+        by_id
+            .get(dep.as_str())
+            .is_some_and(|n| n.status == COMPLETE)
+    })
 }
 
 fn aggregatable(node: &Node, _by_id: &HashMap<&str, &Node>, nodes: &[Node]) -> bool {
@@ -355,16 +365,24 @@ fn run_one_node(
             }
             Err(RunnerError::Timeout) => {
                 store
-                    .append_log(node, &serde_json::json!({"event":"error","error":"timeout"}))
+                    .append_log(
+                        node,
+                        &serde_json::json!({"event":"error","error":"timeout"}),
+                    )
                     .ok();
                 feedback = Some("The previous attempt timed out. If the task is too large, output a `split` decision immediately.".into());
                 continue;
             }
             Err(e) => {
                 store
-                    .append_log(node, &serde_json::json!({"event":"error","error":e.to_string()}))
+                    .append_log(
+                        node,
+                        &serde_json::json!({"event":"error","error":e.to_string()}),
+                    )
                     .ok();
-                feedback = Some(format!("Error on previous attempt: {e}. Output a valid JSON decision."));
+                feedback = Some(format!(
+                    "Error on previous attempt: {e}. Output a valid JSON decision."
+                ));
                 continue;
             }
         };
@@ -377,7 +395,10 @@ fn run_one_node(
                     &result.entry_supersedes,
                 ) {
                     store
-                        .append_log(node, &serde_json::json!({"event":"note_global","entry_id":eid}))
+                        .append_log(
+                            node,
+                            &serde_json::json!({"event":"note_global","entry_id":eid}),
+                        )
                         .ok();
                 }
                 continue;
@@ -411,13 +432,15 @@ fn run_one_node(
                     }
                 }
 
-                store.append_decision(
-                    node,
-                    &format!(
-                        "escalated: assumption='{}' evidence='{}'",
-                        result.assumption, result.evidence
-                    ),
-                ).ok();
+                store
+                    .append_decision(
+                        node,
+                        &format!(
+                            "escalated: assumption='{}' evidence='{}'",
+                            result.assumption, result.evidence
+                        ),
+                    )
+                    .ok();
 
                 return Ok(report);
             }
@@ -484,15 +507,15 @@ fn run_one_node(
                 } else {
                     GateScope::Leaf
                 };
-                let gates = crate::verify::resolve_gates(&store.root, &contract.verification, scope);
+                let gates =
+                    crate::verify::resolve_gates(&store.root, &contract.verification, scope);
                 if !gates.is_empty() {
                     on_output(&format!(
                         "  [{}] running {} verification gate(s)",
                         node.id,
                         gates.len()
                     ));
-                    let outcomes =
-                        crate::verify::run_gates(&store.root, &gates, GATE_TIMEOUT_SECS);
+                    let outcomes = crate::verify::run_gates(&store.root, &gates, GATE_TIMEOUT_SECS);
                     if let Some(failures) = crate::verify::format_failures(&outcomes) {
                         report.verify_failures += 1;
                         report.refused += 1;
@@ -512,10 +535,22 @@ fn run_one_node(
 
                 let criteria = contract.acceptance_criteria;
                 report.verifications += 1;
-                match verify_node(store, node, &result.deliverable, &result.artifacts, &criteria, model) {
-                    Ok((verdict, crit_details)) if verdict == "PASS" => {
+                match verify_node(
+                    store,
+                    node,
+                    &result.deliverable,
+                    &result.artifacts,
+                    &criteria,
+                    model,
+                ) {
+                    Ok((verdict, _crit_details)) if verdict == "PASS" => {
                         store
-                            .complete(node, &result.summary, &result.deliverable, &result.artifacts)
+                            .complete(
+                                node,
+                                &result.summary,
+                                &result.deliverable,
+                                &result.artifacts,
+                            )
                             .map_err(|e| e.to_string())?;
                         store.append_decision(node, "verified: verdict=PASS").ok();
 
@@ -525,7 +560,10 @@ fn run_one_node(
                         match crate::git::commit_node_work(&store.root, &node.id, &result.summary) {
                             Ok(Some(sha)) => {
                                 let short: String = sha.chars().take(8).collect();
-                                let files = crate::git::changed_files_since(&store.root, &format!("{sha}~1"));
+                                let files = crate::git::changed_files_since(
+                                    &store.root,
+                                    &format!("{sha}~1"),
+                                );
                                 store
                                     .append_decision(
                                         node,
@@ -539,7 +577,10 @@ fn run_one_node(
                             }
                             Err(e) => {
                                 store
-                                    .append_log(node, &serde_json::json!({"event":"commit_failed","error":e}))
+                                    .append_log(
+                                        node,
+                                        &serde_json::json!({"event":"commit_failed","error":e}),
+                                    )
                                     .ok();
                             }
                         }

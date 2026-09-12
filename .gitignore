@@ -1,16 +1,8 @@
+target/
 __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
 .gnhf/
 notes.md
-
-# Development-time artifacts: specs, contracts, acceptance tests, and the
-# agent working-agreement doc are not part of the harness itself.
-AGENTS.md
-docs/
-contracts/
-tests/
-target/
 *.egg-info/
-Cargo.lock

@@ -202,7 +202,8 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("fractal_verify_{}_{}", name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("fractal_verify_{}_{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -228,7 +229,11 @@ mod tests {
     #[test]
     fn run_gates_stops_at_first_failure() {
         let dir = temp_dir("stop");
-        let gates = vec!["true".to_string(), "exit 1".to_string(), "echo never".to_string()];
+        let gates = vec![
+            "true".to_string(),
+            "exit 1".to_string(),
+            "echo never".to_string(),
+        ];
         let outcomes = run_gates(&dir, &gates, 10);
         assert_eq!(outcomes.len(), 2, "must not run gates after a failure");
         assert!(!outcomes[1].passed);
@@ -238,10 +243,17 @@ mod tests {
     #[test]
     fn detect_gates_includes_typecheck_for_ts_project() {
         let dir = temp_dir("detect");
-        std::fs::write(dir.join("package.json"), r#"{"scripts":{"build":"vite build","test":"vitest run"}}"#).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"vite build","test":"vitest run"}}"#,
+        )
+        .unwrap();
         std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
         let gates = detect_gates(&dir);
-        assert!(gates.iter().any(|g| g.contains("tsc --noEmit")), "typecheck gate missing: {gates:?}");
+        assert!(
+            gates.iter().any(|g| g.contains("tsc --noEmit")),
+            "typecheck gate missing: {gates:?}"
+        );
         assert!(gates.iter().any(|g| g.contains("npm run build")));
         assert!(gates.iter().any(|g| g.contains("npm test")));
         let _ = std::fs::remove_dir_all(&dir);
@@ -253,7 +265,10 @@ mod tests {
         std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
         let explicit = vec!["make verify".to_string()];
         assert_eq!(resolve_gates(&dir, &explicit, GateScope::Leaf), explicit);
-        assert_eq!(resolve_gates(&dir, &explicit, GateScope::Integration), explicit);
+        assert_eq!(
+            resolve_gates(&dir, &explicit, GateScope::Integration),
+            explicit
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -263,7 +278,11 @@ mod tests {
     #[test]
     fn leaves_do_not_inherit_whole_project_gates() {
         let dir = temp_dir("leafscope");
-        std::fs::write(dir.join("package.json"), r#"{"scripts":{"build":"vite build","test":"vitest run"}}"#).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"vite build","test":"vitest run"}}"#,
+        )
+        .unwrap();
         std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
 
         assert!(
@@ -279,7 +298,11 @@ mod tests {
 
     #[test]
     fn format_failures_is_none_when_all_pass() {
-        let outcomes = vec![GateOutcome { command: "true".into(), passed: true, output: String::new() }];
+        let outcomes = vec![GateOutcome {
+            command: "true".into(),
+            passed: true,
+            output: String::new(),
+        }];
         assert!(format_failures(&outcomes).is_none());
     }
 
