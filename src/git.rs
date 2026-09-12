@@ -383,8 +383,14 @@ pub fn worktree_change_summary(root: &Path, max_bytes: usize) -> String {
     let untracked = git(root, LS_OTHERS_EXCLUDING_HARNESS).unwrap_or_default();
     for file in untracked.lines().filter(|l| !l.is_empty()) {
         let content = std::fs::read_to_string(root.join(file)).unwrap_or_default();
-        let preview: String = content.chars().take(2000).collect();
-        out.push_str(&format!("\n--- new file: {file} ---\n{preview}\n"));
+        // Preview the whole file. A silent per-file cut made a complete file
+        // look like an incomplete deliverable to a strict critic, which then
+        // failed it on every retry (H2). The overall `max_bytes` cap below is
+        // the only budget, and it now carries an explicit marker.
+        let total = content.chars().count();
+        out.push_str(&format!(
+            "\n--- new file: {file} ({total} chars) ---\n{content}\n"
+        ));
     }
 
     if out.len() <= max_bytes {
@@ -394,10 +400,14 @@ pub fn worktree_change_summary(root: &Path, max_bytes: usize) -> String {
     while cut > 0 && !out.is_char_boundary(cut) {
         cut -= 1;
     }
+    let total = out.len();
+    // Say plainly that the harness cut the evidence so a critic does not read a
+    // capped preview as the node shipping a truncated deliverable.
     format!(
-        "{}\n... [diff truncated, {} bytes total]",
+        "{}\n... [evidence truncated by the harness: showing {cut} of {total} bytes. \
+         The remainder was omitted for length, NOT by the node; judge the evidence \
+         present and do not FAIL a deliverable merely because this preview ended.]",
         &out[..cut],
-        out.len()
     )
 }
 
@@ -617,6 +627,61 @@ mod tests {
             "evidence must name the new file: {summary}"
         );
         assert!(summary.contains("fn main()"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2 regression: a new file longer than the old 2,000-char preview cap must
+    /// be shown whole when it fits the overall budget. The trial-3 critic saw the
+    /// first 2,000 chars of a complete 3,333-char README with no marker and
+    /// failed it as truncated.
+    #[test]
+    fn new_file_longer_than_2000_chars_is_shown_whole() {
+        let dir = temp_repo("longfile");
+        ensure_repo(&dir).unwrap();
+        let body = "x".repeat(3333);
+        let content = format!("{body}\nEND-OF-FILE-MARKER");
+        std::fs::write(dir.join("README.md"), &content).unwrap();
+
+        let summary = worktree_change_summary(&dir, 12_000);
+        assert!(
+            summary.contains("README.md"),
+            "the new file must be named: {summary}"
+        );
+        assert!(
+            summary.contains("END-OF-FILE-MARKER"),
+            "the end of a >2000-char file must be visible, not silently cut: {} chars shown",
+            summary.len()
+        );
+        assert!(
+            !summary.contains("truncated"),
+            "a file that fits the budget must carry no truncation marker"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2: when the overall budget is genuinely exceeded, the cut is explicit and
+    /// blames the harness, not the node, so a critic cannot read it as an
+    /// incomplete deliverable.
+    #[test]
+    fn oversized_evidence_is_explicitly_marked_as_harness_truncation() {
+        let dir = temp_repo("overcap");
+        ensure_repo(&dir).unwrap();
+        std::fs::write(dir.join("big.txt"), "y".repeat(5000)).unwrap();
+
+        let summary = worktree_change_summary(&dir, 500);
+        assert!(
+            summary.len() <= 500 + 400,
+            "the cap must bound the summary: {} bytes",
+            summary.len()
+        );
+        assert!(
+            summary.contains("evidence truncated by the harness"),
+            "the cut must be explicit: {summary}"
+        );
+        assert!(
+            summary.contains("NOT by the node"),
+            "the marker must not accuse the node of truncating its deliverable: {summary}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

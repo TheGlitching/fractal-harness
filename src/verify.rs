@@ -101,6 +101,20 @@ pub fn detect_gates(root: &Path) -> Vec<String> {
         if scripts.contains("\"test\"") && binary_on_path("npm") {
             gates.push("npm test --silent".to_string());
         }
+        // A TUI or dev server only proves itself by starting. `npm run dev` and
+        // friends are launch commands (see `is_launch_command`), so an
+        // integrating node gets a smoke-launch gate: a crash fails fast instead
+        // of letting the project pass every check without ever running (trial 3's
+        // React 19 / ink 4 TUI crashed and no gate started it). Ordered last so
+        // build/test failures surface first.
+        if binary_on_path("npm") {
+            if let Some(script) = ["start", "dev", "serve", "preview"]
+                .into_iter()
+                .find(|s| scripts.contains(&format!("\"{s}\"")))
+            {
+                gates.push(format!("npm run {script}"));
+            }
+        }
     }
 
     if root.join("Cargo.toml").exists() && binary_on_path("cargo") {
@@ -617,6 +631,27 @@ mod tests {
         );
         assert!(gates.iter().any(|g| g.contains("npm run build")));
         assert!(gates.iter().any(|g| g.contains("npm test")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A TUI/server deliverable must be smoke-launched, not judged only on
+    /// build/test that never start it. Trial 3's React 19 / ink 4 TUI crashed on
+    /// `npm run dev` and no gate ever ran it.
+    #[test]
+    fn detect_gates_smoke_launches_a_dev_server() {
+        let dir = temp_dir("detectlaunch");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"vite build","test":"vitest run","dev":"tsx src/index.tsx"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
+        let gates = detect_gates(&dir);
+        let launch = gates
+            .iter()
+            .find(|g| is_launch_command(g))
+            .unwrap_or_else(|| panic!("no launch gate emitted: {gates:?}"));
+        assert_eq!(launch, "npm run dev");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

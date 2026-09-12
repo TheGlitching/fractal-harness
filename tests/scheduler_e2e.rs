@@ -965,6 +965,20 @@ fn critic_contested_work_survives_as_a_checkpoint() {
         log.contains("unverified checkpoint"),
         "no checkpoint commit was recorded:\n{log}"
     );
+    // The rejection must be diagnosable from the run's own artifacts: verdict +
+    // per-criterion reasons in the node's decisions and event log.
+    let decisions = fs::read_to_string(p.dir.join("tree/root/children/root-01/decisions.md"))
+        .expect("the failed node must keep a decisions.md");
+    assert!(
+        decisions.contains("critic rejected"),
+        "the critic's rejection reason was not persisted to decisions.md:\n{decisions}"
+    );
+    let events = fs::read_to_string(p.dir.join("tree/root/children/root-01/log/events.jsonl"))
+        .expect("the failed node must keep an event log");
+    assert!(
+        events.contains("critic_rejected") && events.contains("fake rejection"),
+        "the critic's per-criterion rejection was not persisted to events.jsonl:\n{events}"
+    );
 }
 
 /// D5: dependency trees and app runtime state an agent's gate produced must
