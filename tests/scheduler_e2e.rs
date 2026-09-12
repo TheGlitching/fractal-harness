@@ -6,12 +6,9 @@
 //! test exercises the scheduler, verification, git attribution and terminal
 //! states for real.
 //!
-//! The non-ignored test asserts only behaviour that is currently true, so CI
-//! stays green. The `#[ignore]`d tests record the terminal states the follow-up
-//! reliability task must restore (upward escalation, deterministic termination
-//! after failure, and fail-closed no-decision handling). They are expected to
-//! hang or fail until that task lands, which is the point; run them with
-//! `cargo test -- --ignored` once it does.
+//! The fake writes a real file whenever it "completes", because completion is
+//! now justified by the actual diff: a node that only describes its work and
+//! changes nothing on disk fails verification by design.
 
 #![cfg(unix)]
 
@@ -27,12 +24,6 @@ const FAKE_OMP: &str = r#"#!/usr/bin/env bash
 MODE="${FAKE_OMP_MODE:-happy}"
 NODE="${FRACTAL_NODE_ID:-}"
 
-# Critic invocations carry no FRACTAL_NODE_ID, so always pass.
-if [ -z "$NODE" ]; then
-  echo '{"verdict":"PASS","reason":"fake critic always passes","criteria":[]}'
-  exit 0
-fi
-
 ROOT=""
 prev=""
 for a in "$@"; do
@@ -40,29 +31,76 @@ for a in "$@"; do
   prev="$a"
 done
 
+complete() {
+  mkdir -p "$ROOT/src"
+  echo "delivered by ${NODE:-critic}" > "$ROOT/src/${NODE:-out}.txt"
+  echo "{\"verb\":\"complete\",\"deliverable\":\"done\",\"summary\":\"did the task\"}"
+}
+
+# Critic invocations carry no FRACTAL_NODE_ID, so always pass with a real
+# per-criterion result (a bare PASS with no criteria is now a FAIL).
+if [ -z "$NODE" ]; then
+  echo '{"verdict":"PASS","reason":"fake critic passes","criteria":[{"name":"the task is done","pass":true,"reason":"fake"}]}'
+  exit 0
+fi
+
 case "$MODE" in
   happy)
     if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
       echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["the task is done"]}]}'
     else
-      echo '{"verb":"complete","deliverable":"done","summary":"did the only task"}'
+      complete
     fi
     ;;
   silent)
     echo "working..."
     ;;
   escalate)
-    if [ "$NODE" = "root-01" ]; then
-      echo '{"verb":"escalate","assumption":"the inherited constraint is false","evidence":"observed otherwise"}'
+    ESC="$ROOT/.fractal_decision_esc"
+    RES="$ROOT/.fractal_decision_res"
+    if [ "$NODE" = "root" ]; then
+      if [ -f "$ESC" ] && [ ! -f "$RES" ]; then
+        touch "$RES"
+        echo '{"verb":"escalate_resolve","resolution":"overrule","rationale":"the constraint still holds; proceed"}'
+      elif [ -d "$ROOT/tree/root/children/root-01" ]; then
+        complete
+      else
+        echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["the task is done"]}]}'
+      fi
+    elif [ "$NODE" = "root-01" ]; then
+      if [ -f "$RES" ]; then
+        complete
+      else
+        touch "$ESC"
+        echo '{"verb":"escalate","assumption":"the inherited constraint is false","evidence":"observed otherwise"}'
+      fi
     else
-      echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["done"]}]}'
+      complete
     fi
     ;;
   fail)
     echo '{"verb":"not_a_real_verb"}'
     ;;
+  resolve_unprompted)
+    echo '{"verb":"escalate_resolve","resolution":"amend","amended_constraint":"x"}'
+    ;;
+  empty_diff)
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["the task is done"]}]}'
+    else
+      # Claims completion while changing nothing on disk.
+      echo '{"verb":"complete","deliverable":"done","summary":"trust me"}'
+    fi
+    ;;
+  gate_fail)
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["the task is done"],"verification":["false"]}]}'
+    else
+      complete
+    fi
+    ;;
   *)
-    echo '{"verb":"complete","deliverable":"done","summary":"unknown fake mode"}'
+    complete
     ;;
 esac
 "#;
@@ -173,32 +211,79 @@ fn happy_path_reaches_terminal_success() {
     );
 }
 
-/// Desired: an escalated node must not be wedged `running`. The owner is
-/// reopened and the node ends resolved or terminal, and the run terminates.
-///
-/// Ignored until the follow-up reliability task restores the escalation
-/// lifecycle (audit F1). Today the escalated child stays `running` and a headless
-/// run never terminates.
+/// An escalated node must not be wedged `running`. The owner is reopened, the
+/// node resumes under the owner's ruling, and the run terminates successfully.
 #[test]
-#[ignore = "follow-up reliability task: restore upward escalation (audit F1)"]
 fn escalation_reaches_a_terminal_state() {
     let p = Project::new("escalate", "escalate");
     let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(30));
     assert!(code.is_some(), "run did not terminate; stderr:\n{err}");
+    assert_eq!(
+        code,
+        Some(0),
+        "a settled escalation should let the tree complete; stderr:\n{err}"
+    );
     let status = p.status();
     assert!(
         !status.contains("[running]"),
         "escalated node left running:\n{status}"
     );
+    assert!(
+        !status.contains("[failed]"),
+        "escalation failed instead of resolving:\n{status}"
+    );
+    assert!(
+        status.contains("[complete]"),
+        "tree did not reach completion after escalation:\n{status}"
+    );
+
+    // The challenged assumption must not have been written into the child's
+    // contract as an accepted constraint before the owner ruled on it.
+    let contract_path = p.dir.join("tree/root/children/root-01/contract.md");
+    let contract = fs::read_to_string(&contract_path).unwrap_or_default();
+    assert!(
+        !contract.contains("the inherited constraint is false"),
+        "a challenged assumption was injected as a constraint before the owner ruled:\n{contract}"
+    );
 }
 
-/// Desired: a failed node ends the run deterministically instead of spinning
-/// forever waiting for a keystroke that cannot come in CI.
-///
-/// Ignored until the follow-up reliability task makes headless runs terminate
-/// (audit F3).
+/// A leaf that claims completion while changing nothing on disk fails
+/// verification: completion must be justified by a real diff, not prose.
 #[test]
-#[ignore = "follow-up reliability task: deterministic termination (audit F3)"]
+fn empty_diff_leaf_does_not_complete() {
+    let p = Project::new("emptydiff", "empty_diff");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(30));
+    assert!(code.is_some(), "run did not terminate; stderr:\n{err}");
+    assert_ne!(code, Some(0), "an empty-diff leaf must not yield success");
+    let status = p.status();
+    assert!(
+        !status.contains("[complete]"),
+        "a leaf that changed nothing was marked complete:\n{status}"
+    );
+    assert!(
+        status.contains("[failed]"),
+        "empty-diff completion should fail the node:\n{status}"
+    );
+}
+
+/// A leaf runs the executable gates its contract declares, and a failing gate
+/// blocks completion.
+#[test]
+fn declared_leaf_gate_is_enforced() {
+    let p = Project::new("gatefail", "gate_fail");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(30));
+    assert!(code.is_some(), "run did not terminate; stderr:\n{err}");
+    assert_ne!(code, Some(0), "a failing leaf gate must not yield success");
+    let status = p.status();
+    assert!(
+        !status.contains("[complete]"),
+        "a node whose declared gate failed was marked complete:\n{status}"
+    );
+}
+
+/// A failed node ends the run deterministically instead of spinning forever
+/// waiting for a keystroke that cannot come in CI.
+#[test]
 fn failure_reaches_a_terminal_state() {
     let p = Project::new("fail", "fail");
     let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(30));
@@ -211,13 +296,9 @@ fn failure_reaches_a_terminal_state() {
     );
 }
 
-/// Desired: an executor that produces no parseable decision is an error that is
-/// retried, then fails the node. It must never be silently accepted as complete.
-///
-/// Ignored until the follow-up reliability task makes "no decision" fail closed
-/// (audit F2).
+/// An executor that produces no parseable decision is an error that is retried,
+/// then fails the node. It must never be silently accepted as complete.
 #[test]
-#[ignore = "follow-up reliability task: fail-closed no-decision handling (audit F2)"]
 fn no_decision_is_not_a_fabricated_success() {
     let p = Project::new("silent", "silent");
     let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(30));
@@ -228,4 +309,34 @@ fn no_decision_is_not_a_fabricated_success() {
         !status.contains("[complete]"),
         "a no-decision node was marked complete:\n{status}"
     );
+}
+
+/// A node that returns `escalate_resolve` without any escalation to settle is
+/// failing closed: the run terminates with a failed node instead of hanging.
+#[test]
+fn unprompted_escalate_resolve_fails_closed() {
+    let p = Project::new("unprompted", "resolve_unprompted");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(30));
+    assert!(code.is_some(), "run did not terminate; stderr:\n{err}");
+    assert_ne!(code, Some(0));
+    let status = p.status();
+    assert!(
+        !status.contains("[running]"),
+        "node left running:\n{status}"
+    );
+    assert!(
+        status.contains("[failed]"),
+        "unprompted escalate_resolve should fail the node:\n{status}"
+    );
+}
+
+/// A headless run accepts an explicit model without ever opening the picker.
+#[test]
+fn explicit_model_flag_runs_headless() {
+    let p = Project::new("model", "happy");
+    let (code, _out, err) = p.run(
+        &["--model", "explicit-test-model", "init", "build a toy"],
+        Duration::from_secs(60),
+    );
+    assert_eq!(code, Some(0), "explicit model run failed; stderr:\n{err}");
 }

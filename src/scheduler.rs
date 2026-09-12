@@ -1,8 +1,9 @@
 use crate::runner::{
-    run_node, verify_node, RunnerError, COMPLETE_VERB, ESCALATE, NOTE_GLOBAL, REOPEN, SPLIT,
+    run_node, verify_node, RunnerError, COMPLETE_VERB, ESCALATE, ESCALATE_RESOLVE, NOTE_GLOBAL,
+    REOPEN, SPLIT,
 };
 use crate::store::{
-    Node, Store, StoreError, COMPLETE, FAILED, PENDING, RUNNING, SPLIT as SPLIT_STATUS,
+    Node, Store, StoreError, COMPLETE, FAILED, PENDING, RUNNING, SPLIT as SPLIT_STATUS, SUSPENDED,
 };
 use crate::tui::{StatsSnapshot, TuiState};
 use crate::verify::GateScope;
@@ -95,6 +96,7 @@ pub fn run(
     store: &Store,
     state: &Arc<Mutex<TuiState>>,
     model: &str,
+    interactive: bool,
 ) -> std::result::Result<RunReport, StoreError> {
     store.reconcile()?;
     let nodes = store.walk()?;
@@ -163,9 +165,16 @@ pub fn run(
             }
 
             if has_failed {
-                // Wait briefly for user steering / retry keystroke without killing the scheduler thread
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                continue;
+                if interactive {
+                    // A real TTY can still deliver a retry keystroke, so wait
+                    // briefly for user steering without killing the thread.
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
+                // No TTY means no keystroke can ever arrive: terminate
+                // deterministically with the failure recorded and a non-zero
+                // status, instead of spinning forever.
+                break;
             } else {
                 break;
             }
@@ -415,23 +424,6 @@ fn run_one_node(
                         }),
                     )
                     .ok();
-
-                if let Some(ref pid) = node.parent {
-                    let nodes = store.walk().unwrap_or_default();
-                    if let Some(parent) = nodes.iter().find(|n| n.id == *pid) {
-                        let escalation_msg = format!(
-                            "Child {} escalated assumption: '{}' with evidence: '{}'",
-                            node.id, result.assumption, result.evidence
-                        );
-                        let _ = store.append_decision(parent, &escalation_msg);
-                        let constraint = format!(
-                            "Assumption invalid (from {}): {}",
-                            node.id, result.assumption
-                        );
-                        let _ = store.add_constraint_and_propagate(&parent.id, &constraint);
-                    }
-                }
-
                 store
                     .append_decision(
                         node,
@@ -442,6 +434,188 @@ fn run_one_node(
                     )
                     .ok();
 
+                // The challenged assumption is deliberately NOT injected as an
+                // accepted constraint here. It is only settled once the owner
+                // rules; treating it as law before then builds the whole subtree
+                // on the very claim under dispute.
+                let owner = match find_escalation_point(store, node, &result.assumption) {
+                    Some(o) => o,
+                    None => {
+                        store
+                            .append_decision(node, "failed: escalated with no owning ancestor")
+                            .ok();
+                        store.set_status(node, FAILED).ok();
+                        report.failed += 1;
+                        return Ok(report);
+                    }
+                };
+
+                if let Err(e) = suspend_branch(store, node, &owner) {
+                    store
+                        .append_decision(node, &format!("failed: could not suspend branch: {e}"))
+                        .ok();
+                    store.set_status(node, FAILED).ok();
+                    report.failed += 1;
+                    return Ok(report);
+                }
+
+                store.set_status(&owner, RUNNING).ok();
+                let escalation_feedback = format!(
+                    "A descendant node `{child}` escalated a challenged assumption. You own it \
+                     and must settle it before the branch can continue.\n\n\
+                     Assumption: {assumption}\nEvidence: {evidence}\n\n\
+                     Answer with EXACTLY one JSON decision as your very last line:\n\
+                     {{\"verb\":\"escalate_resolve\",\"resolution\":\"amend\"|\"overrule\"|\"replan\"|\"depends_on\",\"amended_constraint\":\"...\",\"amended_interface\":\"...\",\"rationale\":\"...\",\"target\":\"...\",\"dependency\":\"...\"}}\n\
+                     - amend: replace the false constraint (amended_constraint), optionally naming a sibling (target) whose interface (amended_interface) must be exposed\n\
+                     - overrule: give a rationale (rationale) the child must address, then it continues\n\
+                     - depends_on: require that a sibling (dependency) is completed first\n\
+                     - replan: discard this branch's children and re-plan it",
+                    child = node.id,
+                    assumption = result.assumption,
+                    evidence = result.evidence
+                );
+                let resolve = run_node(
+                    store,
+                    &owner,
+                    model,
+                    on_output.clone(),
+                    Some(&escalation_feedback),
+                );
+                store.set_status(&owner, SPLIT_STATUS).ok();
+                let resolve = match resolve {
+                    Ok(r) => r,
+                    Err(e) => {
+                        store
+                            .append_decision(
+                                node,
+                                &format!("failed: escalation resolution unusable: {e}"),
+                            )
+                            .ok();
+                        store.set_status(node, FAILED).ok();
+                        report.failed += 1;
+                        return Ok(report);
+                    }
+                };
+
+                if resolve.verb.as_str() != ESCALATE_RESOLVE {
+                    store
+                        .append_decision(
+                            node,
+                            &format!(
+                                "failed: owner returned '{}' instead of an escalate_resolve",
+                                resolve.verb
+                            ),
+                        )
+                        .ok();
+                    store.set_status(node, FAILED).ok();
+                    report.failed += 1;
+                    return Ok(report);
+                }
+
+                match resolve.resolution.trim() {
+                    "amend" => {
+                        if !resolve.amended_constraint.trim().is_empty() {
+                            let _ = store.amend_inherited_constraint(
+                                &owner,
+                                &result.assumption,
+                                resolve.amended_constraint.trim(),
+                            );
+                        }
+                        if !resolve.amended_interface.trim().is_empty()
+                            && !resolve.target.trim().is_empty()
+                        {
+                            if let Some(target) =
+                                resolve_sibling(store, &owner, resolve.target.trim())
+                            {
+                                let _ =
+                                    store.add_interface(&target, resolve.amended_interface.trim());
+                            }
+                        }
+                        let _ = resume_ancestors(store, node, &owner);
+                        store.set_status(node, RUNNING).ok();
+                        feedback = Some(
+                            "The owning ancestor amended the challenged constraint. Proceed \
+                             under the amended terms and deliver your contract."
+                                .into(),
+                        );
+                        continue;
+                    }
+                    "overrule" => {
+                        let _ = resume_ancestors(store, node, &owner);
+                        store.set_status(node, RUNNING).ok();
+                        feedback = Some(format!(
+                            "The owning ancestor overruled your escalation. Rationale: {}",
+                            resolve.rationale.trim()
+                        ));
+                        continue;
+                    }
+                    "depends_on" => {
+                        if let Some(dep) = resolve_sibling(store, &owner, resolve.dependency.trim())
+                        {
+                            let _ = store.add_depends_on(node, &dep.id);
+                        }
+                        let _ = resume_ancestors(store, node, &owner);
+                        store.set_status(node, PENDING).ok();
+                        return Ok(report);
+                    }
+                    "replan" => {
+                        let parent = node
+                            .parent
+                            .as_ref()
+                            .and_then(|pid| store.get(pid).ok())
+                            .unwrap_or_else(|| owner.clone());
+                        let parent_resolve = run_node(
+                            store,
+                            &parent,
+                            model,
+                            on_output.clone(),
+                            Some(&escalation_feedback),
+                        );
+                        if matches!(&parent_resolve, Ok(pr)
+                            if pr.verb == ESCALATE_RESOLVE
+                                && pr.resolution.trim() == "replan")
+                        {
+                            let _ = replan_branch(store, &parent);
+                            return Ok(report);
+                        }
+                        let _ = resume_ancestors(store, node, &owner);
+                        store.set_status(node, RUNNING).ok();
+                        feedback = None;
+                        continue;
+                    }
+                    other => {
+                        store
+                            .append_decision(
+                                node,
+                                &format!(
+                                    "failed: escalation resolved with unknown resolution '{other}'"
+                                ),
+                            )
+                            .ok();
+                        store.set_status(node, FAILED).ok();
+                        report.failed += 1;
+                        return Ok(report);
+                    }
+                }
+            }
+            ESCALATE_RESOLVE => {
+                // Only an owner reopened to settle an escalation may return
+                // this; a node that does so unprompted is failing closed rather
+                // than being silently ignored.
+                store
+                    .append_log(
+                        node,
+                        &serde_json::json!({"event":"error","error":"escalate_resolve without an escalation"}),
+                    )
+                    .ok();
+                store
+                    .append_decision(
+                        node,
+                        "failed: returned escalate_resolve without an escalation",
+                    )
+                    .ok();
+                store.set_status(node, FAILED).ok();
+                report.failed += 1;
                 return Ok(report);
             }
             SPLIT => {
@@ -489,6 +663,30 @@ fn run_one_node(
                 {
                     report.refused += 1;
                     feedback = Some("COMPLETE refused: no summary, deliverable, or code modifications were provided.".into());
+                    continue;
+                }
+
+                // Fail closed on an empty diff. A leaf is where work lands, so
+                // a leaf that describes its work but changed nothing on disk has
+                // not delivered its contract - however plausible its prose.
+                if children.is_empty() && !crate::git::has_uncommitted_changes(&store.root) {
+                    report.verify_failures += 1;
+                    report.refused += 1;
+                    store
+                        .append_log(
+                            node,
+                            &serde_json::json!({
+                                "event": "verify_failed",
+                                "reason": "no file changed on disk"
+                            }),
+                        )
+                        .ok();
+                    feedback = Some(
+                        "Verification FAILED: this node changed no file on disk. A leaf must \
+                         leave a real change behind - implement the contract in the project, \
+                         not just describe it."
+                            .into(),
+                    );
                     continue;
                 }
 
@@ -702,4 +900,92 @@ fn run_one_node(
     store.set_status(node, FAILED).ok();
     report.failed += 1;
     Ok(report)
+}
+
+// ---------------------------------------------------------------------------
+// Upward escalation (SPEC 4.3 / Phase 3)
+// ---------------------------------------------------------------------------
+
+/// The nearest ancestor that owns the challenged assumption: the first ancestor
+/// (nearest first) whose contract lists it as an inherited constraint. When no
+/// ancestor names it - a discovered dependency rather than a falsified law - the
+/// escalation goes to the direct parent, which owns the sibling topology.
+fn find_escalation_point(store: &Store, node: &Node, assumption: &str) -> Option<Node> {
+    let nodes = store.walk().ok()?;
+    let by_id: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let mut chain: Vec<Node> = Vec::new();
+    let mut cursor = node.parent.as_deref();
+    while let Some(pid) = cursor {
+        match by_id.get(pid) {
+            Some(parent) => {
+                chain.push((*parent).clone());
+                cursor = parent.parent.as_deref();
+            }
+            None => break,
+        }
+    }
+    if let Some(owner) = chain.iter().find(|anc| {
+        anc.contract()
+            .constraints
+            .iter()
+            .any(|c| c.trim() == assumption.trim())
+    }) {
+        return Some(owner.clone());
+    }
+    chain.first().cloned()
+}
+
+/// Mark `node` and its ancestors down to (but not including) `owner` suspended,
+/// so nothing in the challenged branch runs while the escalation is settled.
+fn suspend_branch(store: &Store, node: &Node, owner: &Node) -> Result<(), String> {
+    let mut current = Some(node.clone());
+    while let Some(n) = current {
+        if n.id == owner.id {
+            break;
+        }
+        store.set_status(&n, SUSPENDED).map_err(|e| e.to_string())?;
+        current = n.parent.as_deref().and_then(|pid| store.get(pid).ok());
+    }
+    Ok(())
+}
+
+/// Return the suspended intermediate ancestors to SPLIT so they can aggregate
+/// once the escalated leaf has resumed.
+fn resume_ancestors(store: &Store, node: &Node, owner: &Node) -> Result<(), String> {
+    let mut current = node.parent.as_deref().and_then(|pid| store.get(pid).ok());
+    while let Some(n) = current {
+        if n.id == owner.id {
+            break;
+        }
+        store
+            .set_status(&n, SPLIT_STATUS)
+            .map_err(|e| e.to_string())?;
+        current = n.parent.as_deref().and_then(|pid| store.get(pid).ok());
+    }
+    Ok(())
+}
+
+/// Find a sibling of `owner` named by an escalation resolution. Resolutions
+/// name a sibling by its node id, its trailing id segment, or its goal text.
+fn resolve_sibling(store: &Store, owner: &Node, tag: &str) -> Option<Node> {
+    if tag.is_empty() {
+        return None;
+    }
+    store
+        .children_of(owner)
+        .ok()?
+        .into_iter()
+        .find(|c| c.id == tag || c.id.ends_with(tag) || c.goal.contains(tag))
+}
+
+/// Prune a branch's children for `replan`, compacting each child's trace into
+/// the parent's log before deleting it, then return the parent to PENDING.
+fn replan_branch(store: &Store, parent: &Node) -> Result<(), String> {
+    for child in store.children_of(parent).map_err(|e| e.to_string())? {
+        store
+            .compact_child_trace(parent, &child)
+            .map_err(|e| e.to_string())?;
+        store.delete_node(&child).map_err(|e| e.to_string())?;
+    }
+    store.set_status(parent, PENDING).map_err(|e| e.to_string())
 }

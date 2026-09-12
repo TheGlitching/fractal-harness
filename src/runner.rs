@@ -20,10 +20,8 @@ pub enum RunnerError {
     Timeout,
     NotFound(String),
     /// Returned when an executor produces no parseable decision. The scheduler
-    /// already retries on this variant; it becomes reachable when the
-    /// fail-closed completion work lands (follow-up reliability task: "no
-    /// decision is an error+retry, not an implicit complete").
-    #[allow(dead_code)]
+    /// retries on this variant and, after the retry budget, fails the node. It
+    /// is never converted into a fabricated `complete`.
     NoDecision(String),
     Other(String),
 }
@@ -273,13 +271,20 @@ from the child that owns it.
     Ok(parts.join("\n"))
 }
 
-pub fn extract_decision(text: &str) -> Option<Value> {
+/// Scan `text` for the first balanced JSON object carrying one of `keys`.
+///
+/// Node decisions are keyed on `verb`; critic verdicts are keyed on `verdict`.
+/// Keeping them separate is load-bearing: a critic that answers with a
+/// node-style `{"verb":...}` must never be mistaken for a verdict, and a node
+/// that answers only with a verdict must be treated as having said nothing.
+fn extract_object_with_keys(text: &str, keys: &[&str]) -> Option<Value> {
+    let matches_keys = |v: &Value| keys.iter().any(|k| v.get(*k).is_some());
     let trimmed = text.trim();
 
     // 1. Direct JSON parse if the whole text or trimmed text is already a JSON object
     if trimmed.starts_with('{') && trimmed.ends_with('}') {
         if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-            if v.get("verb").is_some() || v.get("verdict").is_some() {
+            if matches_keys(&v) {
                 return Some(v);
             }
         }
@@ -291,7 +296,7 @@ pub fn extract_decision(text: &str) -> Option<Value> {
         for cap in re.captures_iter(text) {
             if let Some(m) = cap.get(1) {
                 if let Ok(v) = serde_json::from_str::<Value>(m.as_str()) {
-                    if v.get("verb").is_some() || v.get("verdict").is_some() {
+                    if matches_keys(&v) {
                         return Some(v);
                     }
                 }
@@ -299,8 +304,9 @@ pub fn extract_decision(text: &str) -> Option<Value> {
         }
     }
 
-    // 3. Scan for JSON blocks starting with {"verb" or {"verdict"
-    let re_start = Regex::new(r#"\{[\s\n]*"(?:verb|verdict)"[\s\S]*"#).ok();
+    // 3. Scan for JSON blocks starting with one of the keys
+    let alternation = keys.join("|");
+    let re_start = Regex::new(&format!(r#"\{{\s*[\n\s]*"(?:{alternation})""#)).ok();
     if let Some(re) = re_start {
         for mat in re.find_iter(text) {
             let sub = mat.as_str();
@@ -338,7 +344,7 @@ pub fn extract_decision(text: &str) -> Option<Value> {
             if let Some(end) = end_idx {
                 let candidate = &sub[..end];
                 if let Ok(v) = serde_json::from_str::<Value>(candidate) {
-                    if v.get("verb").is_some() || v.get("verdict").is_some() {
+                    if matches_keys(&v) {
                         return Some(v);
                     }
                 }
@@ -381,7 +387,7 @@ pub fn extract_decision(text: &str) -> Option<Value> {
 
         if let Some(end) = end_idx {
             if let Ok(v) = serde_json::from_str::<Value>(&text[start..end]) {
-                if v.get("verb").is_some() || v.get("verdict").is_some() {
+                if matches_keys(&v) {
                     return Some(v);
                 }
             }
@@ -389,6 +395,17 @@ pub fn extract_decision(text: &str) -> Option<Value> {
     }
 
     None
+}
+
+/// A node's decision: must carry a `verb`.
+pub fn extract_decision(text: &str) -> Option<Value> {
+    extract_object_with_keys(text, &["verb"])
+}
+
+/// A critic's verdict: must carry a `verdict`. A `{"verb":...}` object is not a
+/// verdict, so it does not match here and cannot be scored PASS.
+pub fn extract_verdict(text: &str) -> Option<Value> {
+    extract_object_with_keys(text, &["verdict"])
 }
 
 #[derive(Default, Debug)]
@@ -404,7 +421,19 @@ pub struct VerbResult {
     /// Why they are being sent back; becomes their retry feedback.
     pub reopen_reason: String,
     pub evidence: String,
+    /// Settlement an owner returns for an escalation: `amend`, `overrule`,
+    /// `replan`, or `depends_on`.
     pub resolution: String,
+    /// `amend`: the rewritten inherited constraint.
+    pub amended_constraint: String,
+    /// `amend`: an interface to expose on a sibling.
+    pub amended_interface: String,
+    /// `overrule`: the rationale the escalating child must address.
+    pub rationale: String,
+    /// `amend`/`depends_on`: the sibling the resolution names.
+    pub target: String,
+    /// `depends_on`: the sibling the escalating node must depend on.
+    pub dependency: String,
     pub entry_type: String,
     pub entry_content: String,
     pub entry_supersedes: Option<String>,
@@ -546,19 +575,26 @@ pub fn call_via_omp(
     } else {
         None
     }
-    .or_else(|| extract_decision(&all_text))
-    .unwrap_or_else(|| {
-        serde_json::json!({
-            "verb": "complete",
-            "summary": "Completed contract directly in workspace via native tools.",
-            "deliverable": "Completed contract directly in workspace via native tools."
-        })
-    });
+    .filter(|v| v.get("verb").and_then(|v| v.as_str()).is_some())
+    .or_else(|| extract_decision(&all_text));
+
+    // Fail closed. An executor that died, rambled, or answered with something
+    // that is not a decision has not delivered anything; fabricating a
+    // `complete` here is how a silent agent was scored as success.
+    let val = val.ok_or_else(|| {
+        let tail: String = {
+            let chars: Vec<char> = all_text.chars().collect();
+            chars[chars.len().saturating_sub(600)..].iter().collect()
+        };
+        RunnerError::NoDecision(format!(
+            "executor produced no parseable decision; last output was:\n{tail}"
+        ))
+    })?;
 
     let verb = val
         .get("verb")
         .and_then(|v| v.as_str())
-        .unwrap_or(COMPLETE_VERB);
+        .ok_or_else(|| RunnerError::NoDecision("decision had no verb".into()))?;
     result_from_payload(verb, &val)
 }
 
@@ -590,10 +626,9 @@ pub fn call_critic(prompt: &str, model: &str) -> std::result::Result<Value, Runn
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let decision = extract_decision(&text).unwrap_or_else(|| {
-        // Fail closed. An unreadable verdict is not evidence of success, and
-        // defaulting to PASS here meant a critic that errored or rambled granted
-        // the node a pass for free.
+    // Fail closed, and require a real verdict. An unreadable response, a missing
+    // verdict, or a node-shaped `{"verb":...}` object is not evidence of success.
+    let decision = extract_verdict(&text).unwrap_or_else(|| {
         serde_json::json!({
             "verdict": "FAIL",
             "reason": "Critic produced no readable verdict; treating as not verified",
@@ -666,11 +701,12 @@ pub fn verify_node(
     }
 
     // The strongest available evidence is what changed on disk. At verification
-    // time the node's work is still uncommitted, so `git diff HEAD` is precisely
-    // this node's contribution - not its description of itself. Judging prose
-    // alone is how a node that never created a file was passed as complete.
-    let changed = crate::git::diff_stat_since(&store.root, "HEAD");
-    let code_evidence = if changed.trim().is_empty() {
+    // time the node's work is still uncommitted, so the working tree - including
+    // brand-new untracked files - is precisely this node's contribution, not its
+    // description of itself. Judging prose alone is how a node that never
+    // created a file was passed as complete.
+    let changed_on_disk = crate::git::has_uncommitted_changes(&store.root);
+    let code_evidence = if !changed_on_disk {
         if !children.is_empty() {
             "(no direct change; this node aggregates the verified children above)".to_string()
         } else {
@@ -678,8 +714,8 @@ pub fn verify_node(
         }
     } else {
         format!(
-            "Files changed (git):\n{changed}\n\nPatch:\n{}",
-            crate::git::diff_since(&store.root, "HEAD", 12000)
+            "Working-tree change (git):\n{}",
+            crate::git::worktree_change_summary(&store.root, 12000)
         )
     };
 
@@ -758,10 +794,23 @@ fn result_from_payload(
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let strings = |key: &str| -> Vec<String> {
+                        item.get(key)
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                                    .filter(|s| !s.is_empty())
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
                     r.subtasks.push(Contract {
                         goal,
                         acceptance_criteria: crit,
                         id,
+                        interfaces: strings("interfaces"),
+                        constraints: strings("constraints"),
                         depends_on: deps,
                         verification,
                         ..Default::default()
@@ -819,6 +868,31 @@ fn result_from_payload(
                 .and_then(|res| res.as_str())
                 .unwrap_or("")
                 .to_string();
+            r.amended_constraint = payload
+                .get("amended_constraint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            r.amended_interface = payload
+                .get("amended_interface")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            r.rationale = payload
+                .get("rationale")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            r.target = payload
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            r.dependency = payload
+                .get("dependency")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
         }
         NOTE_GLOBAL => {
             r.entry_type = payload
@@ -867,18 +941,23 @@ fn parse_verdict(msg: &Value) -> std::result::Result<(String, Vec<Value>), Runne
         .and_then(|b| b.get("text"))
         .and_then(|t| t.as_str())
         .unwrap_or("");
-    let d = extract_decision(content)
-        .ok_or_else(|| RunnerError::Other(format!("unparseable critic response: {content}")))?;
+    let d = extract_verdict(content)
+        .ok_or_else(|| RunnerError::Other(format!("critic returned no verdict: {content}")))?;
     let verdict = d
         .get("verdict")
         .and_then(|v| v.as_str())
-        .unwrap_or("PASS")
-        .to_string();
+        .map(|v| v.trim().to_ascii_uppercase())
+        .unwrap_or_else(|| "FAIL".to_string());
     let details: Vec<Value> = d
         .get("criteria")
         .and_then(|c| c.as_array())
         .cloned()
         .unwrap_or_default();
+    // An explicit PASS must carry per-criterion results. A bare PASS with
+    // nothing checked is not evidence that anything was verified.
+    if verdict == "PASS" && details.is_empty() {
+        return Ok(("FAIL".to_string(), details));
+    }
     Ok((verdict, details))
 }
 
@@ -924,5 +1003,55 @@ Working..."#;
         assert!(d.is_some());
         let val = d.unwrap();
         assert_eq!(val.get("verb").unwrap(), "complete");
+    }
+
+    /// A node decision is not a verdict. A critic answering with `{"verb":...}`
+    /// must not be scored PASS.
+    #[test]
+    fn verdict_extraction_rejects_node_decisions() {
+        assert!(extract_verdict(r#"{"verb":"complete","summary":"done"}"#).is_none());
+        assert!(extract_verdict("no json here at all").is_none());
+        assert!(extract_verdict(r#"{"verdict":"PASS","criteria":[]}"#).is_some());
+    }
+
+    fn critic_message(text: &str) -> Value {
+        serde_json::json!({
+            "content": [{ "type": "text", "text": text }]
+        })
+    }
+
+    #[test]
+    fn missing_verdict_fails_closed() {
+        let msg = critic_message("I think it is probably fine.");
+        let not_pass = parse_verdict(&msg)
+            .map(|(verdict, _)| verdict != "PASS")
+            .unwrap_or(true);
+        assert!(not_pass, "a missing verdict must not default to PASS");
+    }
+
+    #[test]
+    fn verb_shaped_critic_object_is_not_a_pass() {
+        let msg = critic_message(r#"{"verb":"complete","summary":"done"}"#);
+        let not_pass = parse_verdict(&msg)
+            .map(|(verdict, _)| verdict != "PASS")
+            .unwrap_or(true);
+        assert!(not_pass, "a node-shaped object must not be scored PASS");
+    }
+
+    #[test]
+    fn pass_requires_per_criterion_results() {
+        let bare = critic_message(r#"{"verdict":"PASS","reason":"looks good","criteria":[]}"#);
+        let (verdict, _) = parse_verdict(&bare).unwrap();
+        assert_ne!(
+            verdict, "PASS",
+            "a bare PASS with no criteria is not evidence"
+        );
+
+        let real = critic_message(
+            r#"{"verdict":"PASS","reason":"ok","criteria":[{"name":"builds","pass":true,"reason":"exit 0"}]}"#,
+        );
+        let (verdict, details) = parse_verdict(&real).unwrap();
+        assert_eq!(verdict, "PASS");
+        assert_eq!(details.len(), 1);
     }
 }

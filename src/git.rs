@@ -123,26 +123,46 @@ pub fn changed_files_since(root: &Path, base: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Compact `--stat` summary used as verification evidence: it shows the critic
-/// real, attributable change instead of the agent's own prose.
-pub fn diff_stat_since(root: &Path, base: &str) -> String {
-    git(root, &["diff", "--stat", base, "HEAD"]).unwrap_or_default()
+/// True when the working tree differs from HEAD, including files an agent has
+/// created but not yet added. At verification time a node's work is uncommitted,
+/// so this is the only honest answer to "did this node change anything".
+pub fn has_uncommitted_changes(root: &Path) -> bool {
+    git(root, &["status", "--porcelain"])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
 }
 
-/// Truncated patch for a node's own commit range.
-pub fn diff_since(root: &Path, base: &str, max_bytes: usize) -> String {
-    let full = git(root, &["diff", base, "HEAD"]).unwrap_or_default();
-    if full.len() <= max_bytes {
-        return full;
+/// Human-readable evidence of the working tree's change vs HEAD, including
+/// untracked files (new files an agent wrote are the common case for a leaf).
+/// `git diff HEAD` alone shows nothing for a brand-new file, so previews of
+/// untracked files are appended explicitly.
+pub fn worktree_change_summary(root: &Path, max_bytes: usize) -> String {
+    let mut out = String::new();
+
+    let tracked = git(root, &["diff", "HEAD"]).unwrap_or_default();
+    if !tracked.trim().is_empty() {
+        out.push_str(&tracked);
+        out.push('\n');
     }
-    let mut cut = max_bytes.min(full.len());
-    while cut > 0 && !full.is_char_boundary(cut) {
+
+    let untracked = git(root, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
+    for file in untracked.lines().filter(|l| !l.is_empty()) {
+        let content = std::fs::read_to_string(root.join(file)).unwrap_or_default();
+        let preview: String = content.chars().take(2000).collect();
+        out.push_str(&format!("\n--- new file: {file} ---\n{preview}\n"));
+    }
+
+    if out.len() <= max_bytes {
+        return out;
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !out.is_char_boundary(cut) {
         cut -= 1;
     }
     format!(
         "{}\n... [diff truncated, {} bytes total]",
-        &full[..cut],
-        full.len()
+        &out[..cut],
+        out.len()
     )
 }
 
@@ -229,6 +249,28 @@ mod tests {
         reset_uncommitted(&dir).unwrap();
         assert!(is_clean(&dir));
         assert!(!dir.join("garbage.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn untracked_file_counts_as_a_change() {
+        let dir = temp_repo("untracked");
+        ensure_repo(&dir).unwrap();
+        assert!(
+            !has_uncommitted_changes(&dir),
+            "clean tree must report none"
+        );
+        std::fs::write(dir.join("new_module.txt"), "fn main() {}").unwrap();
+        assert!(
+            has_uncommitted_changes(&dir),
+            "a brand-new file must count as a change, not be invisible to `git diff HEAD`"
+        );
+        let summary = worktree_change_summary(&dir, 4000);
+        assert!(
+            summary.contains("new_module.txt"),
+            "evidence must name the new file: {summary}"
+        );
+        assert!(summary.contains("fn main()"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

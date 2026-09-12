@@ -193,6 +193,9 @@ impl Node {
     pub fn log_path(&self) -> PathBuf {
         self.path.join(LOG_DIRNAME).join(EVENTS_FILENAME)
     }
+    pub fn log_dir(&self) -> PathBuf {
+        self.path.join(LOG_DIRNAME)
+    }
     pub fn artifacts_dir(&self) -> PathBuf {
         self.path.join(ARTIFACTS_DIRNAME)
     }
@@ -781,6 +784,140 @@ impl Store {
         Ok(affected)
     }
 
+    // -- escalation support -------------------------------------------------
+    // Ported from the Python scheduler's suspend -> reopen-owner -> resolve
+    // cycle. These are the store-side primitives the scheduler's escalation
+    // handling calls; none of them injects a challenged assumption as an
+    // accepted constraint before the owner has ruled.
+
+    /// Replace an inherited constraint `old` with `new` in `owner` and every
+    /// descendant. This is the `amend` resolution (SPEC 4.3): the branch resumes
+    /// under amended terms rather than the falsified one.
+    pub fn amend_inherited_constraint(
+        &self,
+        owner: &Node,
+        old: &str,
+        new: &str,
+    ) -> Result<usize, StoreError> {
+        if old.trim().is_empty() || new.trim().is_empty() {
+            return Ok(0);
+        }
+        let nodes = self.walk()?;
+        let prefix = format!("{}/", owner.path.to_string_lossy());
+        let mut changed = 0;
+        for n in nodes
+            .iter()
+            .filter(|n| n.id == owner.id || n.path.to_string_lossy().starts_with(&prefix))
+        {
+            let mut c = n.contract();
+            let mut modified = false;
+            for constraint in c.constraints.iter_mut() {
+                if constraint.trim() == old.trim() {
+                    *constraint = new.trim().to_string();
+                    modified = true;
+                }
+            }
+            if modified {
+                fs::write(
+                    n.contract_path(),
+                    c.render(&n.id, n.depth, n.parent.as_deref()),
+                )?;
+                self.append_decision(n, &format!("amended constraint '{old}' -> '{new}'"))?;
+                changed += 1;
+            }
+        }
+        Ok(changed)
+    }
+
+    /// Expose a named interface on a node's contract. This satisfies a
+    /// discovered dependency discovered during escalation (`amend` targeting a
+    /// sibling), so the consumer can proceed against a stated interface.
+    pub fn add_interface(&self, node: &Node, interface: &str) -> Result<bool, StoreError> {
+        let iface = interface.trim();
+        if iface.is_empty() {
+            return Ok(false);
+        }
+        let mut c = node.contract();
+        if c.interfaces.iter().any(|i| i.trim() == iface) {
+            return Ok(false);
+        }
+        c.interfaces.push(iface.to_string());
+        fs::write(
+            node.contract_path(),
+            c.render(&node.id, node.depth, node.parent.as_deref()),
+        )?;
+        self.append_decision(node, &format!("added interface: {iface}"))?;
+        Ok(true)
+    }
+
+    /// Add a dependency edge `node -> dep_id`. This is the `depends_on`
+    /// resolution: the escalating node cannot proceed until the sibling it
+    /// discovered it needs has been accepted.
+    pub fn add_depends_on(&self, node: &Node, dep_id: &str) -> Result<bool, StoreError> {
+        let dep_id = dep_id.trim();
+        if dep_id.is_empty() || node.depends_on.iter().any(|d| d == dep_id) {
+            return Ok(false);
+        }
+        let mut deps = node.depends_on.clone();
+        deps.push(dep_id.to_string());
+        let encoded = serde_json::to_string(&deps)?;
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE nodes SET depends_on=?1,updated_at=?2 WHERE id=?3",
+                params![encoded, &now(), node.id],
+            )?;
+            Ok(())
+        })?;
+        self.append_decision(node, &format!("added dependency: {dep_id}"))?;
+        Ok(true)
+    }
+
+    /// Remove a node's directory and index rows. Used by `replan` pruning.
+    pub fn delete_node(&self, node: &Node) -> Result<(), StoreError> {
+        let _ = fs::remove_dir_all(&node.path);
+        self.with_conn(|conn| {
+            conn.execute("DELETE FROM nodes WHERE id=?1", params![node.id])?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Preserve a pruned child's episodic trace in the ancestor's `log/`, so
+    /// work discarded as output is not lost as information (SPEC 4.3 replan).
+    pub fn compact_child_trace(&self, parent: &Node, child: &Node) -> Result<(), StoreError> {
+        let log_dir = parent.log_dir();
+        fs::create_dir_all(&log_dir)?;
+        let mut lines = vec![
+            format!("# Compacted trace of pruned child {}", child.id),
+            format!("- goal: {}", child.goal),
+            format!(
+                "- summary: {}",
+                if child.summary.trim().is_empty() {
+                    "(none)"
+                } else {
+                    child.summary.trim()
+                }
+            ),
+        ];
+        if let Ok(decisions) = fs::read_to_string(child.decisions_path()) {
+            lines.push("- decisions:".into());
+            for line in decisions.lines() {
+                lines.push(format!("    {line}"));
+            }
+        }
+        if let Ok(events) = fs::read_to_string(child.log_path()) {
+            lines.push("- events:".into());
+            for line in events.lines() {
+                lines.push(format!("    {line}"));
+            }
+        }
+        fs::write(
+            log_dir.join(format!("compacted-{}.md", child.id)),
+            format!("{}\n", lines.join("\n")),
+        )?;
+        Ok(())
+    }
+
     pub fn enqueue_steer(&self, command: &str, payload: &str) -> Result<(), StoreError> {
         let stamp = now();
         self.with_conn(|conn| {
@@ -944,7 +1081,6 @@ impl Store {
         Ok(nodes)
     }
 
-    #[allow(dead_code)]
     pub fn get(&self, node_id: &str) -> std::result::Result<Node, StoreError> {
         self.walk()?
             .into_iter()
@@ -1319,5 +1455,112 @@ mod tests {
         };
         let parsed = Contract::parse(&contract.render("root-01", 2, Some("root")));
         assert_eq!(parsed.verification, contract.verification);
+    }
+
+    fn tree_with_child(name: &str) -> (Store, Node, Node, PathBuf) {
+        let (store, dir) = temp_store(name);
+        let root = store.init("goal").unwrap();
+        // The owner carries the constraint a descendant will later challenge.
+        store
+            .add_constraint_and_propagate(&root.id, "the wall bears the load")
+            .unwrap();
+        let child = store
+            .add_children(
+                &root,
+                &[Contract {
+                    goal: "child".into(),
+                    id: "a".into(),
+                    ..Default::default()
+                }],
+            )
+            .unwrap()
+            .remove(0);
+        (store, root, child, dir)
+    }
+
+    #[test]
+    fn amend_replaces_constraint_across_the_subtree() {
+        let (store, root, child, dir) = tree_with_child("amend");
+        // The child inherited the root's constraint; amendment must rewrite it
+        // in the owner's contract and every descendant, not merely append.
+        let changed = store
+            .amend_inherited_constraint(&root, "the wall bears the load", "the wall needs a beam")
+            .unwrap();
+        assert!(changed >= 1, "at least the owner must change");
+        let reloaded = store.walk().unwrap();
+        let owner = reloaded.iter().find(|n| n.id == root.id).unwrap();
+        assert!(
+            owner
+                .contract()
+                .constraints
+                .iter()
+                .any(|c| c.contains("needs a beam")),
+            "owner constraint must be amended"
+        );
+        assert!(
+            !owner
+                .contract()
+                .constraints
+                .iter()
+                .any(|c| c.contains("bears the load")),
+            "the falsified constraint must not survive"
+        );
+        let _ = child;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_interface_and_depends_on_persist() {
+        let (store, _root, child, dir) = tree_with_child("iface");
+        assert!(store
+            .add_interface(&child, "Authenticator.verify(token)")
+            .unwrap());
+        assert!(
+            !store
+                .add_interface(&child, "Authenticator.verify(token)")
+                .unwrap(),
+            "adding the same interface twice is a no-op"
+        );
+        let reloaded = store.walk().unwrap();
+        let c = reloaded.iter().find(|n| n.id == child.id).unwrap();
+        assert!(c.contract().interfaces.iter().any(|i| i.contains("verify")));
+
+        let dep = "root-99".to_string();
+        assert!(store.add_depends_on(&child, &dep).unwrap());
+        let reloaded = store.walk().unwrap();
+        let c = reloaded.iter().find(|n| n.id == child.id).unwrap();
+        assert!(c.depends_on.contains(&dep));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replan_compacts_children_and_returns_parent_to_pending() {
+        let (store, root, child, dir) = tree_with_child("replan");
+        store
+            .append_decision(&child, "valuable episodic detail")
+            .unwrap();
+        store.compact_child_trace(&root, &child).unwrap();
+        store.delete_node(&child).unwrap();
+        store.set_status(&root, PENDING).unwrap();
+
+        assert!(
+            !child.path.exists(),
+            "pruned child directory must be gone from the tree"
+        );
+        let reloaded = store.walk().unwrap();
+        assert!(
+            !reloaded.iter().any(|n| n.id == child.id),
+            "pruned child must be gone from the index"
+        );
+        assert_eq!(
+            reloaded.iter().find(|n| n.id == root.id).unwrap().status,
+            PENDING
+        );
+        let compacted = fs::read_to_string(root.log_dir().join("compacted-root-01.md")).unwrap();
+        assert!(
+            compacted.contains("valuable episodic detail"),
+            "compaction must preserve the child's trace: {compacted}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

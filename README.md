@@ -12,15 +12,16 @@ trusting prose:
 | Verb | Meaning | Status |
 |------|---------|--------|
 | `split(subtasks)` | the task is too big for one agent; propose child contracts | implemented |
-| `complete(deliverable, summary)` | submit work for verification against the contract | implemented |
-| `escalate(assumption, evidence)` | raise an invalid inherited assumption to the parent | implemented; resolution path not yet |
+| `complete(deliverable, summary)` | submit work for verification against the contract | implemented; fails closed on an empty diff |
+| `escalate(assumption, evidence)` | raise an invalid inherited assumption to the owner | implemented |
+| `escalate_resolve(resolution)` | settle an escalation (`amend`/`overrule`/`replan`/`depends_on`) | implemented |
 | `reopen(children, reason)` | return specific children for rework after integration fails | implemented |
 | `note_global(type, content)` | write a lesson, convention, or skill to the shared global store | implemented |
-| `escalate_resolve(resolution)` | settle an escalation | **not yet implemented** |
 
 The **leaf executor** spawns `omp` (also `pi`) headlessly in each node directory.
 Agents read a generated `CLAUDE.md` (atomic contract + direct parent constraints
-+ relevant global knowledge) and write deliverables as real files in `artifacts/`.
++ relevant global knowledge) and edit the live project directly; each verified
+node's work becomes one commit in the project repo.
 `opencode` is **not yet implemented**: selecting it currently still runs `omp`.
 
 ## Key Modern Harness Principles
@@ -28,7 +29,8 @@ Agents read a generated `CLAUDE.md` (atomic contract + direct parent constraints
 - **Atomic Decomposition**: Each node is small, atomic (single file / single concern) so lightweight models can succeed reliably without context dilution.
 - **Minimal Context**: Each agent only receives its contract, direct parent constraints, and sibling goals. It does not carry the full ancestral chain.
 - **Fail-Safe & Auto-Healing Retries**: Nodes retry up to 3 times on runtime errors or verification failures, feeding back precise failure reasons so the model corrects its output.
-- **Constraint Escalation & Downstream Propagation**: When a child escalates an invalid assumption or a constraint is added, it is recorded in the parent and automatically propagated to all descendant contracts.
+- **Upward Escalation**: A node that finds an inherited assumption false suspends its branch and reopens the ancestor that owns it, which resolves with `amend`, `overrule`, `replan`, or `depends_on`. A challenged assumption is not treated as an accepted constraint until the owner has ruled.
+- **Fail-Closed Completion & Verification**: No decision is an error and a retry, never a fabricated `complete`; a completion must be backed by a real git diff; the critic's verdict must be an explicit `PASS` with per-criterion results.
 - **Interactive TUI Steering**: Inspect running nodes, review decisions & constraints, inject new global or subtree constraints, and trigger retries directly from the live TUI.
 
 ## Installation
@@ -61,6 +63,22 @@ fractal init --executor omp "Goal"
 # or
 FRACTAL_EXECUTOR=omp fractal init "Goal"
 ```
+
+### Non-interactive / headless runs
+
+`fractal init` and `fractal run` open the TUI only when attached to a real
+terminal. Anywhere else — CI, a supervisor, another agent — they run headless
+and terminate on their own: a failed node ends the run with a non-zero exit
+status rather than waiting for a keystroke that cannot come.
+
+```bash
+fractal --model smol --yes init "Goal"
+fractal --no-tui run
+```
+
+- `--model <model>` passes the model straight to the leaf executor and skips the
+  picker.
+- `--yes` (alias `--no-tui`) forces headless mode even on a terminal.
 
 ### Resume a paused project
 
@@ -111,12 +129,12 @@ It is advisory, and only meaningful for JS/TS projects; it exits cleanly with a
 
 The model passed to the executor is chosen in this order:
 
-1. `FRACTAL_MODEL` if set and non-empty.
-2. On an interactive terminal, a picker listing available models.
-3. Otherwise the default model.
+1. `--model <model>` if given.
+2. `FRACTAL_MODEL` if set and non-empty.
+3. On an interactive terminal, a picker listing available models.
+4. Otherwise the default model.
 
-There is currently no `--model` flag or non-interactive `--yes` flag; in a
-non-TTY context the default is used without prompting.
+The picker is only opened on a real terminal; headless runs never prompt.
 
 ## Configuration
 
@@ -133,10 +151,10 @@ non-TTY context the default is used without prompting.
 ## Status
 
 The canonical implementation is Rust. The design spec is `docs/SPEC.md` and the
-build contracts are in `contracts/`. Known gaps — upward escalation resolution,
-fail-closed verification, deterministic non-interactive termination, per-node
-isolation, context bounds, and an enforced budget — are tracked for follow-up
-work and are not yet reflected in the behaviour above.
+build contracts are in `contracts/`. Upward escalation, fail-closed completion
+and verification, and deterministic non-interactive termination are implemented.
+Known gaps tracked for follow-up work: per-node isolation, bounded context, an
+enforced budget, dependency staleness, and the `opencode` executor.
 
 ## License
 
