@@ -99,10 +99,61 @@ case "$MODE" in
       complete
     fi
     ;;
+  chain)
+    # Always split, proposing the node's remaining allowance minus the fee, so
+    # depth is bounded only by the budget (the hard cap is a backstop).
+    CLAUDE="${!#}"
+    CLAUDE="${CLAUDE#*@}"
+    CLAUDE="${CLAUDE%%. You are*}"
+    REM=0
+    if [ -f "$CLAUDE" ]; then
+      CONTENT="$(cat "$CLAUDE")"
+      if [[ "$CONTENT" =~ remaining:\ (-?[0-9]+) ]]; then REM="${BASH_REMATCH[1]}"; fi
+    fi
+    FEE="${FRACTAL_SPLIT_FEE:-200}"
+    ALLOC=$(( REM - FEE ))
+    if [ "$ALLOC" -lt 0 ]; then ALLOC=0; fi
+    echo "{\"verb\":\"split\",\"subtasks\":[{\"id\":\"c\",\"goal\":\"chain ${NODE}\",\"acceptance_criteria\":[\"the task is done\"],\"allocation\":${ALLOC}}]}"
+    ;;
+  overalloc)
+    if [ "$NODE" = "root" ] && [ ! -f "$ROOT/.attempted_overalloc" ]; then
+      touch "$ROOT/.attempted_overalloc"
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"a","allocation":100000000},{"id":"b","goal":"b","allocation":100000000}]}'
+    else
+      complete
+    fi
+    ;;
+  hang)
+    echo "$$" > "$ROOT/.fake_omp_pid"
+    exec sleep 120
+    ;;
   *)
     complete
     ;;
 esac
+"#;
+
+/// A minimal stand-in for the `opencode` CLI. It speaks opencode's invocation
+/// (`run --auto`, project root as working directory) and nothing of `omp`, so a
+/// run that succeeds against it proves the opencode executor really executed.
+const FAKE_OPENCODE: &str = r#"#!/usr/bin/env bash
+ROOT="$(pwd)"
+NODE="${FRACTAL_NODE_ID:-}"
+# Prove opencode, not omp, served this run.
+echo "opencode" > "$ROOT/.opencode_ran"
+
+if [ -z "$NODE" ]; then
+  echo '{"verdict":"PASS","reason":"fake opencode critic passes","criteria":[{"name":"the task is done","pass":true,"reason":"fake"}]}'
+  exit 0
+fi
+
+if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+  echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["the task is done"]}]}'
+else
+  mkdir -p "$ROOT/src"
+  echo "delivered by opencode" > "$ROOT/src/${NODE}.txt"
+  echo '{"verb":"complete","deliverable":"done","summary":"did the task with opencode"}'
+fi
 "#;
 
 struct Project {
@@ -120,25 +171,30 @@ impl Project {
         let fake_bin = base.join("fake-bin");
         fs::create_dir_all(&dir).unwrap();
         fs::create_dir_all(&fake_bin).unwrap();
-        let omp = fake_bin.join("omp");
-        fs::write(&omp, FAKE_OMP).unwrap();
-        fs::set_permissions(&omp, fs::Permissions::from_mode(0o755)).unwrap();
-        Self {
+        let p = Self {
             dir,
             fake_bin,
             mode,
-        }
+        };
+        p.install("omp", FAKE_OMP);
+        p
     }
 
-    /// Run the binary in the project with the fake executor on PATH.
-    fn run(&self, args: &[&str], timeout: Duration) -> (Option<i32>, String, String) {
+    /// Install an executable into the fake bin directory.
+    fn install(&self, name: &str, script: &str) {
+        let path = self.fake_bin.join(name);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn spawn(&self, args: &[&str], extra: &[(&str, &str)]) -> Child {
         let path = format!(
             "{}:{}",
             self.fake_bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let mut child: Child = Command::new(env!("CARGO_BIN_EXE_fractal"))
-            .args(args)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_fractal"));
+        cmd.args(args)
             .current_dir(&self.dir)
             .env("PATH", path)
             .env("FAKE_OMP_MODE", self.mode)
@@ -148,10 +204,14 @@ impl Project {
             .env("FRACTAL_PARALLEL", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        cmd.spawn().unwrap()
+    }
 
+    fn wait(mut child: Child, timeout: Duration) -> (Option<i32>, String, String) {
         let deadline = Instant::now() + timeout;
         loop {
             match child.try_wait().unwrap() {
@@ -178,9 +238,74 @@ impl Project {
         }
     }
 
+    /// Run the binary in the project with the fake executor on PATH.
+    fn run(&self, args: &[&str], timeout: Duration) -> (Option<i32>, String, String) {
+        self.run_env(args, timeout, &[])
+    }
+
+    fn run_env(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+        extra: &[(&str, &str)],
+    ) -> (Option<i32>, String, String) {
+        Self::wait(self.spawn(args, extra), timeout)
+    }
+
     fn status(&self) -> String {
         let (_, out, err) = self.run(&["status"], Duration::from_secs(20));
         format!("{out}\n{err}")
+    }
+
+    /// Sum of every budget row's own-debits column.
+    fn ledger_debits(&self) -> i64 {
+        let db = self.dir.join(".fractal/index.db");
+        let conn =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let mut stmt = conn.prepare("SELECT debits FROM budget").unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0)).unwrap();
+        rows.map(|r| r.unwrap()).sum()
+    }
+
+    fn ledger_calls_plus_fees(&self) -> i64 {
+        let db = self.dir.join(".fractal/index.db");
+        let conn =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(calls + fee_paid), 0) FROM budget",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn ledger_calls(&self) -> i64 {
+        let db = self.dir.join(".fractal/index.db");
+        let conn =
+            rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        conn.query_row("SELECT COALESCE(SUM(calls), 0) FROM budget", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    /// Depth of the on-disk tree: root alone is 1.
+    fn max_depth(&self) -> usize {
+        fn walk(dir: &std::path::Path) -> usize {
+            let mut best = 0;
+            if let Ok(entries) = fs::read_dir(dir.join("children")) {
+                for e in entries.flatten() {
+                    if e.path().is_dir() {
+                        best = best.max(walk(&e.path()));
+                    }
+                }
+            }
+            1 + best
+        }
+        walk(&self.dir.join("tree/root"))
     }
 }
 
@@ -339,4 +464,195 @@ fn explicit_model_flag_runs_headless() {
         Duration::from_secs(60),
     );
     assert_eq!(code, Some(0), "explicit model run failed; stderr:\n{err}");
+}
+
+/// A budget that cannot fund another split makes the tree fail rather than
+/// continue silently, and the ledger records every real call debit plus the
+/// split fees exactly.
+#[test]
+fn budget_exhaustion_fails_rather_than_silently_continuing() {
+    let p = Project::new("budget", "chain");
+    let (code, _out, err) = p.run_env(
+        &["init", "build a chain"],
+        Duration::from_secs(60),
+        &[
+            ("FRACTAL_BUDGET", "300"),
+            ("FRACTAL_SPLIT_FEE", "100"),
+            ("FRACTAL_CALL_TOKENS", "50"),
+        ],
+    );
+    assert!(code.is_some(), "run did not terminate; stderr:\n{err}");
+    assert_ne!(code, Some(0), "an exhausted tree must not report success");
+    let status = p.status();
+    assert!(
+        !status.contains("[complete]"),
+        "a node completed despite exhaustion:\n{status}"
+    );
+    assert!(
+        status.contains("[failed]"),
+        "exhaustion must fail a node, never continue silently:\n{status}"
+    );
+    assert!(
+        p.ledger_debits() > 0,
+        "the ledger recorded no call debits at all"
+    );
+    assert!(
+        p.ledger_calls() > 0,
+        "no model call was actually debited to the ledger"
+    );
+    assert_eq!(
+        p.ledger_debits(),
+        p.ledger_calls_plus_fees(),
+        "ledger debits must equal recorded call usage plus split fees"
+    );
+}
+
+/// Depth is bounded by economics, not only by the hard cap: a larger budget
+/// recurses deeper on the same always-split task.
+#[test]
+fn budget_bounds_recursion_economically() {
+    let small = Project::new("budgetsmall", "chain");
+    let (small_code, _out, small_err) = small.run_env(
+        &["init", "build a chain"],
+        Duration::from_secs(60),
+        &[
+            ("FRACTAL_BUDGET", "300"),
+            ("FRACTAL_SPLIT_FEE", "100"),
+            ("FRACTAL_CALL_TOKENS", "50"),
+        ],
+    );
+    assert!(
+        small_code.is_some(),
+        "small-budget run did not terminate; stderr:\n{small_err}"
+    );
+
+    let big = Project::new("budgetbig", "chain");
+    let (big_code, _out, big_err) = big.run_env(
+        &["init", "build a chain"],
+        Duration::from_secs(60),
+        &[
+            ("FRACTAL_BUDGET", "1200"),
+            ("FRACTAL_SPLIT_FEE", "100"),
+            ("FRACTAL_CALL_TOKENS", "50"),
+        ],
+    );
+    assert!(
+        big_code.is_some(),
+        "large-budget run did not terminate; stderr:\n{big_err}"
+    );
+
+    assert!(
+        small.max_depth() >= 1,
+        "even a tiny budget must afford the root"
+    );
+    assert!(
+        big.max_depth() > small.max_depth(),
+        "a 4x budget did not recurse deeper: small={} big={}",
+        small.max_depth(),
+        big.max_depth()
+    );
+}
+
+/// A split whose child allocations exceed the remaining allowance is refused
+/// before any child is created, and the refusal reaches the agent's context so
+/// it can recover.
+#[test]
+fn over_allocated_split_is_rejected_with_feedback() {
+    let p = Project::new("overalloc", "overalloc");
+    let (code, _out, err) = p.run_env(
+        &["init", "build a toy"],
+        Duration::from_secs(60),
+        &[
+            ("FRACTAL_BUDGET", "1000000"),
+            ("FRACTAL_SPLIT_FEE", "100"),
+            ("FRACTAL_CALL_TOKENS", "50"),
+        ],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "the root should recover and complete after the rejection; stderr:\n{err}"
+    );
+    let children = p.dir.join("tree/root/children");
+    let names: Vec<_> = fs::read_dir(&children)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .collect();
+    assert!(
+        names.is_empty(),
+        "the over-allocating split created children: {names:?}"
+    );
+    let decisions = fs::read_to_string(p.dir.join("tree/root/decisions.md")).unwrap();
+    let lowered = decisions.to_lowercase();
+    assert!(
+        lowered.contains("budget") || lowered.contains("allocat") || lowered.contains("exceed"),
+        "the rejection was not recorded where the agent can see it:\n{decisions}"
+    );
+}
+
+/// Selecting `--executor opencode` really runs opencode. The `omp` on PATH is a
+/// failing stub, so a successful run can only have come from opencode.
+#[test]
+fn opencode_executor_runs_opencode() {
+    let p = Project::new("opencode", "happy");
+    p.install(
+        "omp",
+        "#!/usr/bin/env bash\necho 'omp must not be used by the opencode executor' >&2\nexit 42\n",
+    );
+    p.install("opencode", FAKE_OPENCODE);
+    let (code, _out, err) = p.run_env(
+        &["init", "build a toy"],
+        Duration::from_secs(60),
+        &[("FRACTAL_EXECUTOR", "opencode")],
+    );
+    assert_eq!(code, Some(0), "opencode run failed; stderr:\n{err}");
+    assert!(
+        p.dir.join(".opencode_ran").exists(),
+        "the opencode binary was never invoked"
+    );
+    let status = p.status();
+    assert!(
+        status.contains("[complete]"),
+        "the opencode run did not complete:\n{status}"
+    );
+}
+
+/// Interrupting the harness must kill and reap the running executor child
+/// rather than leaving it running after the harness exits.
+#[test]
+fn interrupt_reaps_the_running_executor() {
+    let p = Project::new("interrupt", "hang");
+    let child = p.spawn(&["init", "build a toy"], &[]);
+    let pid_file = p.dir.join(".fake_omp_pid");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !pid_file.exists() {
+        assert!(Instant::now() < deadline, "the executor never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let fake_pid = fs::read_to_string(&pid_file).unwrap().trim().to_string();
+    let fractal_pid = child.id().to_string();
+
+    // SIGINT the harness, exactly as Ctrl-C would.
+    let signalled = Command::new("kill")
+        .args(["-INT", &fractal_pid])
+        .status()
+        .unwrap();
+    assert!(signalled.success(), "could not signal the harness");
+    let (code, _out, _err) = Project::wait(child, Duration::from_secs(30));
+    assert!(code.is_some(), "the harness did not terminate after SIGINT");
+
+    let still_alive = Command::new("kill")
+        .args(["-0", &fake_pid])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    if still_alive {
+        let _ = Command::new("kill").args(["-9", &fake_pid]).status();
+    }
+    assert!(
+        !still_alive,
+        "executor child {fake_pid} was left running after the interrupt"
+    );
 }

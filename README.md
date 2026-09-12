@@ -18,11 +18,12 @@ trusting prose:
 | `reopen(children, reason)` | return specific children for rework after integration fails | implemented |
 | `note_global(type, content)` | write a lesson, convention, or skill to the shared global store | implemented |
 
-The **leaf executor** spawns `omp` (also `pi`) headlessly in each node directory.
-Agents read a generated `CLAUDE.md` (atomic contract + direct parent constraints
-+ relevant global knowledge) and edit the live project directly; each verified
-node's work becomes one commit in the project repo.
-`opencode` is **not yet implemented**: selecting it currently still runs `omp`.
+The **leaf executor** spawns a headless coding agent in each node directory.
+Three executors are supported and selected with `--executor`/`FRACTAL_EXECUTOR`:
+`omp` (default, also `pi`) and `opencode`. Agents read a generated `CLAUDE.md`
+(atomic contract + direct parent constraints + relevant global knowledge) and
+edit the live project directly; each verified node's work becomes one commit in
+the project repo.
 
 ## Key Modern Harness Principles
 
@@ -62,6 +63,8 @@ fractal init "Build a CLI weather dashboard with tests"
 fractal init --executor omp "Goal"
 # or
 FRACTAL_EXECUTOR=omp fractal init "Goal"
+# opencode is a real executor, with its own model selection and flags
+fractal init --executor opencode --model anthropic/claude-3-7-sonnet "Goal"
 ```
 
 ### Non-interactive / headless runs
@@ -141,20 +144,52 @@ The picker is only opened on a real terminal; headless runs never prompt.
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `FRACTAL_MODEL` | unset | Model for the leaf executor; skips the interactive picker |
-| `FRACTAL_EXECUTOR` | `omp` | Leaf executor (`omp`/`pi`; `opencode` not yet implemented) |
-| `FRACTAL_BUDGET` | unset | Token allowance at the root; **not yet enforced** |
-| `FRACTAL_SPLIT_FEE` | `200` | Token cost charged per split; **not yet enforced** |
+| `FRACTAL_EXECUTOR` | `omp` | Leaf executor (`omp`/`pi` or `opencode`) |
+| `FRACTAL_BUDGET` | unset | Token allowance at the root; when set, recursion is bounded economically |
+| `FRACTAL_SPLIT_FEE` | `200` | Token cost charged to a node each time it splits |
+| `FRACTAL_CALL_TOKENS` | unset | Tokens charged per model call, overriding the character-based estimate |
 | `FRACTAL_MAX_STEPS` | `500` | Backstop loop bound for a single run |
 | `FRACTAL_TIMEOUT` | `300` | Seconds before a stuck node is killed |
 | `FRACTAL_PARALLEL` | `4` | Number of concurrent nodes executed in parallel |
+
+### Budgets
+
+Set `FRACTAL_BUDGET` to a token allowance at the root to bound recursion
+economically instead of by depth alone:
+
+- every model call debits its estimated token usage to the calling node;
+- a split charges `FRACTAL_SPLIT_FEE` and grants each child the `allocation` it
+  proposed; the fee plus the grants must fit the node's remaining allowance or
+  the split is refused with the reason fed back to the agent;
+- a node whose allowance is exhausted before it can run fails, rather than
+  continuing silently;
+- the hard depth cap (`4`) always applies as a backstop, budget or not.
+
+`FRACTAL_CALL_TOKENS` calibrates the per-call debit for providers that do not
+report exact usage; without it, four characters are counted as one token.
+
+### Durability and trust boundary
+
+The SQLite index uses a rollback journal with `synchronous=FULL`, so a committed
+node status has reached disk before the next model call starts and the tree
+survives a `SIGKILL`; the filesystem remains the source of truth and `reconcile`
+repairs the index from it. On `q`/Ctrl-C the running executor child is killed
+and reaped before the harness exits.
+
+Executors run with full shell access and auto-approved permissions
+(`--auto-approve --approval-mode=yolo`, opencode's `--auto`). Dependency
+artifacts and the global store are untrusted prompt input, so a prompt-injected
+instruction can reach the whole project. Point the harness only at repositories
+and accounts where that blast radius is acceptable.
 
 ## Status
 
 The canonical implementation is Rust. The design spec is `docs/SPEC.md` and the
 build contracts are in `contracts/`. Upward escalation, fail-closed completion
-and verification, and deterministic non-interactive termination are implemented.
-Known gaps tracked for follow-up work: per-node isolation, bounded context, an
-enforced budget, dependency staleness, and the `opencode` executor.
+and verification, deterministic non-interactive termination, enforced budgets,
+dependency staleness, and the `omp`/`pi`/`opencode` executors are implemented.
+Known gaps tracked for follow-up work: per-node isolation, bounded context, and
+crash-safe reaping of gate subprocesses.
 
 ## License
 
