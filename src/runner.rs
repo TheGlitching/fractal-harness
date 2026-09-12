@@ -310,7 +310,12 @@ commit yourself.
 
 ### If this contract needs decomposition
 Run this and STOP - do not write any code:
-  fractal split --subtasks '[{\"id\":\"a\",\"goal\":\"...\",\"acceptance_criteria\":[\"...\"],\"verification\":[\"npm test\"]}]'
+  fractal split --subtasks '[{\"id\":\"a\",\"goal\":\"...\",\"acceptance_criteria\":[\"...\"],\"verification\":[\"npm test\"],\"manual_verification\":[\"the UI renders cleanly\"]}]'
+
+`verification` entries MUST be commands that run on this machine (`npm test`,
+`cargo test`, `python3 -m pytest`). Non-command checks - visual, UX, or whether
+something looks right - go in `manual_verification`, which the critic judges and
+which are never run as shell commands.
 
 Order the subtasks with `depends_on` so whoever consumes a module runs AFTER the
 module it consumes exists. That ordering is what stops two children inventing two
@@ -1266,6 +1271,7 @@ fn result_from_payload(
                         constraints: strings("constraints"),
                         depends_on: deps,
                         verification,
+                        manual_verification: strings("manual_verification"),
                         allocation: item
                             .get("allocation")
                             .and_then(|a| a.as_i64())
@@ -1757,5 +1763,31 @@ Working..."#;
         assert_eq!(d.get("verb").unwrap(), "split");
         assert_eq!(d.get("subtasks").unwrap().as_array().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A split's `manual_verification` list is parsed separately from the
+    /// executable `verification` gates.
+    #[test]
+    fn split_payload_separates_manual_from_executable_verification() {
+        let payload = serde_json::json!({
+            "verb": "split",
+            "subtasks": [{
+                "id": "a",
+                "goal": "build the TUI",
+                "acceptance_criteria": ["it renders"],
+                "verification": ["npm test"],
+                "manual_verification": ["the layout is clean at 80x24", "keys respond"]
+            }]
+        });
+        let result = result_from_payload("split", &payload).unwrap();
+        let c = &result.subtasks[0];
+        assert_eq!(c.verification, vec!["npm test".to_string()]);
+        assert_eq!(
+            c.manual_verification,
+            vec![
+                "the layout is clean at 80x24".to_string(),
+                "keys respond".to_string()
+            ]
+        );
     }
 }
