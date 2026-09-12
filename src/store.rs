@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS steer_queue (
     payload TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS memory_digest (
+    node_id TEXT PRIMARY KEY,
+    digest TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 "#;
 
 fn now() -> String {
@@ -796,6 +802,9 @@ impl Store {
     }
 
     pub fn append_decision(&self, node: &Node, text: &str) -> Result<(), StoreError> {
+        if !self.memory_intact(node) {
+            self.note_memory_tamper(node);
+        }
         let line = format!("- {} {}\n", now(), text.trim());
         let path = node.decisions_path();
         let mut file = fs::OpenOptions::new()
@@ -803,10 +812,14 @@ impl Store {
             .append(true)
             .open(path)?;
         file.write_all(line.as_bytes())?;
+        let _ = self.record_memory_digest(node);
         Ok(())
     }
 
     pub fn append_log(&self, node: &Node, record: &serde_json::Value) -> Result<(), StoreError> {
+        if !self.memory_intact(node) {
+            self.note_memory_tamper(node);
+        }
         let mut obj = record.clone();
         if let Some(m) = obj.as_object_mut() {
             m.insert("node".into(), serde_json::Value::String(node.id.clone()));
@@ -822,7 +835,101 @@ impl Store {
             .append(true)
             .open(path)?;
         file.write_all(format!("{line}\n").as_bytes())?;
+        let _ = self.record_memory_digest(node);
         Ok(())
+    }
+
+    /// The bytes of the harness's own per-node memory: `decisions.md` followed by
+    /// `log/events.jsonl`. A node's memory is only ever written by the harness,
+    /// so its exact contents are what a digest can vouch for.
+    fn memory_bytes(node: &Node) -> Vec<u8> {
+        let mut buf = Vec::new();
+        if let Ok(b) = fs::read(node.decisions_path()) {
+            buf.extend_from_slice(&b);
+        }
+        // A separator so moving a byte between the two files changes the digest.
+        buf.push(0);
+        if let Ok(b) = fs::read(node.log_path()) {
+            buf.extend_from_slice(&b);
+        }
+        buf
+    }
+
+    fn memory_digest(node: &Node) -> String {
+        format!("{:016x}", fnv1a(&Self::memory_bytes(node)))
+    }
+
+    /// Record the digest of the state the harness just wrote. The digest lives in
+    /// the SQLite index, not in the tree the agent can rewrite, so a later agent
+    /// append no longer matches (trial 5 §7.2).
+    ///
+    /// ponytail: non-cryptographic FNV-1a, matching the dependency
+    /// fingerprints. It makes an ordinary agent append detectable, not a
+    /// determined collision. Swap for SHA-256 if a real adversary appears.
+    fn record_memory_digest(&self, node: &Node) -> Result<(), StoreError> {
+        let digest = Self::memory_digest(node);
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO memory_digest(node_id,digest,updated_at) VALUES(?1,?2,?3) \
+                 ON CONFLICT(node_id) DO UPDATE SET digest=?2, updated_at=?3",
+                params![node.id, digest, &now()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// True when the node's on-disk memory still matches the last state the
+    /// harness recorded. A node with no recorded digest (never written to yet)
+    /// counts as intact.
+    pub fn memory_intact(&self, node: &Node) -> bool {
+        use rusqlite::OptionalExtension;
+        self.with_conn(|conn| {
+            let stored: Option<String> = conn
+                .query_row(
+                    "SELECT digest FROM memory_digest WHERE node_id=?1",
+                    params![node.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(match stored {
+                Some(s) => s == Self::memory_digest(node),
+                None => true,
+            })
+        })
+        .unwrap_or(true)
+    }
+
+    /// Node ids whose memory no longer matches what the harness recorded, i.e.
+    /// whose audit trail was written by something other than the harness.
+    pub fn tampered_nodes(&self) -> Vec<String> {
+        self.walk()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|n| !self.memory_intact(n))
+            .map(|n| n.id)
+            .collect()
+    }
+
+    /// Append a harness-authored record of a forged append, before the harness
+    /// overwrites the digest with the tampered content. Written directly rather
+    /// than via `append_log` to avoid extending the digest mid-detection.
+    fn note_memory_tamper(&self, node: &Node) {
+        let path = node.log_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let line = serde_json::json!({
+            "at": now(),
+            "node": node.id,
+            "event": "memory_tampered",
+            "detail": "decisions.md or events.jsonl was modified outside the harness",
+        })
+        .to_string();
+        let _ = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
     }
 
     pub fn add_constraint_and_propagate(
@@ -1262,6 +1369,33 @@ impl Store {
                 p.id,
                 p.goal.lines().next().unwrap_or(&p.goal)
             ));
+        }
+        // Nodes mid-flight (running) or decomposed but not yet aggregated
+        // (split) belong to no other section. Listing them with their real
+        // status is what stops a completed root being reported inconsistently.
+        let in_progress: Vec<&Node> = nodes
+            .iter()
+            .filter(|n| n.status == RUNNING || n.status == SPLIT)
+            .collect();
+        if !in_progress.is_empty() {
+            out.push_str("\n## In progress\n");
+            for n in in_progress {
+                out.push_str(&format!(
+                    "- **{}** ({}): {}\n",
+                    n.id,
+                    n.status,
+                    n.goal.lines().next().unwrap_or(&n.goal)
+                ));
+            }
+        }
+        let tampered = self.tampered_nodes();
+        if !tampered.is_empty() {
+            out.push_str("\n## Tampered memory\n");
+            for id in &tampered {
+                out.push_str(&format!(
+                    "- **{id}**: decisions.md or log/events.jsonl was modified outside the harness\n"
+                ));
+            }
         }
         Ok(out)
     }
@@ -2114,6 +2248,95 @@ mod tests {
         assert!(
             !stale.contains(&producer.id),
             "the changed producer is not itself stale"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Trial 5 §7.2: a worker appended fabricated "gates passed / verified /
+    /// committed" lines to its own `decisions.md` and a fake event to
+    /// `log/events.jsonl`. The harness digest makes that append detectable, and
+    /// the next harness write records it as a `memory_tampered` event.
+    #[test]
+    fn forged_memory_append_is_detected() {
+        use std::io::Write;
+        let (store, dir) = temp_store("forge");
+        let root = store.init_with_budget("build a thing", None).unwrap();
+        store.append_decision(&root, "node created").unwrap();
+        assert!(
+            store.memory_intact(&root),
+            "a node the harness alone wrote must read as intact"
+        );
+
+        // The agent forges its own audit trail.
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(root.decisions_path())
+            .unwrap();
+        writeln!(f, "- 2999-01-01T00:00:00+00:00 gates passed: npm test").unwrap();
+        drop(f);
+        fs::create_dir_all(root.log_dir()).unwrap();
+        let mut g = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(root.log_path())
+            .unwrap();
+        writeln!(
+            g,
+            "{{\"at\":\"2999-01-01T00:00:00+00:00\",\"event\":\"verified\",\"node\":\"root\"}}"
+        )
+        .unwrap();
+        drop(g);
+
+        assert!(
+            !store.memory_intact(&root),
+            "a forged append must not read as intact"
+        );
+        assert_eq!(
+            store.tampered_nodes(),
+            vec!["root".to_string()],
+            "the forged node must be reported"
+        );
+
+        // The next harness write records the tamper before refreshing the digest.
+        store
+            .append_decision(&root, "verified: verdict=PASS")
+            .unwrap();
+        let log = fs::read_to_string(root.log_path()).unwrap();
+        assert!(
+            log.contains("memory_tampered"),
+            "the tamper must be recorded in the audit trail:\n{log}"
+        );
+        assert!(
+            store.memory_intact(&root),
+            "the harness's own write re-baselines the digest"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Trial 5 §7.5: `fractal digest` reported `root [running]` while status
+    /// said complete. A completed root must appear under Done, and nothing may
+    /// be labelled running once it is complete.
+    #[test]
+    fn digest_never_reports_a_completed_root_as_running() {
+        let (store, dir) = temp_store("digestcomplete");
+        let root = store.init_with_budget("build a thing", None).unwrap();
+        store
+            .complete(&root, "delivered", "the whole thing", &[])
+            .unwrap();
+
+        let digest = store.generate_digest().unwrap();
+        let done = digest.split("## Blocked").next().unwrap_or(&digest);
+        assert!(
+            done.contains("**root**"),
+            "the completed root must be listed under Done:\n{digest}"
+        );
+        assert!(
+            !digest.contains("## In progress"),
+            "nothing is in progress once the root is complete:\n{digest}"
+        );
+        assert!(
+            !digest.contains("running"),
+            "a completed run must not be reported as running:\n{digest}"
         );
         let _ = fs::remove_dir_all(&dir);
     }

@@ -114,6 +114,18 @@ case "$MODE" in
       echo '{"verb":"complete","deliverable":"done","summary":"trust me"}'
     fi
     ;;
+  satisfied_no_diff)
+    # A child whose contract is already satisfied by siblings: it changes
+    # nothing, but its own gate passes against the existing tree. It must be
+    # able to complete as "satisfied by existing artefacts".
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"tests already written by a sibling","acceptance_criteria":["the task is done"],"verification":["true"]}]}'
+    elif [ "$NODE" = "root" ]; then
+      echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+    else
+      echo '{"verb":"complete","deliverable":"the deliverable already exists","summary":"already satisfied"}'
+    fi
+    ;;
   gate_fail)
     if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
       echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["the task is done"],"verification":["false"]}]}'
@@ -549,6 +561,53 @@ fn empty_diff_leaf_does_not_complete() {
     assert!(
         status.contains("[failed]"),
         "empty-diff completion should fail the node:\n{status}"
+    );
+}
+
+/// Trial 5 §7.4: a child whose criteria are already satisfied by siblings could
+/// not produce a diff, failed every retry and failed the whole root. A node that
+/// changed nothing but whose own gate passes against the existing tree must be
+/// able to complete as "satisfied by existing artefacts".
+#[test]
+fn a_no_diff_node_completes_when_its_own_gate_passes() {
+    let p = Project::new("satisfiednodiff", "satisfied_no_diff");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(30));
+    assert_eq!(
+        code,
+        Some(0),
+        "a no-diff node whose own gate passes must complete; stderr:\n{err}"
+    );
+    let status = p.status();
+    assert!(
+        status.contains("[complete]"),
+        "the tree did not complete:\n{status}"
+    );
+    let decisions = fs::read_to_string(p.dir.join("tree/root/children/root-01/decisions.md"))
+        .unwrap_or_default();
+    assert!(
+        decisions.contains("satisfied by existing artefacts"),
+        "the no-diff completion was not recorded as such:\n{decisions}"
+    );
+}
+
+/// Trial 5 §7.5: `fractal digest` reported `root [running]` while status said
+/// complete. After a completed run it must report the root under Done.
+#[test]
+fn digest_reports_a_completed_root_as_done() {
+    let p = Project::new("digestroot", "happy");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(30));
+    assert_eq!(code, Some(0), "run did not complete; stderr:\n{err}");
+    let (dcode, out, derr) = p.run(&["digest"], Duration::from_secs(20));
+    assert_eq!(dcode, Some(0), "digest failed: {derr}");
+    let digest = format!("{out}\n{derr}");
+    let done = digest.split("## Blocked").next().unwrap_or(&digest);
+    assert!(
+        done.contains("**root**"),
+        "the completed root must be listed under Done:\n{digest}"
+    );
+    assert!(
+        !digest.contains("running"),
+        "a completed run must not be reported as running:\n{digest}"
     );
 }
 

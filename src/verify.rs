@@ -113,6 +113,16 @@ pub fn detect_gates(root: &Path) -> Vec<String> {
                 .find(|s| scripts.contains(&format!("\"{s}\"")))
             {
                 gates.push(format!("npm run {script}"));
+            } else if binary_on_path("node") {
+                // A TUI entry that is not wired to a script still has to be
+                // started. Trial 5 run B launched its TUI as `node dist/app.js`
+                // with no `start` script, so no smoke gate ran and a crashing TUI
+                // would have passed every check. Fall back to the manifest's
+                // declared entry point, then to a conventional built entry.
+                if let Some(entry) = package_entrypoint(&manifest).or_else(|| dist_entrypoint(root))
+                {
+                    gates.push(format!("node {entry}"));
+                }
             }
         }
     }
@@ -129,6 +139,51 @@ pub fn detect_gates(root: &Path) -> Vec<String> {
     }
 
     gates
+}
+
+/// The entry point a `package.json` itself declares - `main`, or the first
+/// `bin` - when it names a runnable JavaScript file. This is the smoke command
+/// for a project that ships a TUI/dev entry but never wired a `start` script.
+fn package_entrypoint(manifest: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(manifest).ok()?;
+    let candidate = match json.get("main").and_then(|m| m.as_str()) {
+        Some(m) if !m.trim().is_empty() => m.trim().to_string(),
+        _ => match json.get("bin") {
+            Some(serde_json::Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+            Some(serde_json::Value::Object(map)) => map
+                .values()
+                .filter_map(|v| v.as_str())
+                .find(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())?,
+            _ => return None,
+        },
+    };
+    is_js_entrypoint(&candidate).then_some(candidate)
+}
+
+/// A conventional built entry point, for a project that declares neither a
+/// launch script nor `main`/`bin` (trial 5 run B: `node dist/app.js`). Only
+/// well-known names are accepted so an arbitrary library file is never launched.
+fn dist_entrypoint(root: &Path) -> Option<String> {
+    for name in [
+        "index.js",
+        "app.js",
+        "main.js",
+        "index.mjs",
+        "app.mjs",
+        "index.cjs",
+    ] {
+        let rel = format!("dist/{name}");
+        if root.join(&rel).is_file() {
+            return Some(rel);
+        }
+    }
+    None
+}
+
+fn is_js_entrypoint(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs")
 }
 
 /// The Python interpreter actually present on this machine. `python` is absent
@@ -312,6 +367,12 @@ pub fn is_launch_command(command: &str) -> bool {
                 return true;
             }
         }
+    }
+    // A bare JS entry point (`node dist/app.js`) is how a project with no npm
+    // start script launches its app, so it is a launch: it must be smoke-tested
+    // under the liveness window rather than waited on until the gate timeout.
+    if matches!(first.as_str(), "node" | "nodejs") && tokens.iter().any(|t| is_js_entrypoint(t)) {
+        return true;
     }
     // A bare process told to serve/watch. Exclude test and build commands so
     // `npm test --watch` is never mistaken for a launch.
@@ -655,6 +716,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Trial 5 §7.3: a TUI entry that is not wired to a start script must still
+    /// be smoke-launched. The manifest's own `main` names it.
+    #[test]
+    fn detect_gates_derives_smoke_launch_from_main() {
+        let dir = temp_dir("detectmain");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"main":"dist/app.js","scripts":{"build":"tsc","test":"jest"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
+        let gates = detect_gates(&dir);
+        let launch = gates
+            .iter()
+            .find(|g| is_launch_command(g))
+            .unwrap_or_else(|| panic!("no launch gate emitted for a main entry: {gates:?}"));
+        assert_eq!(launch, "node dist/app.js");
+        assert!(entry_is_runnable(&dir, launch), "derived gate must run");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The motivating case: no `start` script and no `main`, but a conventional
+    /// built entry (`dist/app.js`) that run B launched by hand.
+    #[test]
+    fn detect_gates_derives_smoke_launch_from_a_built_entry() {
+        let dir = temp_dir("detectdist");
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"build":"tsc","test":"jest"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join("dist")).unwrap();
+        std::fs::write(dir.join("dist/app.js"), "console.log('tui')\n").unwrap();
+        let gates = detect_gates(&dir);
+        assert!(
+            gates.iter().any(|g| g == "node dist/app.js"),
+            "a built entry with no start script must still be smoke-launched: {gates:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn explicit_contract_gates_apply_to_every_scope() {
         let dir = temp_dir("explicit");
@@ -871,6 +974,8 @@ mod tests {
         assert!(is_launch_command("yarn serve"));
         assert!(is_launch_command("pnpm run preview"));
         assert!(is_launch_command("node dist/index.js --serve"));
+        assert!(is_launch_command("node dist/app.js"));
+        assert!(is_launch_command("node dist/cli.cjs"));
         assert!(is_launch_command("cargo run -- --watch"));
         assert!(!is_launch_command("npm test"));
         assert!(!is_launch_command("npm run build"));

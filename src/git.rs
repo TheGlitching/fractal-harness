@@ -91,7 +91,11 @@ const STATUS_EXCLUDING_HARNESS: &[&str] = &[
 ];
 
 /// The same exclusions for diff evidence and untracked-file previews, so the
-/// critic sees only the node's own changes.
+/// critic sees only the node's own changes. Generated lockfiles are excluded
+/// here as well as from the untracked preview: a tracked lockfile that a node
+/// regenerated (the normal result of `npm install` after the lockfile was
+/// committed) otherwise survives whole and drives the hand-written content
+/// budget to zero (trial 5 H2c).
 const DIFF_EXCLUDING_HARNESS: &[&str] = &[
     "diff",
     "HEAD",
@@ -104,6 +108,8 @@ const DIFF_EXCLUDING_HARNESS: &[&str] = &[
     ":(exclude)trace.json",
     ":(exclude)digest.md",
     ":(exclude).fractal_decision_*",
+    ":(exclude)*-lock.json",
+    ":(exclude)Cargo.lock",
 ];
 
 const LS_OTHERS_EXCLUDING_HARNESS: &[&str] = &[
@@ -474,12 +480,38 @@ pub fn worktree_change_summary(root: &Path, max_bytes: usize) -> String {
     out.push_str(&generated_note);
 
     // Say plainly that the harness cut the evidence so a critic does not read a
-    // capped preview as the node shipping a truncated deliverable.
+    // capped preview as the node shipping a truncated deliverable. The assembled
+    // summary is hard-capped at `max_bytes` regardless of what the tracked diff
+    // contributed: pre-PR #9 it could never exceed the budget, and a large
+    // tracked diff must not be able to break that guarantee.
+    cap_evidence(out, max_bytes, whole)
+}
+
+/// The explicit harness-truncation marker. Kept in one place so its wording is
+/// identical whether a per-file preview or the whole summary was cut.
+fn evidence_truncation_marker(shown: usize, whole: usize) -> String {
     format!(
-        "{out}\n... [evidence truncated by the harness: showing {} of {whole} bytes. \
+        "... [evidence truncated by the harness: showing {shown} of {whole} bytes. \
          The remainder was omitted for length, NOT by the node; judge the evidence \
-         present and do not FAIL a deliverable merely because this preview ended.]",
-        out.len(),
+         present and do not FAIL a deliverable merely because this preview ended.]"
+    )
+}
+
+/// Bound the assembled summary to `max_bytes`, cutting on a char boundary and
+/// appending the harness-truncation marker. `whole` is the untruncated size, so
+/// the marker can report how much was omitted.
+fn cap_evidence(out: String, max_bytes: usize, whole: usize) -> String {
+    if out.len() <= max_bytes {
+        return format!("{out}\n{}", evidence_truncation_marker(out.len(), whole));
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !out.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}\n{}",
+        &out[..cut],
+        evidence_truncation_marker(cut, whole)
     )
 }
 
@@ -806,6 +838,60 @@ mod tests {
         assert!(
             summary.contains("tsconfig.json") && summary.contains("package.json"),
             "every hand-authored file must receive a window: {summary}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// H2c regression (trial 5 §7.1): a lockfile that is already tracked and is
+    /// then regenerated large - the normal result of `npm install` after the
+    /// lockfile was committed - was pushed into the evidence whole and drove
+    /// every hand-written file's content window to zero. The generated-file rule
+    /// now applies to the tracked diff too, and the assembled summary is capped.
+    #[test]
+    fn tracked_lockfile_diff_cannot_starve_evidence() {
+        let dir = temp_repo("trackedlock");
+        ensure_repo(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"portfolio","scripts":{"build":"tsc","test":"node --test"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("tsconfig.json"), "{}").unwrap();
+        std::fs::write(dir.join("package-lock.json"), "{\"lockfileVersion\":3}").unwrap();
+        commit_node_work(&dir, "root-01", "baseline")
+            .unwrap()
+            .expect("baseline files must commit");
+
+        // The node regenerates the tracked lockfile and adds real source.
+        std::fs::write(
+            dir.join("package-lock.json"),
+            format!(
+                "{{\"lockfileVersion\":3,\"packages\":{{\"x\":\"{}\"}}}}",
+                "z".repeat(142_000)
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src/main.ts"),
+            "export const PORTFOLIO_IMPLEMENTATION = 'live totals';\n",
+        )
+        .unwrap();
+
+        let summary = worktree_change_summary(&dir, 12_000);
+        assert!(
+            summary.len() <= 12_000 + 400,
+            "a tracked diff must not break the evidence bound: {} bytes",
+            summary.len()
+        );
+        assert!(
+            summary.contains("src/main.ts") && summary.contains("PORTFOLIO_IMPLEMENTATION"),
+            "the hand-written file must receive content, not just a name: {} bytes",
+            summary.len()
+        );
+        assert!(
+            !summary.contains(&"z".repeat(200)),
+            "the tracked lockfile diff must not consume the budget"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
