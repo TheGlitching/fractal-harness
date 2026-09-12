@@ -1499,7 +1499,7 @@ impl Store {
             .collect();
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT entry_type, content FROM global_entries WHERE superseded=0 ORDER BY created_at DESC",
+                "SELECT entry_type, content FROM global_entries WHERE superseded=0 ORDER BY created_at DESC, id DESC",
             )?;
             let rows = stmt.query_map([], |row| {
                 Ok(GlobalEntry {

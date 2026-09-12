@@ -21,17 +21,18 @@ trusting prose:
 The **leaf executor** spawns a headless coding agent in each node directory.
 Three executors are supported and selected with `--executor`/`FRACTAL_EXECUTOR`:
 `omp` (default, also `pi`) and `opencode`. Agents read a generated `CLAUDE.md`
-(atomic contract + direct parent constraints + relevant global knowledge) and
-edit the live project directly; each verified node's work becomes one commit in
-the project repo.
+(atomic contract, with its inherited constraints, plus relevant global knowledge)
+and edit the live project directly; each verified node's work becomes one commit
+in the project repo.
 
 ## Key Modern Harness Principles
 
 - **Atomic Decomposition**: Each node is small, atomic (single file / single concern) so lightweight models can succeed reliably without context dilution.
-- **Minimal Context**: Each agent only receives its contract, direct parent constraints, and sibling goals. It does not carry the full ancestral chain.
+- **Minimal Context**: Each agent only receives its contract (including its inherited constraints) and sibling goals. It does not carry the full ancestral chain, and every injected collection is bounded so a prompt cannot grow with the project's age or breadth.
 - **Fail-Safe & Auto-Healing Retries**: Nodes retry up to 3 times on runtime errors or verification failures, feeding back precise failure reasons so the model corrects its output.
 - **Upward Escalation**: A node that finds an inherited assumption false suspends its branch and reopens the ancestor that owns it, which resolves with `amend`, `overrule`, `replan`, or `depends_on`. A challenged assumption is not treated as an accepted constraint until the owner has ruled.
 - **Fail-Closed Completion & Verification**: No decision is an error and a retry, never a fabricated `complete`; a completion must be backed by a real git diff; the critic's verdict must be an explicit `PASS` with per-criterion results.
+- **Per-Node Isolation**: Nodes execute one at a time on the shared working tree, so each node's diff, verification and commit are exactly its own; a failed node's uncommitted files are reverted before the next node runs. The harness's own paths never enter the user's repository.
 - **Interactive TUI Steering**: Inspect running nodes, review decisions & constraints, inject new global or subtree constraints, and trigger retries directly from the live TUI.
 
 ## Installation
@@ -150,7 +151,7 @@ The picker is only opened on a real terminal; headless runs never prompt.
 | `FRACTAL_CALL_TOKENS` | unset | Tokens charged per model call, overriding the character-based estimate |
 | `FRACTAL_MAX_STEPS` | `500` | Backstop loop bound for a single run |
 | `FRACTAL_TIMEOUT` | `300` | Seconds before a stuck node is killed |
-| `FRACTAL_PARALLEL` | `4` | Number of concurrent nodes executed in parallel |
+| `FRACTAL_PARALLEL` | `4` | Nodes selected per scheduling batch; execution is serialized (see Per-Node Isolation) |
 
 ### Budgets
 
@@ -167,6 +168,25 @@ economically instead of by depth alone:
 
 `FRACTAL_CALL_TOKENS` calibrates the per-call debit for providers that do not
 report exact usage; without it, four characters are counted as one token.
+
+### Per-node isolation and workspace exclusion
+
+Nodes run one at a time against the single live project tree. That is deliberate:
+agents edit the real repository in place, so two nodes writing concurrently
+cannot be attributed - the second node's `git diff` would contain the first's
+uncommitted files, and `git add` could commit a sibling's work under the wrong
+node. Serializing the whole node (not just verify+commit) means each node's diff,
+verification and commit are exactly its own, and a node that fails terminally has
+its uncommitted files reverted before the next node starts. Git index mutation is
+guarded process-wide.
+
+The harness never commits its own working directories into the project. `tree/`,
+`.fractal/` (including SQLite `-wal`/`-shm`), `global/`, `dist/`, `trace.json`,
+`digest.md` and `.fractal_decision_*` are written to the repository's local
+`.git/info/exclude` and are also excluded from every `git add`, `git status` and
+diff the harness runs. A pre-existing `.gitignore` is never modified or replaced,
+so running inside a real repository cannot pollute its history with harness
+internals.
 
 ### Durability and trust boundary
 
@@ -187,9 +207,9 @@ and accounts where that blast radius is acceptable.
 The canonical implementation is Rust. The design spec is `docs/SPEC.md` and the
 build contracts are in `contracts/`. Upward escalation, fail-closed completion
 and verification, deterministic non-interactive termination, enforced budgets,
-dependency staleness, and the `omp`/`pi`/`opencode` executors are implemented.
-Known gaps tracked for follow-up work: per-node isolation, bounded context, and
-crash-safe reaping of gate subprocesses.
+dependency staleness, per-node isolation, workspace exclusion, bounded per-node
+context, and the `omp`/`pi`/`opencode` executors are implemented. Known gaps
+tracked for follow-up work: crash-safe reaping of gate subprocesses.
 
 ## License
 

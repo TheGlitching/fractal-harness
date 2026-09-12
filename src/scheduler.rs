@@ -192,46 +192,51 @@ pub fn run(
             s.stats = sn;
         }
 
-        use std::sync::mpsc;
-        let (tx, rx) = mpsc::channel::<(String, std::result::Result<RunReport, String>)>();
-
-        std::thread::scope(|scope| {
-            for node in batch {
-                let state_ttui = state.clone();
-                let state_output = state.clone();
-                let nid = node.id.clone();
-                let n = node.clone();
-                let m = model_owned.clone();
-                let tx = tx.clone();
-                let on_output: crate::runner::OutputFn = Arc::new(move |line: &str| {
-                    if let Ok(mut s) = state_output.lock() {
-                        let clean = line.trim().to_string();
-                        s.log_lines.push(clean.clone());
-                        s.node_activities.insert(nid.clone(), clean.clone());
-                        if !clean.is_empty() {
-                            s.last_activity = clean;
-                        }
+        // Nodes execute one at a time on the shared working tree.
+        //
+        // Concurrent nodes in one directory cannot be attributed: a sibling's
+        // uncommitted files appear in this node's diff, `git add` would commit
+        // them under the wrong node, and a failed attempt's files would leak
+        // into the next node. Per-node git worktrees were considered and
+        // rejected: the in-place model has parents and children share a single
+        // tree and `dist/`, so isolating each node would require cross-worktree
+        // merges the tree's dependency model does not describe. Serializing the
+        // whole node - not just verify+commit - is the low-risk correct option:
+        // no sibling can hold uncommitted work while this node runs, so its
+        // diff, verification and commit are exactly its own. `FRACTAL_PARALLEL`
+        // is retained as a batch hint; execution stays serialized.
+        for node in batch {
+            let state_output = state.clone();
+            let nid = node.id.clone();
+            let on_output: crate::runner::OutputFn = Arc::new(move |line: &str| {
+                if let Ok(mut s) = state_output.lock() {
+                    let clean = line.trim().to_string();
+                    s.log_lines.push(clean.clone());
+                    s.node_activities.insert(nid.clone(), clean.clone());
+                    if !clean.is_empty() {
+                        s.last_activity = clean;
                     }
-                });
+                }
+            });
 
-                scope.spawn(move || {
-                    let r = run_one_node(store, &n, &m, on_output, &state_ttui);
-                    let _ = tx.send((n.id.clone(), r));
-                });
-            }
-            drop(tx);
-        });
-
-        for (node_id, result) in rx.iter() {
+            let result = run_one_node(store, node, &model_owned, on_output, state);
             match result {
                 Ok(sub) => {
+                    let failed = sub.failed > 0;
                     report.merge(&sub);
+                    if failed {
+                        let nodes = store.walk().unwrap_or_default();
+                        if let Some(n) = nodes.iter().find(|n2| n2.id == node.id) {
+                            revert_failed_node(store, n);
+                        }
+                    }
                 }
                 Err(e) => {
                     let nodes = store.walk().unwrap_or_default();
-                    if let Some(n) = nodes.iter().find(|n2| n2.id == node_id) {
+                    if let Some(n) = nodes.iter().find(|n2| n2.id == node.id) {
                         let _ = store.append_decision(n, &format!("error: {e}"));
                         let _ = store.set_status(n, FAILED);
+                        revert_failed_node(store, n);
                         report.failed += 1;
                     }
                 }
@@ -420,6 +425,20 @@ fn reject_split_topology(contracts: &[Contract], existing: &[String]) -> Option<
         );
     }
     None
+}
+
+/// A terminally failed node must not leave its half-written work in the shared
+/// tree. Revert its uncommitted files so the next node's diff, verification and
+/// commit see only that next node's work. Ignored harness paths survive.
+fn revert_failed_node(store: &Store, node: &Node) {
+    if let Err(e) = crate::git::reset_uncommitted(&store.root) {
+        store
+            .append_log(
+                node,
+                &serde_json::json!({"event":"revert_failed","error":e}),
+            )
+            .ok();
+    }
 }
 
 fn run_one_node(
