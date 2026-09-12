@@ -995,10 +995,33 @@ fn run_one_node(
                     continue;
                 }
 
-                // Fail closed on an empty diff. A leaf is where work lands, so
-                // a leaf that describes its work but changed nothing on disk has
-                // not delivered its contract - however plausible its prose.
-                if !has_children && !crate::git::has_uncommitted_changes(&store.root) {
+                // Gate 1: the project's own commands. Their exit codes are the
+                // only evidence that cannot be talked around, so they run before
+                // any critic is consulted.
+                //
+                // Scope matters: a leaf is held only to gates its contract names,
+                // because whole-project commands cannot pass until its siblings
+                // exist. Integrating parents carry the project-wide suite, which
+                // is exactly where cross-module breakage is both detectable and
+                // fixable - and where `reopen` can push it back down.
+                let contract = node.contract();
+                let scope = gate_scope(node, aggregating);
+                let gates =
+                    crate::verify::resolve_gates(&store.root, &contract.verification, scope);
+                let changed = crate::git::has_uncommitted_changes(&store.root);
+                let no_diff = !has_children && !changed;
+
+                // Fail closed on an empty diff: a leaf is where work lands, so a
+                // leaf that describes its work but changed nothing on disk has
+                // not delivered its contract - however plausible its prose. The
+                // exception is a node whose own gates pass against the existing
+                // tree: a sibling may already have satisfied its contract, and a
+                // node that can prove it (trial 5 run B's redundant tests child)
+                // must be able to complete instead of burning every retry and
+                // failing the whole root. A node with no gate at all has nothing
+                // to prove the work exists, so the anti-fabrication guard stands.
+                let satisfied_by_existing = no_diff && !gates.is_empty();
+                if no_diff && gates.is_empty() {
                     report.verify_failures += 1;
                     report.refused += 1;
                     store
@@ -1019,19 +1042,6 @@ fn run_one_node(
                     continue;
                 }
 
-                // Gate 1: the project's own commands. Their exit codes are the
-                // only evidence that cannot be talked around, so they run before
-                // any critic is consulted.
-                //
-                // Scope matters: a leaf is held only to gates its contract names,
-                // because whole-project commands cannot pass until its siblings
-                // exist. Integrating parents carry the project-wide suite, which
-                // is exactly where cross-module breakage is both detectable and
-                // fixable - and where `reopen` can push it back down.
-                let contract = node.contract();
-                let scope = gate_scope(node, aggregating);
-                let gates =
-                    crate::verify::resolve_gates(&store.root, &contract.verification, scope);
                 if !gates.is_empty() {
                     on_output(&format!(
                         "  [{}] running {} verification gate(s)",
@@ -1137,6 +1147,14 @@ fn run_one_node(
                             )
                             .map_err(|e| e.to_string())?;
                         store.append_decision(node, "verified: verdict=PASS").ok();
+                        if satisfied_by_existing {
+                            store
+                                .append_decision(
+                                    node,
+                                    "satisfied by existing artefacts: changed no file, own gates passed",
+                                )
+                                .ok();
+                        }
 
                         // One commit per verified node, so the code's history and
                         // the tree's history are the same history and any single

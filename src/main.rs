@@ -217,6 +217,9 @@ fn main() {
                 eprintln!("fractal: {e}");
                 std::process::exit(2);
             }
+            // Match `status`: repair topology from disk before reading it, so a
+            // completed root is never reported from a stale running row.
+            let _ = s.reconcile();
             match s.generate_digest() {
                 Ok(text) => {
                     let path = project.join("digest.md");
