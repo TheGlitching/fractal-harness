@@ -555,8 +555,29 @@ impl Store {
         }
 
         let budget = self.budget_enabled();
-        let allocations: Vec<i64> = contracts.iter().map(|c| c.allocation.max(0)).collect();
+        let explicit: Vec<i64> = contracts.iter().map(|c| c.allocation.max(0)).collect();
         let fee = self.split_fee();
+        // A subtask that omits `allocation` - which the split template never asks
+        // for - must not be created with a zero allowance and fail "token budget
+        // exhausted" before it can run. Undefined allocations inherit an equal
+        // share of the parent's remaining allowance, so the parent's budget still
+        // bounds the whole subtree.
+        let parent_remaining = if budget {
+            self.budget_remaining(&parent.id).unwrap_or(0).max(0)
+        } else {
+            0
+        };
+        let explicit_total: i64 = explicit.iter().sum();
+        let unallocated = explicit.iter().filter(|a| **a == 0).count() as i64;
+        let share = if unallocated > 0 {
+            ((parent_remaining - explicit_total).max(0)) / unallocated
+        } else {
+            0
+        };
+        let allocations: Vec<i64> = explicit
+            .iter()
+            .map(|a| if *a == 0 { share } else { *a })
+            .collect();
         let stamp = now();
         self.with_conn(|conn| {
             for ch in &children {
@@ -1836,6 +1857,92 @@ mod tests {
         assert_eq!(
             store.budget_remaining(&grandchildren[0].id).unwrap(),
             100 - fee
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// D1 regression: the model omitted `allocation` (the split template never
+    /// asks for one), so every child was created with `allowance = 0` and its
+    /// remaining computed as `0 - split_fee = -200`, failing the whole run
+    /// before any child could run. Omitted allocations must be funded from the
+    /// parent's remaining allowance.
+    #[test]
+    fn omitted_allocations_are_funded_from_the_parent() {
+        let (store, dir) = temp_store("budget_inherit");
+        let root = store
+            .init_with_budget("build a real thing", Some(300_000))
+            .unwrap();
+        // The root has already spent tokens on its split call, as in run 1.
+        store.debit_call(&root, 2987).unwrap();
+
+        let children = store
+            .add_children(
+                &root,
+                &[
+                    Contract {
+                        goal: "a".into(),
+                        id: "a".into(),
+                        allocation: 0,
+                        ..Default::default()
+                    },
+                    Contract {
+                        goal: "b".into(),
+                        id: "b".into(),
+                        allocation: 0,
+                        ..Default::default()
+                    },
+                ],
+            )
+            .unwrap();
+
+        for child in &children {
+            let remaining = store.budget_remaining(&child.id).unwrap();
+            assert!(
+                remaining > 0,
+                "child {} with an omitted allocation is not runnable: remaining = {remaining}",
+                child.id
+            );
+        }
+        // Both inherited children share what the parent had left; the parent
+        // does not mint budget for them.
+        let first = store.budget_remaining(&children[0].id).unwrap();
+        let second = store.budget_remaining(&children[1].id).unwrap();
+        assert_eq!(first, second, "inherited shares should be equal");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Mixed splits: explicit allocations are honoured, only the omitted ones
+    /// inherit the leftover.
+    #[test]
+    fn explicit_allocations_win_over_inherited_shares() {
+        let (store, dir) = temp_store("budget_mixed");
+        let root = store
+            .init_with_budget("build a real thing", Some(1000))
+            .unwrap();
+        let fee = store.split_fee();
+        let children = store
+            .add_children(
+                &root,
+                &[
+                    Contract {
+                        goal: "explicit".into(),
+                        id: "a".into(),
+                        allocation: 300,
+                        ..Default::default()
+                    },
+                    Contract {
+                        goal: "inherit".into(),
+                        id: "b".into(),
+                        allocation: 0,
+                        ..Default::default()
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(store.budget_remaining(&children[0].id).unwrap(), 300 - fee);
+        assert!(
+            store.budget_remaining(&children[1].id).unwrap() > 0,
+            "the omitted allocation should have inherited a spendable share"
         );
         let _ = fs::remove_dir_all(&dir);
     }

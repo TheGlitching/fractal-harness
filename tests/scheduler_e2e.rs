@@ -37,10 +37,20 @@ complete() {
   echo "{\"verb\":\"complete\",\"deliverable\":\"done\",\"summary\":\"did the task\"}"
 }
 
-# Critic invocations carry no FRACTAL_NODE_ID, so always pass with a real
-# per-criterion result (a bare PASS with no criteria is now a FAIL).
+# Critic invocations carry no FRACTAL_NODE_ID. The full critic prompt is passed
+# inline as the last argument, so echo the node's own acceptance criteria back
+# verbatim (a verdict grading foreign criteria is now rejected, and a bare PASS
+# with no criteria has always been a FAIL).
 if [ -z "$NODE" ]; then
-  echo '{"verdict":"PASS","reason":"fake critic passes","criteria":[{"name":"the task is done","pass":true,"reason":"fake"}]}'
+  CRIT="$(printf '%s' "${!#}" | awk '
+    /^Acceptance criteria:/ {grab=1; next}
+    /^Deliverable summary:/ {grab=0}
+    grab && /^  - / {sub(/^  - /, ""); n++; printf "%s{\"name\":\"%s\",\"pass\":true,\"reason\":\"fake\"}", (n>1?",":""), $0}
+  ')"
+  if [ -z "$CRIT" ]; then
+    CRIT='{"name":"the task is done","pass":true,"reason":"fake"}'
+  fi
+  echo "{\"verdict\":\"PASS\",\"reason\":\"fake critic passes\",\"criteria\":[${CRIT}]}"
   exit 0
 fi
 
@@ -95,6 +105,13 @@ case "$MODE" in
   gate_fail)
     if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
       echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["the task is done"],"verification":["false"]}]}'
+    else
+      complete
+    fi
+    ;;
+  launch_gate)
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"launch the app","acceptance_criteria":["the task is done"],"verification":["npm start"]}]}'
     else
       complete
     fi
@@ -163,7 +180,15 @@ NODE="${FRACTAL_NODE_ID:-}"
 echo "opencode" > "$ROOT/.opencode_ran"
 
 if [ -z "$NODE" ]; then
-  echo '{"verdict":"PASS","reason":"fake opencode critic passes","criteria":[{"name":"the task is done","pass":true,"reason":"fake"}]}'
+  CRIT="$(printf '%s' "${!#}" | awk '
+    /^Acceptance criteria:/ {grab=1; next}
+    /^Deliverable summary:/ {grab=0}
+    grab && /^  - / {sub(/^  - /, ""); n++; printf "%s{\"name\":\"%s\",\"pass\":true,\"reason\":\"fake\"}", (n>1?",":""), $0}
+  ')"
+  if [ -z "$CRIT" ]; then
+    CRIT='{"name":"the task is done","pass":true,"reason":"fake"}'
+  fi
+  echo "{\"verdict\":\"PASS\",\"reason\":\"fake opencode critic passes\",\"criteria\":[${CRIT}]}"
   exit 0
 fi
 
@@ -434,6 +459,34 @@ fn declared_leaf_gate_is_enforced() {
     assert!(
         !status.contains("[complete]"),
         "a node whose declared gate failed was marked complete:\n{status}"
+    );
+}
+
+/// A gate that launches a long-running app must not wedge the run: the launch is
+/// treated as a PASS once it is demonstrably alive, so a terminal app whose
+/// criterion is "the app launches" can complete.
+#[test]
+fn non_terminating_launch_gate_does_not_wedge_the_run() {
+    let p = Project::new("launchgate", "launch_gate");
+    // `npm start` is recognised as a launch and stays alive, exactly like a TUI.
+    p.install(
+        "npm",
+        "#!/usr/bin/env bash\nif [ \"$1\" = start ]; then sleep 30; fi\nexit 0\n",
+    );
+    let (code, _out, err) = p.run_env(
+        &["init", "build a toy"],
+        Duration::from_secs(60),
+        &[("FRACTAL_LAUNCH_TIMEOUT", "1")],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "a launching gate must let the tree complete; stderr:\n{err}"
+    );
+    let status = p.status();
+    assert!(
+        status.contains("[complete]"),
+        "launch-gated run did not complete:\n{status}"
     );
 }
 

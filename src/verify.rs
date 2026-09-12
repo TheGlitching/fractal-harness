@@ -10,10 +10,26 @@
 //! So the critic is now the *second* gate. The first gate runs the project's own
 //! commands and believes only their exit codes.
 
+use std::fs::File;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 const OUTPUT_CAP: usize = 4000;
+
+/// How long a "launches and displays" gate is allowed to run before it is
+/// considered to have launched successfully. A terminal app or dev server never
+/// exits on its own, so waiting for exit is wrong; a short liveness window is
+/// the honest signal. Overridable for slow CI machines.
+fn launch_smoke_secs() -> u64 {
+    std::env::var("FRACTAL_LAUNCH_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+}
+
+static LAUNCH_LOG_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct GateOutcome {
@@ -102,7 +118,176 @@ fn truncate_tail(text: &str) -> String {
     format!("... [truncated]\n{}", &text[start..])
 }
 
+/// Does this gate start a long-running process rather than a terminating check?
+///
+/// A contract may legitimately say "the app launches" (a TUI or a dev server).
+/// Such a command never exits, so waiting for its exit code wedges the node for
+/// the entire gate timeout and then FAILs a working launch. Recognising these
+/// commands lets them run under a short liveness window instead.
+pub fn is_launch_command(command: &str) -> bool {
+    let tokens: Vec<String> = command
+        .split_whitespace()
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    let Some(first) = tokens.first() else {
+        return false;
+    };
+    if matches!(
+        first.as_str(),
+        "npm" | "yarn" | "pnpm" | "bun" | "cargo" | "go" | "python" | "python3"
+    ) {
+        let rest = &tokens[1..];
+        let rest = if rest.first().map(String::as_str) == Some("run") {
+            &rest[1..]
+        } else {
+            rest
+        };
+        if let Some(script) = rest.first() {
+            if matches!(
+                script.as_str(),
+                "start" | "serve" | "dev" | "preview" | "watch"
+            ) {
+                return true;
+            }
+        }
+    }
+    // A bare process told to serve/watch. Exclude test and build commands so
+    // `npm test --watch` is never mistaken for a launch.
+    if !tokens
+        .iter()
+        .any(|t| t == "test" || t == "build" || t.contains("test"))
+        && tokens
+            .iter()
+            .any(|t| t == "--serve" || t == "--watch" || t == "--hot")
+    {
+        return true;
+    }
+    false
+}
+
+#[cfg(unix)]
+fn kill_process_group(child: &mut std::process::Child) {
+    let pid = child.id();
+    // The child leads its own process group (see `process_group(0)`), so signal
+    // the whole group: `npm start` must not leave the launched app running after
+    // the gate ends.
+    let _ = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "kill -TERM -{pid} 2>/dev/null; sleep 0.3; kill -KILL -{pid} 2>/dev/null"
+        ))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
+    std::thread::sleep(Duration::from_millis(100));
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Run a gate that is expected to keep running. Output goes to a log file rather
+/// than a pipe: a launcher that forks children would otherwise keep the pipe's
+/// write end open and block a read to EOF even after the direct child is killed.
+fn run_launch_gate(root: &Path, command: &str, smoke_secs: u64) -> GateOutcome {
+    let log_path = std::env::temp_dir().join(format!(
+        "fractal_launch_{}_{}.log",
+        std::process::id(),
+        LAUNCH_LOG_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let log = match File::create(&log_path) {
+        Ok(f) => f,
+        Err(e) => {
+            return GateOutcome {
+                command: command.to_string(),
+                passed: false,
+                output: format!("could not create launch log: {e}"),
+            }
+        }
+    };
+    let stderr = log.try_clone().ok();
+
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log));
+    if let Some(stderr) = stderr {
+        cmd.stderr(Stdio::from(stderr));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&log_path);
+            return GateOutcome {
+                command: command.to_string(),
+                passed: false,
+                output: format!("could not start gate: {e}"),
+            };
+        }
+    };
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut text = std::fs::read_to_string(&log_path).unwrap_or_default();
+                let _ = std::fs::remove_file(&log_path);
+                if text.trim().is_empty() {
+                    text = format!("command exited with {status} before the launch window");
+                }
+                return GateOutcome {
+                    command: command.to_string(),
+                    passed: status.success(),
+                    output: truncate_tail(text.trim()),
+                };
+            }
+            Ok(None) => {
+                if start.elapsed().as_secs() >= smoke_secs {
+                    kill_process_group(&mut child);
+                    let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+                    let _ = std::fs::remove_file(&log_path);
+                    return GateOutcome {
+                        command: command.to_string(),
+                        passed: true,
+                        output: truncate_tail(
+                            format!(
+                                "still running after {smoke_secs}s - treated as a successful launch\n{}",
+                                text.trim()
+                            )
+                            .trim(),
+                        ),
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&log_path);
+                return GateOutcome {
+                    command: command.to_string(),
+                    passed: false,
+                    output: format!("gate wait failed: {e}"),
+                };
+            }
+        }
+    }
+}
+
 pub fn run_gate(root: &Path, command: &str, timeout_secs: u64) -> GateOutcome {
+    if is_launch_command(command) {
+        return run_launch_gate(root, command, launch_smoke_secs());
+    }
     let child = Command::new("/bin/sh")
         .arg("-c")
         .arg(command)
@@ -316,5 +501,64 @@ mod tests {
         let text = format_failures(&outcomes).unwrap();
         assert!(text.contains("npx tsc --noEmit"));
         assert!(text.contains("error TS2322"));
+    }
+
+    #[test]
+    fn launch_commands_are_recognised() {
+        assert!(is_launch_command("npm start"));
+        assert!(is_launch_command("npm run dev"));
+        assert!(is_launch_command("yarn serve"));
+        assert!(is_launch_command("pnpm run preview"));
+        assert!(is_launch_command("node dist/index.js --serve"));
+        assert!(is_launch_command("cargo run -- --watch"));
+        assert!(!is_launch_command("npm test"));
+        assert!(!is_launch_command("npm run build"));
+        assert!(!is_launch_command("npm test --watch"));
+        assert!(!is_launch_command(""));
+    }
+
+    /// D4 regression: a gate that launches a long-running app must PASS once it
+    /// is demonstrably alive, instead of blocking for the whole gate timeout and
+    /// failing a working launch.
+    #[test]
+    fn a_live_launch_gate_passes_with_captured_output() {
+        let dir = temp_dir("launch");
+        let outcome = run_launch_gate(&dir, "echo launched-ok; exec sleep 30", 1);
+        assert!(
+            outcome.passed,
+            "a live launch must be treated as success: {}",
+            outcome.output
+        );
+        assert!(
+            outcome.output.contains("still running"),
+            "launch pass must say it was alive: {}",
+            outcome.output
+        );
+        assert!(
+            outcome.output.contains("launched-ok"),
+            "launch pass must capture output: {}",
+            outcome.output
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_launch_that_crashes_immediately_fails() {
+        let dir = temp_dir("launchcrash");
+        let outcome = run_launch_gate(&dir, "exit 7", 1);
+        assert!(
+            !outcome.passed,
+            "a launch that exits non-zero is not a launch"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_early_successful_exit_is_still_a_pass() {
+        let dir = temp_dir("launchexit");
+        let outcome = run_launch_gate(&dir, "echo done", 1);
+        assert!(outcome.passed, "a launch that exits 0 is a pass");
+        assert!(outcome.output.contains("done"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

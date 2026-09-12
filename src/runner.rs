@@ -862,13 +862,19 @@ pub fn call_critic(
         let mut cmd = Command::new(&bin);
         cmd.arg("run").arg("--auto");
         cmd.current_dir(&temp_dir);
+        // opencode resolves its project - and therefore which CLAUDE.md it loads
+        // - from the inherited `PWD`, not the process cwd. Leaving `PWD` at the
+        // project root made the critic read no criteria at all and invent them
+        // from the repository. Pass the whole prompt inline and point `PWD` at
+        // the same temp dir so delivery cannot depend on that resolution.
+        cmd.env("PWD", &temp_dir);
         if !model.is_empty() && model != "default" {
             cmd.arg("--model").arg(model);
         }
         if std::env::var_os("OPENCODE_CONFIG_CONTENT").is_none() {
             cmd.env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#);
         }
-        cmd.arg("Review against acceptance criteria. Output JSON verdict.");
+        cmd.arg(&claude_md);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let output = cmd
             .output()
@@ -888,7 +894,7 @@ pub fn call_critic(
         if !model.is_empty() && model != "default" {
             cmd.arg(format!("--model={model}"));
         }
-        cmd.arg("Review against acceptance criteria. Output JSON verdict.");
+        cmd.arg(&claude_md);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let output = cmd
             .output()
@@ -931,6 +937,10 @@ FAIL if the diff adds a module nothing imports, when the contract required \
 working behaviour.
 For a node whose children already produced and verified the work, judge those \
 verified child results against the acceptance criteria instead.
+Judge ONLY the acceptance criteria listed above, which belong to this node. Do \
+not invent criteria and do not judge another node's work: the criteria of a \
+parent or a sibling are not yours to grade. In the JSON, copy each acceptance \
+criterion's text verbatim into its `name`.
 
 Output ONLY a JSON object:
 {\"verdict\": \"PASS\" | \"FAIL\", \"reason\": \"...\", \"criteria\": [{\"name\": \"...\", \"pass\": true | false, \"reason\": \"...\"}]}
@@ -1017,7 +1027,20 @@ pub fn verify_node(
         }
     );
     let message = call_critic(store, node, &prompt, model)?;
-    parse_verdict(&message)
+    let (verdict, details) = parse_verdict(&message)?;
+    // Reject a verdict that grades criteria belonging to another node. It is
+    // retried with feedback rather than trusted, so a critic that never saw the
+    // node's criteria cannot fail a correct leaf for its siblings' absent work.
+    if !verdict_matches_criteria(criteria, &details) {
+        let reason = "the verdict did not address this node's own acceptance criteria; \
+                      grade only the criteria listed for this node"
+            .to_string();
+        return Ok((
+            "FAIL".to_string(),
+            vec![serde_json::json!({"name": "verdict scope", "pass": false, "reason": reason})],
+        ));
+    }
+    Ok((verdict, details))
 }
 
 fn result_from_payload(
@@ -1213,6 +1236,56 @@ fn result_from_payload(
     Ok(r)
 }
 
+/// Lowercase alphanumeric fingerprint of a criterion, so punctuation and case
+/// differences do not hide a verbatim copy.
+fn normalize_criterion(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// True when two criteria refer to the same requirement: an exact match after
+/// normalization, or one containing the other (the critic may append its own
+/// parenthetical detail to a copied criterion).
+fn criterion_matches(returned: &str, criterion: &str) -> bool {
+    !returned.is_empty()
+        && !criterion.is_empty()
+        && (returned == criterion || returned.contains(criterion) || criterion.contains(returned))
+}
+
+/// A verdict is only evidence about *this* node when it grades this node's own
+/// acceptance criteria. A critic that never received them (the D2 defect) or
+/// that reached into a parent's or sibling's contract invents foreign criteria;
+/// those must be rejected and retried rather than scored.
+fn verdict_matches_criteria(criteria: &[String], details: &[Value]) -> bool {
+    if criteria.is_empty() {
+        return true;
+    }
+    let names: Vec<String> = details
+        .iter()
+        .filter_map(|c| c.get("name").and_then(|n| n.as_str()))
+        .map(normalize_criterion)
+        .filter(|n| !n.is_empty())
+        .collect();
+    if names.is_empty() {
+        return false;
+    }
+    let own: Vec<String> = criteria.iter().map(|c| normalize_criterion(c)).collect();
+    // No criterion belongs to someone else.
+    let foreign_free = names
+        .iter()
+        .all(|n| own.iter().any(|c| criterion_matches(n, c)));
+    // Every one of this node's criteria is actually addressed.
+    let all_addressed = own
+        .iter()
+        .all(|c| names.iter().any(|n| criterion_matches(n, c)));
+    foreign_free && all_addressed
+}
+
 fn parse_verdict(msg: &Value) -> std::result::Result<(String, Vec<Value>), RunnerError> {
     let content = msg
         .get("content")
@@ -1333,6 +1406,58 @@ Working..."#;
         let (verdict, details) = parse_verdict(&real).unwrap();
         assert_eq!(verdict, "PASS");
         assert_eq!(details.len(), 1);
+    }
+
+    /// The D2 regression: a critic that never received the node's criteria
+    /// returned the root's, and failed a correct scaffolding leaf for its
+    /// siblings' absent work. Those foreign criteria must be rejected.
+    #[test]
+    fn verdict_scoped_to_another_nodes_criteria_is_rejected() {
+        let own = vec![
+            "package.json with name, scripts (build, typecheck, test, start)".to_string(),
+            "tsconfig.json with strict mode".to_string(),
+            "project compiles with npm run build and npm run typecheck".to_string(),
+        ];
+        let root_criteria: Vec<Value> = serde_json::from_str(
+            r#"[
+                {"name":"the goal is delivered in full","pass":false,"reason":"siblings missing"},
+                {"name":"all the pieces are assembled into one working whole, not left as independent modules","pass":false,"reason":"siblings missing"},
+                {"name":"the project's own build, typecheck and test commands pass","pass":false,"reason":"trivial"}
+            ]"#,
+        )
+        .unwrap();
+        assert!(
+            !verdict_matches_criteria(&own, &root_criteria),
+            "a verdict grading another node's criteria must be rejected"
+        );
+    }
+
+    #[test]
+    fn verdict_that_addresses_every_own_criterion_is_accepted() {
+        let own = vec![
+            "Holdings saved to JSON file on disk".to_string(),
+            "Holdings loaded on app start".to_string(),
+            "Add/remove holdings persisted".to_string(),
+            "State survives app restart".to_string(),
+        ];
+        let returned: Vec<Value> = serde_json::from_str(
+            r#"[
+                {"name":"Holdings saved to JSON file on disk","pass":true,"reason":"ok"},
+                {"name":"Holdings loaded on app start","pass":false,"reason":"main() empty"},
+                {"name":"Add/remove holdings persisted","pass":true,"reason":"ok"},
+                {"name":"State survives app restart","pass":true,"reason":"ok"}
+            ]"#,
+        )
+        .unwrap();
+        assert!(verdict_matches_criteria(&own, &returned));
+    }
+
+    #[test]
+    fn verdict_missing_a_criterion_is_not_accepted() {
+        let own = vec!["alpha works".to_string(), "beta works".to_string()];
+        let returned: Vec<Value> =
+            serde_json::from_str(r#"[{"name":"alpha works","pass":true,"reason":"ok"}]"#).unwrap();
+        assert!(!verdict_matches_criteria(&own, &returned));
     }
 
     /// Per-node context must not grow with the project's age (steering events),
