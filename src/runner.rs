@@ -499,9 +499,33 @@ fn extract_object_with_keys(text: &str, keys: &[&str]) -> Option<Value> {
     None
 }
 
-/// A node's decision: must carry a `verb`.
+/// A node's decision: must carry a `verb`, or the `decision` alias a small model
+/// commonly emits for the same value. Still fail-closed: an alias that does not
+/// resolve to a usable verb is not a decision.
 pub fn extract_decision(text: &str) -> Option<Value> {
-    extract_object_with_keys(text, &["verb"])
+    extract_object_with_keys(text, &["verb", "decision"])
+        .map(normalize_verb_alias)
+        .filter(|v| v.get("verb").and_then(|x| x.as_str()).is_some())
+}
+
+/// Accept `decision` as an alias for `verb`. The value must be a non-empty
+/// string; it is copied into `verb` so every downstream reader sees one key.
+/// Still fail-closed: a `decision` that is not a usable string yields no verb.
+fn normalize_verb_alias(mut v: Value) -> Value {
+    let has_verb = v
+        .get("verb")
+        .and_then(|x| x.as_str())
+        .is_some_and(|s| !s.is_empty());
+    if !has_verb {
+        if let Some(alias) = v
+            .get("decision")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            v["verb"] = Value::String(alias.to_string());
+        }
+    }
+    v
 }
 
 /// A critic's verdict: must carry a `verdict`. A `{"verb":...}` object is not a
@@ -553,14 +577,19 @@ fn command_line_to_decision(line: &str, project_root: &Path) -> Option<Value> {
 }
 
 /// `fractal done --summary "..."` (or a bare positional summary) -> `complete`.
+/// A bare `fractal done` is still an explicit completion, so it recovers with a
+/// placeholder summary instead of being discarded and burning a retry; the
+/// empty-diff and critic checks still decide whether anything was delivered.
 fn done_command_decision(rest: &str) -> Option<Value> {
     let summary = flag_value(rest, &["--summary", "-s"])
         .unwrap_or_else(|| command_value(rest))
         .trim()
         .to_string();
-    if summary.is_empty() {
-        return None;
-    }
+    let summary = if summary.is_empty() {
+        "completed".to_string()
+    } else {
+        summary
+    };
     Some(serde_json::json!({
         "verb": COMPLETE_VERB,
         "summary": summary,
@@ -849,6 +878,7 @@ fn decide(
     } else {
         None
     }
+    .map(normalize_verb_alias)
     .filter(|v| v.get("verb").and_then(|v| v.as_str()).is_some())
     .or_else(|| extract_decision(all_text))
     .or_else(|| {
@@ -1090,10 +1120,18 @@ The 'Actual code change' section is the git diff of this work. It is ground trut
 the deliverable summary is only a claim. Where they disagree, believe the diff.
 
 The harness caps how much evidence it can show for length. When it does, the cut is \
-marked explicitly and the omitted text was removed by the harness, not by the node. \
-Never FAIL a deliverable merely because a preview ended or a file was cut for length; \
-judge what is present and say what you could not see, rather than treating the \
-harness's cap as the node's incomplete work.
+marked explicitly and the omitted text was removed by the harness, not by the node: \
+never treat a preview that ends as the node shipping truncated work. \
+But a cut is not evidence either. If the visible evidence does not let you judge a \
+criterion, do not PASS that criterion on the strength of the deliverable summary - \
+mark it not-passed and say plainly what you could not see. Fail closed on unseen \
+evidence; the missing bytes are the harness's limit, not the node's failure.
+
+Judge only the evidence supplied in this prompt. Do not search the filesystem, do not \
+run the project's commands, and do not look for the project elsewhere on disk: you are \
+given a sandbox with no project access by design, and files found outside it are not \
+the evidence this verdict is accountable to. If the supplied evidence cannot settle a \
+criterion, say so and fail closed rather than going to find more.
 
 FAIL if the diff is empty for a node that was supposed to implement something.
 FAIL if the diff adds a stub, placeholder, mock, hardcoded sample data, or a \
@@ -1605,6 +1643,26 @@ Working..."#;
         assert_eq!(val.get("verb").unwrap(), "complete");
     }
 
+    /// M1: a small model that emits `decision` instead of `verb` made the same
+    /// completion declaration. It must recover, with the value copied so every
+    /// downstream reader still sees `verb`.
+    #[test]
+    fn decision_is_recovered_as_an_alias_for_verb() {
+        let text = r#"All done:
+{"decision":"complete","summary":"all children verified","deliverable":"the app"}"#;
+        let val = extract_decision(text).expect("decision alias must be recovered");
+        assert_eq!(val.get("verb").unwrap(), "complete");
+        assert_eq!(val.get("summary").unwrap(), "all children verified");
+    }
+
+    /// Fail closed: a `decision` key whose value is not a usable string is not a
+    /// decision, however decision-shaped the object looks.
+    #[test]
+    fn a_non_string_decision_alias_is_not_recovered() {
+        assert!(extract_decision(r#"{"decision":{"verb":"complete"}}"#).is_none());
+        assert!(extract_decision(r#"{"decision":""}"#).is_none());
+    }
+
     /// A node decision is not a verdict. A critic answering with `{"verb":...}`
     /// must not be scored PASS.
     #[test]
@@ -1862,6 +1920,20 @@ Working..."#;
         assert!(transcript_command_decision(instruction, Path::new(".")).is_none());
         assert!(transcript_command_decision("working...", Path::new(".")).is_none());
         assert!(transcript_command_decision("", Path::new(".")).is_none());
+    }
+
+    /// M1: a bare narrated `fractal done` (no `--summary`) is an explicit
+    /// completion and must recover, so an aggregating parent is not failed six
+    /// times for saying the right thing in the wrong shape.
+    #[test]
+    fn a_bare_narrated_done_is_recovered() {
+        let d = transcript_command_decision("All children passed.\nfractal done", Path::new("."))
+            .expect("a bare `fractal done` must recover");
+        assert_eq!(d.get("verb").unwrap(), "complete");
+        assert!(
+            !d.get("summary").unwrap().as_str().unwrap().is_empty(),
+            "a recovered completion needs a non-empty summary"
+        );
     }
 
     /// Only the tail is scanned, so a command quoted early in a long transcript
