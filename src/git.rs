@@ -26,6 +26,23 @@ dist/
 trace.json
 digest.md
 .fractal_decision_*
+# dependency trees, build caches and runtime junk - a node's diff is its work,
+# not the 5000 files `npm install` happened to leave behind
+node_modules/
+.pnpm-store/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+coverage/
+.pytest_cache/
+.next/
+.cache/
 ";
 
 /// `git add` that stages everything a node authored but no harness path.
@@ -161,6 +178,10 @@ pub fn ensure_repo(root: &Path) -> Result<(), String> {
 }
 
 /// Write the harness's ignore block into `.git/info/exclude`, idempotently.
+///
+/// A project created by an older harness already carries the marker comment and
+/// would otherwise never receive later additions (e.g. `node_modules/`), so this
+/// reconciles line by line rather than skipping wholesale when the marker exists.
 fn ensure_excludes(root: &Path) -> Result<(), String> {
     let rel = git(root, &["rev-parse", "--git-path", "info/exclude"])?;
     let path = {
@@ -172,17 +193,92 @@ fn ensure_excludes(root: &Path) -> Result<(), String> {
         }
     };
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut content = existing.clone();
+    let mut changed = false;
     if existing.contains("# fractal-harness internals") {
+        for line in HARNESS_EXCLUDES.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if !existing.lines().any(|l| l.trim() == line) {
+                if !content.is_empty() && !content.ends_with('\n') {
+                    content.push('\n');
+                }
+                content.push_str(line);
+                content.push('\n');
+                changed = true;
+            }
+        }
+    } else {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(HARNESS_EXCLUDES);
+        changed = true;
+    }
+    if !changed {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    let mut content = existing;
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
+    std::fs::write(&path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// Untracked, non-ignored files in the working tree, relative to the repo root.
+pub fn untracked_files(root: &Path) -> std::collections::HashSet<String> {
+    git(root, &["ls-files", "--others", "--exclude-standard"])
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Record paths the harness should never commit - runtime state an app wrote
+/// while a verification gate ran (e.g. `.portfolio.json`). `.git/info/exclude`
+/// is local to the clone and never committed, so this keeps the user's own
+/// `.gitignore` untouched while removing the file from every future diff.
+///
+/// ponytail: exact, root-anchored paths only. Globs a generated app might also
+/// write are the app's `.gitignore`'s job; add a config knob if a real project
+/// needs pattern-level exclusion here.
+pub fn ignore_runtime_paths(root: &Path, paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
     }
-    content.push_str(HARNESS_EXCLUDES);
+    let rel = git(root, &["rev-parse", "--git-path", "info/exclude"])?;
+    let path = {
+        let p = PathBuf::from(&rel);
+        if p.is_absolute() {
+            p
+        } else {
+            root.join(p)
+        }
+    };
+    let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut changed = false;
+    for p in paths {
+        let anchored = format!("/{}", p.trim_start_matches('/'));
+        if !content.lines().any(|l| l.trim() == anchored) {
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(&anchored);
+            content.push('\n');
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
     std::fs::write(&path, content).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
 }
@@ -521,6 +617,103 @@ mod tests {
             "evidence must name the new file: {summary}"
         );
         assert!(summary.contains("fn main()"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D5 regression: a JS/TS leaf's `npm install` must not put the dependency
+    /// tree into history, and standard build/cache junk must stay out too.
+    #[test]
+    fn dependency_trees_and_standard_junk_never_enter_history() {
+        let dir = temp_repo("deps");
+        ensure_repo(&dir).unwrap();
+
+        for junk in [
+            "node_modules/left-pad/index.js",
+            ".pnpm-store/meta.json",
+            "__pycache__/mod.pyc",
+            "coverage/lcov.info",
+            "npm-debug.log",
+        ] {
+            let path = dir.join(junk);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "junk").unwrap();
+        }
+        std::fs::write(dir.join("src_app.ts"), "export const x = 1;\n").unwrap();
+
+        let sha = commit_node_work(&dir, "root-01", "work").unwrap().unwrap();
+        let files = git(&dir, &["show", "--format=", "--name-only", &sha]).unwrap();
+        assert_eq!(
+            files, "src_app.ts",
+            "dependency/build junk leaked into the node commit: {files}"
+        );
+        assert!(
+            !has_uncommitted_changes(&dir),
+            "ignored junk must not read as a node-authored change"
+        );
+        assert!(
+            dir.join("node_modules/left-pad/index.js").exists(),
+            "the ignored tree must stay on disk, only out of history"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An existing project created by an older harness already has the exclude
+    /// marker, so a newly added ignore rule must still be merged in.
+    #[test]
+    fn excludes_add_later_rules_to_an_existing_project() {
+        let dir = temp_repo("excludeupgrade");
+        git(&dir, &["init", "-q"]).unwrap();
+        let exclude = dir.join(".git/info/exclude");
+        std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        std::fs::write(
+            &exclude,
+            "# fractal-harness internals - never commit these into the user's history\ntree/\n",
+        )
+        .unwrap();
+
+        ensure_repo(&dir).unwrap();
+
+        let content = std::fs::read_to_string(&exclude).unwrap();
+        assert!(
+            content.lines().any(|l| l.trim() == "node_modules/"),
+            "node_modules was not merged into an existing exclude file:\n{content}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// D5: runtime state an app writes while a gate runs is recorded in the
+    /// harness exclude so it is never committed, while genuine work still is.
+    #[test]
+    fn runtime_state_written_by_a_gate_is_kept_out_of_history() {
+        let dir = temp_repo("runtimestate");
+        ensure_repo(&dir).unwrap();
+
+        // The node's own work lands first...
+        std::fs::write(dir.join("app.ts"), "export const x = 1;\n").unwrap();
+        let before = untracked_files(&dir);
+        // ...then a gate launches the app, which writes runtime state.
+        std::fs::write(dir.join(".portfolio.json"), "{\"holdings\":[]}").unwrap();
+
+        let runtime: Vec<String> = untracked_files(&dir).difference(&before).cloned().collect();
+        assert_eq!(
+            runtime,
+            vec![".portfolio.json".to_string()],
+            "only gate-created state is runtime, the node's source is not"
+        );
+        ignore_runtime_paths(&dir, &runtime).unwrap();
+
+        let sha = commit_node_work(&dir, "root-01", "work").unwrap().unwrap();
+        let files = git(&dir, &["show", "--format=", "--name-only", &sha]).unwrap();
+        assert_eq!(files, "app.ts", "runtime state was committed: {files}");
+        assert!(
+            dir.join(".portfolio.json").exists(),
+            "runtime state should remain on disk, just untracked"
+        );
+        let status = git(&dir, &["status", "--porcelain"]).unwrap();
+        assert!(
+            !status.contains(".portfolio.json"),
+            "runtime state must not pollute status or the next node's diff: {status}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

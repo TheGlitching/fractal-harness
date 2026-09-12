@@ -505,6 +505,141 @@ pub fn extract_verdict(text: &str) -> Option<Value> {
     extract_object_with_keys(text, &["verdict"])
 }
 
+/// M1 mitigation: recover a decision a small model *narrated* instead of
+/// executing.
+///
+/// The recurring failure mode is a leaf doing correct work, then printing a
+/// literal `fractal done --summary "..."` line as prose rather than running it.
+/// The transcript is not a decision channel, so this only fires when no JSON
+/// decision exists, and only on the tail of the output - the prompt itself
+/// contains example commands, and a real narrated command is the model's last
+/// word, not an instruction. The recovered decision then passes through the
+/// identical diff, gate and critic checks: this widens the channel a decision
+/// can arrive on, it does not weaken what counts as delivery.
+pub fn transcript_command_decision(text: &str, project_root: &Path) -> Option<Value> {
+    // Last matching line wins: a model that narrates its command narrates it at
+    // the end, and an earlier mention (if any) is superseded by it.
+    for line in text.lines().rev().take(20) {
+        if let Some(v) = command_line_to_decision(line, project_root) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn command_line_to_decision(line: &str, project_root: &Path) -> Option<Value> {
+    let mut s = line.trim().trim_start_matches(['`', '*', '>', '-', ' ']);
+    if let Some(rest) = s.strip_prefix('$') {
+        s = rest.trim_start();
+    }
+    // Tolerate opencode's tool framing wrapping the command.
+    if s.starts_with('<') {
+        if let Some(gt) = s.find('>') {
+            s = s[gt + 1..].trim_start();
+        }
+    }
+    if let Some(rest) = s.strip_prefix("fractal done") {
+        return done_command_decision(rest);
+    }
+    if let Some(rest) = s.strip_prefix("fractal split") {
+        return split_command_decision(rest, project_root);
+    }
+    None
+}
+
+/// `fractal done --summary "..."` (or a bare positional summary) -> `complete`.
+fn done_command_decision(rest: &str) -> Option<Value> {
+    let summary = flag_value(rest, &["--summary", "-s"])
+        .unwrap_or_else(|| command_value(rest))
+        .trim()
+        .to_string();
+    if summary.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "verb": COMPLETE_VERB,
+        "summary": summary,
+        "deliverable": summary,
+    }))
+}
+
+/// `fractal split --subtasks '[...]'` (inline JSON, `@file` or a path) -> `split`.
+fn split_command_decision(rest: &str, project_root: &Path) -> Option<Value> {
+    let raw = flag_value(rest, &["--subtasks", "-s"]).or_else(|| {
+        let candidate = command_value(rest);
+        if candidate.trim().is_empty() {
+            None
+        } else {
+            Some(candidate)
+        }
+    })?;
+    let raw = raw.trim();
+    let json = if raw.starts_with('[') || raw.starts_with('{') {
+        raw.to_string()
+    } else {
+        let path = raw.trim_start_matches('@').trim();
+        fs::read_to_string(project_root.join(path)).ok()?
+    };
+    let value: Value = serde_json::from_str(&json).ok()?;
+    let subtasks = if value.is_array() {
+        value
+    } else {
+        value.get("subtasks")?.clone()
+    };
+    Some(serde_json::json!({ "verb": SPLIT, "subtasks": subtasks }))
+}
+
+/// Locate one `--flag` and return the shell-like value that follows it.
+fn flag_value(s: &str, flags: &[&str]) -> Option<String> {
+    for flag in flags {
+        let mut search_start = 0;
+        while let Some(pos) = s[search_start..].find(flag) {
+            let abs = search_start + pos;
+            let before_ok = abs == 0
+                || s.as_bytes()
+                    .get(abs - 1)
+                    .is_some_and(|b| b.is_ascii_whitespace());
+            let after = abs + flag.len();
+            let after_ok = s[after..].chars().next().is_some_and(char::is_whitespace);
+            if before_ok && after_ok {
+                return Some(command_value(&s[after..]));
+            }
+            search_start = after;
+        }
+    }
+    None
+}
+
+/// Extract a shell value: `\"...\"`, `"..."`, `'...'`, or the bare remainder.
+/// The trial's real narration ended in `fractal done --summary \"...\"</arg_value>`,
+/// so escaped quotes and trailing tool framing must both be tolerated. The
+/// delimiter is chosen by the value's opening character, not by the first quote
+/// anywhere - a single-quoted subtasks JSON is full of double quotes.
+fn command_value(raw: &str) -> String {
+    let raw = raw.trim();
+    let raw = raw
+        .trim_end_matches("</arg_value>")
+        .trim_end_matches("</argument>")
+        .trim_end();
+    let delim = if raw.starts_with("\\\"") {
+        Some("\\\"")
+    } else if raw.starts_with('"') {
+        Some("\"")
+    } else if raw.starts_with('\'') {
+        Some("'")
+    } else {
+        None
+    };
+    if let Some(delim) = delim {
+        let after = delim.len();
+        if let Some(last_rel) = raw[after..].rfind(delim) {
+            let inner = &raw[after..after + last_rel];
+            return inner.replace("\\\"", "\"").replace("\\\\", "\\");
+        }
+    }
+    raw.to_string()
+}
+
 #[derive(Default, Debug)]
 pub struct VerbResult {
     pub verb: String,
@@ -710,7 +845,26 @@ fn decide(
         None
     }
     .filter(|v| v.get("verb").and_then(|v| v.as_str()).is_some())
-    .or_else(|| extract_decision(all_text));
+    .or_else(|| extract_decision(all_text))
+    .or_else(|| {
+        // M1: a small model may narrate its completion command as prose. Only
+        // consulted when no JSON decision exists, and logged so the recovery is
+        // visible rather than silent.
+        let project_root = decision_file.parent().unwrap_or_else(|| Path::new("."));
+        let recovered = transcript_command_decision(all_text, project_root);
+        if let Some(v) = &recovered {
+            store
+                .append_log(
+                    node,
+                    &serde_json::json!({
+                        "event": "decision_from_transcript",
+                        "verb": v.get("verb").and_then(|x| x.as_str()).unwrap_or(""),
+                    }),
+                )
+                .ok();
+        }
+        recovered
+    });
 
     // Charge before deciding: the model was called whether or not it answered.
     charge_call(store, node, prompt_len, all_text.len());
@@ -1528,6 +1682,80 @@ Working..."#;
             ctx.matches("\n- ").count() <= 200,
             "injected list items were not capped"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M1: the model narrates `fractal done --summary "..."` as text, with
+    /// escaped quotes and opencode's tool framing, instead of executing it.
+    #[test]
+    fn narrated_done_command_recovers_a_complete_decision() {
+        let text = "I implemented the module and verified it.\n\
+                    fractal done --summary \"added portfolioCalc with 25 passing tests\"</arg_value>";
+        let d = transcript_command_decision(text, Path::new(".")).unwrap();
+        assert_eq!(d.get("verb").unwrap(), "complete");
+        assert_eq!(
+            d.get("summary").unwrap(),
+            "added portfolioCalc with 25 passing tests"
+        );
+    }
+
+    #[test]
+    fn narrated_done_with_plain_quotes_is_recovered() {
+        let text = "done\n$ fractal done --summary \"typed the price stream and wired it in\"";
+        let d = transcript_command_decision(text, Path::new(".")).unwrap();
+        assert_eq!(
+            d.get("summary").unwrap(),
+            "typed the price stream and wired it in"
+        );
+    }
+
+    /// M1: a narrated split carries the same subtask JSON a real `fractal split`
+    /// call would, and must be recovered as a split - not a completion.
+    #[test]
+    fn narrated_split_command_recovers_a_split_decision() {
+        let text = "I need to decompose this.\n\
+                    fractal split --subtasks '[{\"id\":\"a\",\"goal\":\"first\"},{\"id\":\"b\",\"goal\":\"second\"}]'";
+        let d = transcript_command_decision(text, Path::new(".")).unwrap();
+        assert_eq!(d.get("verb").unwrap(), "split");
+        assert_eq!(d.get("subtasks").unwrap().as_array().unwrap().len(), 2);
+    }
+
+    /// The prompt's own instruction line mentions both commands with no
+    /// arguments; it must never be mistaken for a decision, and genuinely empty
+    /// output stays fail-closed.
+    #[test]
+    fn a_command_mention_without_arguments_is_not_a_decision() {
+        let instruction = "Signal completion with `fractal done` or split with `fractal split`.";
+        assert!(transcript_command_decision(instruction, Path::new(".")).is_none());
+        assert!(transcript_command_decision("working...", Path::new(".")).is_none());
+        assert!(transcript_command_decision("", Path::new(".")).is_none());
+    }
+
+    /// Only the tail is scanned, so a command quoted early in a long transcript
+    /// (e.g. from the prompt) cannot be replayed as this node's decision.
+    #[test]
+    fn only_the_tail_of_a_long_transcript_is_scanned() {
+        let mut text = String::from("fractal done --summary \"an early example\"\n");
+        for i in 0..30 {
+            text.push_str(&format!("line {i}\n"));
+        }
+        assert!(transcript_command_decision(&text, Path::new(".")).is_none());
+    }
+
+    #[test]
+    fn narrated_split_can_reference_a_subtasks_file() {
+        let dir = std::env::temp_dir().join(format!("fractal_narrated_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("subtasks.json"),
+            r#"[{"id":"only","goal":"do it"}]"#,
+        )
+        .unwrap();
+        let text = "fractal split --subtasks @subtasks.json";
+        let d = transcript_command_decision(text, &dir).unwrap();
+        assert_eq!(d.get("verb").unwrap(), "split");
+        assert_eq!(d.get("subtasks").unwrap().as_array().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
