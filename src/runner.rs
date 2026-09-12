@@ -67,9 +67,70 @@ escalate (report broken assumption), escalate_resolve (settle escalation), \
 note_global (write shared rule).
 ";
 
+/// Per-node context bounds. The captain's core mechanism is small context, so
+/// every collection injected into a prompt is bounded and the contract's
+/// inherited constraints are deduplicated before they are rendered. Without
+/// these, prompt size grows with the number of steering/escalation events, with
+/// the branching factor, and with the size of dependency output.
+const MAX_CONSTRAINTS: usize = 20;
+const MAX_CONSTRAINT_BYTES: usize = 300;
+const MAX_CONSTRAINT_TOTAL_BYTES: usize = 4_000;
+const MAX_DEP_ARTIFACTS: usize = 12;
+const MAX_DEP_ARTIFACT_BYTES: usize = 600;
+const MAX_DEP_TOTAL_BYTES: usize = 6_000;
+const MAX_SIBLINGS: usize = 20;
+const MAX_CHILD_SUMMARIES: usize = 20;
+const MAX_GLOBAL_ENTRIES: usize = 5;
+const MAX_GLOBAL_ENTRY_BYTES: usize = 500;
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}... [truncated]", &s[..cut])
+}
+
+/// Collapse whitespace and truncate one constraint to its canonical form.
+fn normalize_constraint(c: &str) -> String {
+    let norm = c.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_chars(&norm, MAX_CONSTRAINT_BYTES)
+}
+
+/// Deduplicate inherited constraints by normalized text - a propagated
+/// constraint carries no separate origin, so identical text is the same rule -
+/// then cap the count and the total bytes. This is what stops a contract's
+/// "Inherited constraints" section growing with every steering event.
+fn bounded_constraints(raw: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut bytes = 0usize;
+    for c in raw {
+        let text = normalize_constraint(c);
+        if text.is_empty() || !seen.insert(text.to_ascii_lowercase()) {
+            continue;
+        }
+        if out.len() >= MAX_CONSTRAINTS || bytes + text.len() > MAX_CONSTRAINT_TOTAL_BYTES {
+            break;
+        }
+        bytes += text.len();
+        out.push(text);
+    }
+    out
+}
+
+fn bounded_contract(contract: &Contract) -> Contract {
+    let mut out = contract.clone();
+    out.constraints = bounded_constraints(&contract.constraints);
+    out
+}
+
 pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<String, StoreError> {
     let mut parts = Vec::new();
-    let contract = node.contract();
+    let contract = bounded_contract(&node.contract());
     parts.push(contract.render(&node.id, node.depth, node.parent.as_deref()));
 
     let disk_artifacts = node.find_artifacts();
@@ -84,19 +145,22 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
         ));
     }
 
-    // Expose artifacts from direct dependencies (depends_on) and the unified workspace
+    // Expose artifacts from direct dependencies (depends_on) and the unified
+    // workspace. Bounded by count and total bytes: a dependency with a large
+    // build output must not be able to inflate every consumer's prompt.
     let mut dep_artifacts = Vec::new();
     let all_nodes = store.walk().unwrap_or_default();
-    for dep_id in &node.depends_on {
+    let mut dep_bytes = 0usize;
+    'deps: for dep_id in &node.depends_on {
         if let Some(dep_node) = all_nodes.iter().find(|n| n.id == *dep_id) {
             for art in dep_node.find_artifacts() {
+                if dep_artifacts.len() >= MAX_DEP_ARTIFACTS || dep_bytes >= MAX_DEP_TOTAL_BYTES {
+                    break 'deps;
+                }
                 if let Ok(rel) = art.strip_prefix(dep_node.artifacts_dir()) {
                     let preview = fs::read_to_string(&art).unwrap_or_default();
-                    let head = if preview.len() > 600 {
-                        format!("{}... [{} bytes]", &preview[..600], preview.len())
-                    } else {
-                        preview
-                    };
+                    let head = truncate_chars(&preview, MAX_DEP_ARTIFACT_BYTES);
+                    dep_bytes += head.len();
                     dep_artifacts.push(format!(
                         "### Dependency artifact: {} (from {})\n```\n{}\n```\n",
                         rel.display(),
@@ -126,13 +190,24 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
     if let Some(ref pid) = node.parent {
         let nodes = store.walk().unwrap_or_default();
         if let Some(parent) = nodes.iter().find(|n| n.id == *pid) {
-            let pcontract = parent.contract();
-            if !pcontract.constraints.is_empty() {
+            // The rendered contract already carries every inherited constraint,
+            // including the direct parent's. Only a parent constraint added after
+            // this child's contract was written is genuinely new; injecting the
+            // rest again duplicated the whole block into every child prompt.
+            let known: std::collections::HashSet<String> = contract
+                .constraints
+                .iter()
+                .map(|c| normalize_constraint(c).to_ascii_lowercase())
+                .collect();
+            let extra: Vec<String> = bounded_constraints(&parent.contract().constraints)
+                .into_iter()
+                .filter(|c| !known.contains(&c.to_ascii_lowercase()))
+                .collect();
+            if !extra.is_empty() {
                 parts.push(format!(
                     "## Direct Parent Constraints (from {})\n{}\n",
                     parent.id,
-                    pcontract
-                        .constraints
+                    extra
                         .iter()
                         .map(|c| format!("- {c}"))
                         .collect::<Vec<_>>()
@@ -140,17 +215,24 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
                 ));
             }
 
-            // Overview of sibling nodes to avoid overlapping splits
+            // Overview of sibling nodes to avoid overlapping splits. Truncated:
+            // a wide branch must not linearise every sibling into every prompt.
             let siblings: Vec<&Node> = nodes
                 .iter()
                 .filter(|n| n.parent.as_deref() == Some(&parent.id) && n.id != node.id)
+                .take(MAX_SIBLINGS)
                 .collect();
             if !siblings.is_empty() {
                 let sib_lines: Vec<String> = siblings
                     .iter()
                     .map(|s| {
                         let goal_first_line = s.goal.lines().next().unwrap_or(&s.goal);
-                        format!("- {} ({}): {}", s.id, s.status, goal_first_line)
+                        format!(
+                            "- {} ({}): {}",
+                            s.id,
+                            s.status,
+                            truncate_chars(goal_first_line, 160)
+                        )
                     })
                     .collect();
                 parts.push(format!(
@@ -165,7 +247,7 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
     let children = store.children_of(node).unwrap_or_default();
     if !children.is_empty() {
         let mut child_summaries = Vec::new();
-        for c in &children {
+        for c in children.iter().take(MAX_CHILD_SUMMARIES) {
             let sum = c.summary.lines().next().unwrap_or(&c.summary);
             let artifacts = c.find_artifacts();
             let art_str = if artifacts.is_empty() {
@@ -175,12 +257,19 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
                     " [artifacts: {}]",
                     artifacts
                         .iter()
+                        .take(10)
                         .map(|p| p.file_name().unwrap_or_default().to_string_lossy())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
             };
-            child_summaries.push(format!("- {} ({}): {}{}", c.id, c.status, sum, art_str));
+            child_summaries.push(format!(
+                "- {} ({}): {}{}",
+                c.id,
+                c.status,
+                truncate_chars(sum, 300),
+                art_str
+            ));
         }
         parts.push(format!(
             "## Subtasks Completed by Children\nAll child subtasks have succeeded:\n{}\n\nSince all child subtasks are complete, output a `complete` JSON decision synthesizing the milestone deliverables.\n",
@@ -193,11 +282,19 @@ pub fn assemble_context(store: &Store, node: &Node) -> std::result::Result<Strin
             parts.push(format!("## Budget\n- remaining: {rem}\n"));
         }
     }
-    let global = store.retrieve_global(&node.goal, 5).unwrap_or_default();
+    let global = store
+        .retrieve_global(&node.goal, MAX_GLOBAL_ENTRIES)
+        .unwrap_or_default();
     if !global.is_empty() {
         let lines: Vec<String> = global
             .iter()
-            .map(|e| format!("- {}: {}", e.entry_type, e.content))
+            .map(|e| {
+                format!(
+                    "- {}: {}",
+                    e.entry_type,
+                    truncate_chars(&e.content, MAX_GLOBAL_ENTRY_BYTES)
+                )
+            })
             .collect();
         parts.push(format!("## Global knowledge\n{}\n", lines.join("\n")));
     }
@@ -1236,5 +1333,76 @@ Working..."#;
         let (verdict, details) = parse_verdict(&real).unwrap();
         assert_eq!(verdict, "PASS");
         assert_eq!(details.len(), 1);
+    }
+
+    /// Per-node context must not grow with the project's age (steering events),
+    /// its breadth (siblings) or the size of dependency output. Every injected
+    /// collection is capped, so a large tree produces a bounded prompt.
+    #[test]
+    fn context_stays_bounded_as_the_tree_grows() {
+        let dir = std::env::temp_dir().join(format!("fractal_ctx_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::store::Store::new(&dir);
+        let root = store.init("build a bounded thing").unwrap();
+
+        // A long history of steering events, each propagated to descendants.
+        for i in 0..80 {
+            store
+                .add_constraint_and_propagate(&root.id, &format!("rule {i}: {}", "x".repeat(200)))
+                .unwrap();
+        }
+
+        // A wide branch: the first child is a dependency with a large artifact
+        // set, the second consumes it, and 60 more are siblings.
+        let mut contracts = vec![crate::store::Contract {
+            goal: "produce dependency output".into(),
+            id: "dep".into(),
+            ..Default::default()
+        }];
+        contracts.push(crate::store::Contract {
+            goal: "consume the dependency".into(),
+            id: "consumer".into(),
+            depends_on: vec!["dep".into()],
+            ..Default::default()
+        });
+        for i in 0..60 {
+            contracts.push(crate::store::Contract {
+                goal: format!("sibling {i}"),
+                id: format!("s{i}"),
+                ..Default::default()
+            });
+        }
+        let children = store.add_children(&root, &contracts).unwrap();
+        let dep = children[0].clone();
+        let consumer = children[1].clone();
+        assert_eq!(
+            consumer.depends_on,
+            vec![dep.id.clone()],
+            "the dependency alias must resolve to the real sibling id"
+        );
+        for i in 0..50 {
+            std::fs::write(
+                dep.artifacts_dir().join(format!("artifact_{i}.txt")),
+                "y".repeat(2000),
+            )
+            .unwrap();
+        }
+
+        let ctx = assemble_context(&store, &consumer).unwrap();
+        assert!(
+            ctx.len() < 20_000,
+            "context grew unbounded with constraints, siblings and dependency artifacts: {} bytes",
+            ctx.len()
+        );
+        assert!(
+            ctx.matches("Dependency artifact").count() <= MAX_DEP_ARTIFACTS,
+            "dependency artifact previews were not capped"
+        );
+        assert!(
+            ctx.matches("\n- ").count() <= 200,
+            "injected list items were not capped"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

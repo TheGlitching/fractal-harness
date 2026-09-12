@@ -123,6 +123,26 @@ case "$MODE" in
       complete
     fi
     ;;
+  partial_fail)
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"do the only task","acceptance_criteria":["the task is done"]}]}'
+    else
+      mkdir -p "$ROOT/src"
+      echo "half written" > "$ROOT/src/leftover_${NODE}.txt"
+      echo '{"verb":"not_a_real_verb"}'
+    fi
+    ;;
+  two_leaves)
+    if [ "$NODE" = "root" ]; then
+      if [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+        echo '{"verb":"split","subtasks":[{"id":"a","goal":"first leaf","acceptance_criteria":["the task is done"]},{"id":"b","goal":"second leaf","acceptance_criteria":["the task is done"]}]}'
+      else
+        echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+      fi
+    else
+      complete
+    fi
+    ;;
   hang)
     echo "$$" > "$ROOT/.fake_omp_pid"
     exec sleep 120
@@ -255,6 +275,17 @@ impl Project {
     fn status(&self) -> String {
         let (_, out, err) = self.run(&["status"], Duration::from_secs(20));
         format!("{out}\n{err}")
+    }
+
+    /// Run a git command in the project repo and return its stdout.
+    fn git(&self, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.dir)
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
     /// Sum of every budget row's own-debits column.
@@ -616,6 +647,60 @@ fn opencode_executor_runs_opencode() {
         status.contains("[complete]"),
         "the opencode run did not complete:\n{status}"
     );
+}
+
+/// A node that fails leaves no files behind: its half-written work is reverted
+/// before the run ends, so it cannot contaminate any later node's diff or
+/// commit.
+#[test]
+fn failed_node_files_are_reverted() {
+    let p = Project::new("partialfail", "partial_fail");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(30));
+    assert!(code.is_some(), "run did not terminate; stderr:\n{err}");
+    assert_ne!(code, Some(0), "a failed node must not report success");
+    assert!(
+        !p.dir.join("src/leftover_root-01.txt").exists(),
+        "a failed node's half-written file was left in the shared tree"
+    );
+    let status = p.git(&["status", "--porcelain"]);
+    assert!(
+        !status.contains("leftover"),
+        "the failed node's file leaked into git status: {status}"
+    );
+}
+
+/// Two nodes that both run and commit must each commit only their own file.
+/// Before per-node isolation a shared `git add -A` could sweep a sibling's
+/// uncommitted work into the wrong node's commit.
+#[test]
+fn nodes_commit_only_their_own_work() {
+    let p = Project::new("twoleaves", "two_leaves");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert_eq!(code, Some(0), "two-leaf run failed; stderr:\n{err}");
+    let status = p.status();
+    assert!(
+        status.contains("[complete]"),
+        "run did not complete:\n{status}"
+    );
+
+    let log = p.git(&["log", "--format=%H %s"]);
+    let mut seen = 0;
+    for line in log.lines() {
+        let (sha, subject) = line.split_once(' ').unwrap_or((line, ""));
+        let node = subject.split(':').next().unwrap_or("").trim();
+        if node == "root-01" || node == "root-02" {
+            let files = p.git(&["show", "--format=", "--name-only", sha]);
+            let files: Vec<&str> = files.lines().filter(|l| !l.trim().is_empty()).collect();
+            let expected = format!("src/{node}.txt");
+            assert_eq!(
+                files,
+                vec![expected.as_str()],
+                "commit {sha} ({subject}) contains another node's file: {files:?}"
+            );
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, 2, "expected a commit for each leaf; log:\n{log}");
 }
 
 /// Interrupting the harness must kill and reap the running executor child

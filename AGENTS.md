@@ -10,6 +10,11 @@
   before finishing. `tests/legacy-python/` preserves the original Python
   acceptance suite as the porting reference for intended scheduler semantics;
   CI does not run it.
+- Nodes execute one at a time on the shared working tree; per-node diffs,
+  verification and commits rely on that. Do not re-enable concurrent node
+  execution without solving diff/commit attribution first, and keep the
+  harness's own paths out of the user's repo. See README "Per-node isolation and
+  workspace exclusion".
 - State layout, verbs, and terminology must match docs/SPEC.md §4 exactly:
   contract.md, decisions.md, log/, artifacts/, children/, and the verbs
   split / complete / escalate / note_global.
