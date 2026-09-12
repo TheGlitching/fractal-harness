@@ -823,11 +823,14 @@ fn run_project(project: &PathBuf, goal: &str, model_override: Option<&str>, inte
         if let Ok(mut tui) = tui::Tui::with_state(goal, &model, state.clone()) {
             let state2 = state.clone();
             let m = model.clone();
-            thread::spawn(move || run_scheduler(&project_path, &state2, &m, true));
+            let handle = thread::spawn(move || run_scheduler(&project_path, &state2, &m, true));
             match tui.run(&s) {
                 Ok(()) => {}
                 Err(e) => eprintln!("\nfractal: TUI error: {e}"),
             }
+            // `q` sets INTERRUPTED; wait for the scheduler to observe it and
+            // kill/reap any running executor before this process can exit.
+            let _ = handle.join();
         } else {
             eprintln!("(no TUI — running headless)");
             run_scheduler(&project_path, &state, &model, false);

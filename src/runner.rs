@@ -467,9 +467,175 @@ pub fn run_node(
     let executor = get_executor();
     let project_root = store.tree_dir.parent().unwrap_or(&store.tree_dir);
     match executor.as_str() {
-        "omp" | "pi" => call_via_omp(&prompt, node.path.as_path(), project_root, model, on_output),
-        _ => call_via_omp(&prompt, node.path.as_path(), project_root, model, on_output),
+        "omp" | "pi" => call_via_omp(
+            &prompt,
+            node.path.as_path(),
+            project_root,
+            model,
+            store,
+            node,
+            on_output,
+        ),
+        "opencode" => call_via_opencode(
+            &prompt,
+            node.path.as_path(),
+            project_root,
+            model,
+            store,
+            node,
+            on_output,
+        ),
+        other => Err(RunnerError::NotFound(format!(
+            "unknown executor {other:?}; supported executors are omp, pi and opencode"
+        ))),
     }
+}
+
+/// Estimate a model call's token cost. `FRACTAL_CALL_TOKENS` overrides the
+/// heuristic when the provider's own accounting is unavailable or a project
+/// wants to calibrate spend; otherwise it is a rough four-characters-per-token
+/// estimate of the prompt plus the output.
+fn estimate_call_tokens(text_len: usize) -> i64 {
+    if let Ok(v) = std::env::var("FRACTAL_CALL_TOKENS") {
+        if let Ok(n) = v.parse::<i64>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    ((text_len / 4).max(1)) as i64
+}
+
+fn charge_call(store: &Store, node: &Node, prompt_len: usize, output_len: usize) {
+    let tokens = estimate_call_tokens(prompt_len + output_len);
+    let _ = store.debit_call(node, tokens);
+}
+
+/// How a streamed executor process ended. The collected output is returned in
+/// every case so the caller can still read a decision (and charge for the call)
+/// even when the process had to be killed.
+enum StreamEnd {
+    Exited,
+    TimedOut,
+    Interrupted,
+}
+
+/// Spawn already done; stream the child's stdout/stderr to `on_output` while
+/// polling its exit, the timeout, and the interrupt flag. On timeout or
+/// interrupt the child is killed and reaped before returning, so no executor is
+/// ever left running after the harness stops.
+fn collect_stream(
+    mut child: std::process::Child,
+    node_name: &str,
+    on_output: &OutputFn,
+    timeout_secs: u64,
+) -> std::result::Result<(String, String, StreamEnd), RunnerError> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| RunnerError::Other("executor stdout unavailable".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| RunnerError::Other("executor stderr unavailable".into()))?;
+    let (std_tx, std_rx) = std::sync::mpsc::channel::<(bool, String, String)>();
+    let std_tx_err = std_tx.clone();
+
+    let node_name_out = node_name.to_string();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            let log_line = format!(" [{}] {}", node_name_out, line);
+            let _ = std_tx.send((false, log_line, line));
+        }
+    });
+    let node_name_err = node_name.to_string();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            let log_line = format!(" [{}] ERR: {}", node_name_err, line);
+            let _ = std_tx_err.send((true, log_line, line));
+        }
+    });
+
+    let mut stdout_lines = Vec::new();
+    let mut stderr_lines = Vec::new();
+    let drain = |stdout_lines: &mut Vec<String>, stderr_lines: &mut Vec<String>| {
+        while let Ok((is_err, log_line, raw_line)) = std_rx.try_recv() {
+            on_output(&log_line);
+            if is_err {
+                stderr_lines.push(raw_line);
+            } else {
+                stdout_lines.push(raw_line);
+            }
+        }
+    };
+
+    let start = std::time::Instant::now();
+    let end = loop {
+        drain(&mut stdout_lines, &mut stderr_lines);
+        if crate::scheduler::INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            drain(&mut stdout_lines, &mut stderr_lines);
+            break StreamEnd::Interrupted;
+        }
+        if start.elapsed().as_secs() > timeout_secs {
+            let _ = child.kill();
+            let _ = child.wait();
+            drain(&mut stdout_lines, &mut stderr_lines);
+            break StreamEnd::TimedOut;
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => break StreamEnd::Exited,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(e) => return Err(RunnerError::Other(format!("wait: {e}"))),
+        }
+    };
+    drain(&mut stdout_lines, &mut stderr_lines);
+    Ok((stdout_lines.join("\n"), stderr_lines.join("\n"), end))
+}
+
+/// Read a decision from the executor's decision file or its output, charge the
+/// call to the node's ledger, and fail closed when no decision was produced.
+fn decide(
+    store: &Store,
+    node: &Node,
+    prompt_len: usize,
+    all_text: &str,
+    decision_file: &Path,
+) -> std::result::Result<VerbResult, RunnerError> {
+    let val = if decision_file.exists() {
+        let content = fs::read_to_string(decision_file).unwrap_or_default();
+        let _ = fs::remove_file(decision_file);
+        serde_json::from_str::<Value>(&content).ok()
+    } else {
+        None
+    }
+    .filter(|v| v.get("verb").and_then(|v| v.as_str()).is_some())
+    .or_else(|| extract_decision(all_text));
+
+    // Charge before deciding: the model was called whether or not it answered.
+    charge_call(store, node, prompt_len, all_text.len());
+
+    // Fail closed. An executor that died, rambled, or answered with something
+    // that is not a decision has not delivered anything; fabricating a
+    // `complete` here is how a silent agent was scored as success.
+    let val = val.ok_or_else(|| {
+        let tail: String = {
+            let chars: Vec<char> = all_text.chars().collect();
+            chars[chars.len().saturating_sub(600)..].iter().collect()
+        };
+        RunnerError::NoDecision(format!(
+            "executor produced no parseable decision; last output was:\n{tail}"
+        ))
+    })?;
+
+    let verb = val
+        .get("verb")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| RunnerError::NoDecision("decision had no verb".into()))?;
+    result_from_payload(verb, &val)
 }
 
 pub fn call_via_omp(
@@ -477,6 +643,8 @@ pub fn call_via_omp(
     node_path: &Path,
     project_root: &Path,
     model: &str,
+    store: &Store,
+    node: &Node,
     on_output: OutputFn,
 ) -> std::result::Result<VerbResult, RunnerError> {
     let claude_md = format!("{OP_SYSTEM}\n\n{prompt}");
@@ -505,127 +673,138 @@ pub fn call_via_omp(
     cmd.arg(node_instructions);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| RunnerError::Other(format!("spawn: {e}")))?;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let (std_tx, std_rx) = std::sync::mpsc::channel::<(bool, String, String)>();
-    let std_tx_err = std_tx.clone();
-
-    let node_name_out = node_name.clone();
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            let log_line = format!(" [{}] {}", node_name_out, line);
-            let _ = std_tx.send((false, log_line, line));
-        }
-    });
-    let node_name_err = node_name.clone();
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines().map_while(Result::ok) {
-            let log_line = format!(" [{}] ERR: {}", node_name_err, line);
-            let _ = std_tx_err.send((true, log_line, line));
-        }
-    });
-
-    let mut stdout_lines = Vec::new();
-    let mut stderr_lines = Vec::new();
-    let start = std::time::Instant::now();
     let timeout_secs = std::env::var("FRACTAL_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(300);
-
-    loop {
-        while let Ok((is_err, log_line, raw_line)) = std_rx.try_recv() {
-            on_output(&log_line);
-            if is_err {
-                stderr_lines.push(raw_line);
-            } else {
-                stdout_lines.push(raw_line);
-            }
-        }
-        if start.elapsed().as_secs() > timeout_secs {
-            let _ = child.kill();
-            return Err(RunnerError::Timeout);
-        }
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
-            Err(e) => return Err(RunnerError::Other(format!("wait: {e}"))),
-        }
-    }
-
-    while let Ok((is_err, log_line, raw_line)) = std_rx.try_recv() {
-        on_output(&log_line);
-        if is_err {
-            stderr_lines.push(raw_line);
-        } else {
-            stdout_lines.push(raw_line);
-        }
-    }
-    let all_text = stdout_lines.join("\n");
+    let (all_text, _stderr, end) = collect_stream(child, &node_name, &on_output, timeout_secs)?;
     let decision_file = project_root.join(format!(".fractal_decision_{}", node_name));
-    let val = if decision_file.exists() {
-        let content = fs::read_to_string(&decision_file).unwrap_or_default();
-        let _ = fs::remove_file(&decision_file);
-        serde_json::from_str::<Value>(&content).ok()
-    } else {
-        None
+    let result = decide(store, node, claude_md.len(), &all_text, &decision_file);
+    match end {
+        StreamEnd::Exited => result,
+        StreamEnd::TimedOut => Err(RunnerError::Timeout),
+        StreamEnd::Interrupted => Err(RunnerError::Other("interrupted by user".into())),
     }
-    .filter(|v| v.get("verb").and_then(|v| v.as_str()).is_some())
-    .or_else(|| extract_decision(&all_text));
-
-    // Fail closed. An executor that died, rambled, or answered with something
-    // that is not a decision has not delivered anything; fabricating a
-    // `complete` here is how a silent agent was scored as success.
-    let val = val.ok_or_else(|| {
-        let tail: String = {
-            let chars: Vec<char> = all_text.chars().collect();
-            chars[chars.len().saturating_sub(600)..].iter().collect()
-        };
-        RunnerError::NoDecision(format!(
-            "executor produced no parseable decision; last output was:\n{tail}"
-        ))
-    })?;
-
-    let verb = val
-        .get("verb")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| RunnerError::NoDecision("decision had no verb".into()))?;
-    result_from_payload(verb, &val)
 }
 
-pub fn call_critic(prompt: &str, model: &str) -> std::result::Result<Value, RunnerError> {
+/// Run the real `opencode` CLI headlessly in the project, with its own model
+/// selection and permission flags. Nothing about `omp` is reused here: the
+/// command, flags and config are opencode's.
+pub fn call_via_opencode(
+    prompt: &str,
+    node_path: &Path,
+    project_root: &Path,
+    model: &str,
+    store: &Store,
+    node: &Node,
+    on_output: OutputFn,
+) -> std::result::Result<VerbResult, RunnerError> {
+    let claude_md = format!("{OP_SYSTEM}\n\n{prompt}");
+    let claude_path = node_path.join("CLAUDE.md");
+    fs::write(&claude_path, &claude_md).map_err(|e| RunnerError::Other(format!("write: {e}")))?;
+
+    let bin = which::which("opencode")
+        .map_err(|_| RunnerError::NotFound("opencode binary not found".into()))?;
+    let node_name = node_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let mut cmd = Command::new(&bin);
+    cmd.arg("run");
+    cmd.arg("--auto");
+    cmd.current_dir(project_root);
+    cmd.env("FRACTAL_NODE_ID", &node_name);
+    if !model.is_empty() && model != "default" {
+        cmd.arg("--model").arg(model);
+    }
+    // opencode reads CLAUDE.md from its working directory; the project root is
+    // the working directory, so the node's own file is referenced explicitly.
+    if std::env::var_os("OPENCODE_CONFIG_CONTENT").is_none() {
+        cmd.env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#);
+    }
+    let node_instructions = format!("Read @{}. You are a node in a fractal task tree. Use your tools directly in the project. Signal completion with `fractal done` or split with `fractal split`.", claude_path.display());
+    cmd.arg(node_instructions);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| RunnerError::Other(format!("spawn: {e}")))?;
+    let timeout_secs = std::env::var("FRACTAL_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
+    let (all_text, _stderr, end) = collect_stream(child, &node_name, &on_output, timeout_secs)?;
+    let decision_file = project_root.join(format!(".fractal_decision_{}", node_name));
+    let result = decide(store, node, claude_md.len(), &all_text, &decision_file);
+    match end {
+        StreamEnd::Exited => result,
+        StreamEnd::TimedOut => Err(RunnerError::Timeout),
+        StreamEnd::Interrupted => Err(RunnerError::Other("interrupted by user".into())),
+    }
+}
+
+pub fn call_critic(
+    store: &Store,
+    node: &Node,
+    prompt: &str,
+    model: &str,
+) -> std::result::Result<Value, RunnerError> {
     let temp_dir = std::env::temp_dir().join(format!("fractal_critic_{}", std::process::id()));
     let _ = fs::create_dir_all(&temp_dir);
     let claude_md = format!("{CRITIC_SYSTEM}\n\nReview against acceptance criteria. Output JSON verdict with PASS or FAIL.\n\n{prompt}");
     let _ = fs::write(temp_dir.join("CLAUDE.md"), &claude_md);
 
-    let bin = which::which("omp")
-        .or_else(|_| which::which("pi"))
-        .map_err(|_| RunnerError::NotFound("omp/pi binary not found".into()))?;
-
-    let mut cmd = Command::new(&bin);
-    cmd.arg("-p");
-    cmd.arg("--cwd").arg(&temp_dir);
-    if !model.is_empty() && model != "default" {
-        cmd.arg(format!("--model={model}"));
-    }
-    cmd.arg("Review against acceptance criteria. Output JSON verdict.");
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let output = cmd
-        .output()
-        .map_err(|e| RunnerError::Other(format!("critic: {e}")))?;
+    let executor = get_executor();
+    let text = if executor == "opencode" {
+        let bin = which::which("opencode")
+            .map_err(|_| RunnerError::NotFound("opencode binary not found".into()))?;
+        let mut cmd = Command::new(&bin);
+        cmd.arg("run").arg("--auto");
+        cmd.current_dir(&temp_dir);
+        if !model.is_empty() && model != "default" {
+            cmd.arg("--model").arg(model);
+        }
+        if std::env::var_os("OPENCODE_CONFIG_CONTENT").is_none() {
+            cmd.env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#);
+        }
+        cmd.arg("Review against acceptance criteria. Output JSON verdict.");
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let output = cmd
+            .output()
+            .map_err(|e| RunnerError::Other(format!("critic: {e}")))?;
+        format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    } else {
+        let bin = which::which("omp")
+            .or_else(|_| which::which("pi"))
+            .map_err(|_| RunnerError::NotFound("omp/pi binary not found".into()))?;
+        let mut cmd = Command::new(&bin);
+        cmd.arg("-p");
+        cmd.arg("--cwd").arg(&temp_dir);
+        if !model.is_empty() && model != "default" {
+            cmd.arg(format!("--model={model}"));
+        }
+        cmd.arg("Review against acceptance criteria. Output JSON verdict.");
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let output = cmd
+            .output()
+            .map_err(|e| RunnerError::Other(format!("critic: {e}")))?;
+        format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
     let _ = fs::remove_dir_all(&temp_dir);
-    let text = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    // Verification is a model call too; charge it to the node's ledger.
+    charge_call(store, node, claude_md.len(), text.len());
     // Fail closed, and require a real verdict. An unreadable response, a missing
     // verdict, or a node-shaped `{"verb":...}` object is not evidence of success.
     let decision = extract_verdict(&text).unwrap_or_else(|| {
@@ -740,7 +919,7 @@ pub fn verify_node(
             format!("\n\nDeclared artifacts:\n{artifact_summary}")
         }
     );
-    let message = call_critic(&prompt, model)?;
+    let message = call_critic(store, node, &prompt, model)?;
     parse_verdict(&message)
 }
 
@@ -813,7 +992,11 @@ fn result_from_payload(
                         constraints: strings("constraints"),
                         depends_on: deps,
                         verification,
-                        ..Default::default()
+                        allocation: item
+                            .get("allocation")
+                            .and_then(|a| a.as_i64())
+                            .unwrap_or(0)
+                            .max(0),
                     });
                 }
             }

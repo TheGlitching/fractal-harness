@@ -3,11 +3,12 @@ use crate::runner::{
     REOPEN, SPLIT,
 };
 use crate::store::{
-    Node, Store, StoreError, COMPLETE, FAILED, PENDING, RUNNING, SPLIT as SPLIT_STATUS, SUSPENDED,
+    Contract, Node, Store, StoreError, COMPLETE, FAILED, PENDING, RUNNING, SPLIT as SPLIT_STATUS,
+    SUSPENDED,
 };
 use crate::tui::{StatsSnapshot, TuiState};
 use crate::verify::GateScope;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -144,7 +145,8 @@ pub fn run(
         }
 
         let nodes = store.walk()?;
-        let runnable = next_nodes(&nodes);
+        let stale = store.stale_ids().unwrap_or_default();
+        let runnable = next_nodes(&nodes, &stale);
         if runnable.is_empty() {
             // Check if any failed or blocked nodes exist
             let has_failed = nodes.iter().any(|n| n.status == FAILED);
@@ -287,11 +289,24 @@ fn snapshot(report: &RunReport, nodes: &[Node]) -> StatsSnapshot {
     }
 }
 
-fn next_nodes(nodes: &[Node]) -> Vec<Node> {
+fn next_nodes(nodes: &[Node], stale: &HashSet<String>) -> Vec<Node> {
+    // Stale dependents first: a dependency was reopened and its deliverable
+    // changed after this node was accepted, so it must be re-verified against
+    // the new dependency before anything downstream trusts it.
+    let mut stale_nodes: Vec<Node> = nodes
+        .iter()
+        .filter(|n| stale.contains(&n.id))
+        .cloned()
+        .collect();
+    stale_nodes.sort_by_key(|b| std::cmp::Reverse(b.depth));
+    if !stale_nodes.is_empty() {
+        return stale_nodes;
+    }
+
     let by_id: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let mut runnable: Vec<Node> = nodes
         .iter()
-        .filter(|n| n.status == PENDING && deps_satisfied(n, &by_id))
+        .filter(|n| n.status == PENDING && deps_satisfied(n, &by_id, stale))
         .cloned()
         .collect();
     runnable.sort_by_key(|b| std::cmp::Reverse(b.depth));
@@ -301,27 +316,110 @@ fn next_nodes(nodes: &[Node]) -> Vec<Node> {
 
     let agg: Vec<Node> = nodes
         .iter()
-        .filter(|n| n.status == SPLIT_STATUS && aggregatable(n, &by_id, nodes))
+        .filter(|n| n.status == SPLIT_STATUS && aggregatable(n, nodes, stale))
         .cloned()
         .collect();
     agg
 }
 
-fn deps_satisfied(node: &Node, by_id: &HashMap<&str, &Node>) -> bool {
+fn deps_satisfied(node: &Node, by_id: &HashMap<&str, &Node>, stale: &HashSet<String>) -> bool {
     node.depends_on.iter().all(|dep| {
         by_id
             .get(dep.as_str())
-            .is_some_and(|n| n.status == COMPLETE)
+            .is_some_and(|n| n.status == COMPLETE && !stale.contains(&n.id))
     })
 }
 
-fn aggregatable(node: &Node, _by_id: &HashMap<&str, &Node>, nodes: &[Node]) -> bool {
+fn aggregatable(node: &Node, nodes: &[Node], stale: &HashSet<String>) -> bool {
     let children: Vec<&Node> = nodes
         .iter()
         .filter(|n| n.parent.as_deref() == Some(&node.id))
         .collect();
-    // Only aggregate if all children are COMPLETE
-    !children.is_empty() && children.iter().all(|c| c.status == COMPLETE)
+    // Only aggregate once every child is accepted and none has gone stale.
+    !children.is_empty()
+        && children
+            .iter()
+            .all(|c| c.status == COMPLETE && !stale.contains(&c.id))
+}
+
+/// Reject a split whose dependency graph cannot be scheduled: an edge naming a
+/// sibling that does not exist, or a cycle. Rejecting here (with a message the
+/// agent sees) is what stops `add_children` from having to silently drop an
+/// unmatched edge, which would make the child runnable too early.
+fn reject_split_topology(contracts: &[Contract], existing: &[String]) -> Option<String> {
+    let mut canonical: HashMap<String, String> = HashMap::new();
+    for id in existing {
+        canonical.insert(id.clone(), id.clone());
+        if let Some(suffix) = id.rsplit('-').next() {
+            canonical.insert(suffix.to_string(), id.clone());
+        }
+    }
+    let mut keys: Vec<String> = Vec::new();
+    for (i, c) in contracts.iter().enumerate() {
+        let key = if c.id.trim().is_empty() {
+            format!("#{}", i + 1)
+        } else {
+            c.id.trim().to_string()
+        };
+        canonical.insert(format!("{}", i + 1), key.clone());
+        canonical.insert(format!("{:02}", i + 1), key.clone());
+        canonical.insert(key.clone(), key.clone());
+        keys.push(key);
+    }
+
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    for (key, c) in keys.iter().zip(contracts.iter()) {
+        let mut deps = Vec::new();
+        for dep in &c.depends_on {
+            let dep = dep.trim();
+            if dep.is_empty() {
+                continue;
+            }
+            match canonical.get(dep) {
+                Some(resolved) => deps.push(resolved.clone()),
+                None => {
+                    return Some(format!("depends_on names an unknown sibling {dep:?}"));
+                }
+            }
+        }
+        edges.insert(key.clone(), deps);
+    }
+
+    fn visit(
+        node: &str,
+        edges: &HashMap<String, Vec<String>>,
+        visiting: &mut HashSet<String>,
+        done: &mut HashSet<String>,
+    ) -> bool {
+        if done.contains(node) {
+            return false;
+        }
+        if !visiting.insert(node.to_string()) {
+            return true;
+        }
+        if let Some(deps) = edges.get(node) {
+            for dep in deps {
+                if edges.contains_key(dep) && visit(dep, edges, visiting, done) {
+                    return true;
+                }
+            }
+        }
+        visiting.remove(node);
+        done.insert(node.to_string());
+        false
+    }
+    let mut visiting = HashSet::new();
+    let mut done = HashSet::new();
+    if keys
+        .iter()
+        .any(|k| visit(k, &edges, &mut visiting, &mut done))
+    {
+        return Some(
+            "the proposed split contains a dependency cycle; a circular dependency cannot be scheduled"
+                .into(),
+        );
+    }
+    None
 }
 
 fn run_one_node(
@@ -333,7 +431,8 @@ fn run_one_node(
 ) -> std::result::Result<RunReport, String> {
     let mut report = RunReport::default();
     let children = store.children_of(node).map_err(|e| e.to_string())?;
-    let aggregating = node.status == SPLIT_STATUS;
+    let has_children = !children.is_empty();
+    let aggregating = node.status == SPLIT_STATUS || has_children;
     store.set_status(node, RUNNING).map_err(|e| e.to_string())?;
     {
         let mut s = state.lock().unwrap();
@@ -344,9 +443,36 @@ fn run_one_node(
         s.status_line = format!("running {}", node.id);
     }
 
+    // Budget exhaustion is terminal, never a silent continuation. An aggregating
+    // node is exempt: its allowance was deliberately spent on its children, and
+    // synthesising their verified results is the point of the rollup.
+    if !aggregating && store.budget_enabled() {
+        let remaining = store.budget_remaining(&node.id).unwrap_or(0);
+        if remaining <= 0 {
+            store
+                .append_decision(
+                    node,
+                    "failed: token budget exhausted before this node could run",
+                )
+                .ok();
+            store
+                .append_log(
+                    node,
+                    &serde_json::json!({"event":"budget_exhausted","remaining":remaining}),
+                )
+                .ok();
+            store.set_status(node, FAILED).ok();
+            report.failed += 1;
+            return Ok(report);
+        }
+    }
+
     let mut feedback: Option<String> = None;
 
     for attempt in 0..MAX_ATTEMPTS {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return Ok(report);
+        }
         if attempt > 0 {
             on_output(&format!(
                 "  [{}] retry attempt {}/{}",
@@ -356,9 +482,22 @@ fn run_one_node(
             ));
         }
 
+        // The split this attempt may propose is validated against the allowance
+        // the node had when it started, which is exactly what its context showed
+        // it. Moving it with the call's own debit would make the displayed
+        // budget unusable.
+        let pre_remaining = if store.budget_enabled() {
+            store.budget_remaining(&node.id).ok()
+        } else {
+            None
+        };
+
         let result = match run_node(store, node, model, on_output.clone(), feedback.as_deref()) {
             Ok(r) => r,
             Err(RunnerError::Other(e)) => {
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    return Ok(report);
+                }
                 store
                     .append_log(node, &serde_json::json!({"event":"error","error":e}))
                     .ok();
@@ -619,15 +758,76 @@ fn run_one_node(
                 return Ok(report);
             }
             SPLIT => {
-                if aggregating || (node.depth >= MAX_DEPTH && !store.budget_enabled()) {
+                if aggregating {
                     report.refused += 1;
-                    feedback = Some("SPLIT refused: max depth reached or aggregating node. You MUST COMPLETE this contract directly.".into());
+                    feedback = Some("SPLIT refused: this node has already split once and its children are finished. You MUST COMPLETE this contract directly.".into());
+                    continue;
+                }
+                // The hard cap stays as a backstop: a budget must never be the
+                // only bound, and it must never remove this one.
+                if node.depth >= MAX_DEPTH {
+                    report.refused += 1;
+                    feedback = Some(format!(
+                        "SPLIT refused: the tree is limited to {MAX_DEPTH} levels and this node is already at depth {}. You MUST COMPLETE this contract directly.",
+                        node.depth
+                    ));
                     continue;
                 }
                 if result.subtasks.is_empty() {
                     report.refused += 1;
                     feedback = Some("SPLIT refused: subtasks list was empty. Provide at least one concrete subtask.".into());
                     continue;
+                }
+                if let Some(reason) = reject_split_topology(
+                    &result.subtasks,
+                    &children.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
+                ) {
+                    report.refused += 1;
+                    store
+                        .append_log(
+                            node,
+                            &serde_json::json!({"event":"split_refused","reason":&reason}),
+                        )
+                        .ok();
+                    store
+                        .append_decision(node, &format!("split refused: {reason}"))
+                        .ok();
+                    feedback = Some(format!(
+                        "SPLIT refused by the orchestrator: {reason}. No child nodes were created. \
+                         Complete this contract yourself, or correct the subtasks and answer again."
+                    ));
+                    continue;
+                }
+                if store.budget_enabled() {
+                    // The split-fee plus the child allocations must fit inside
+                    // the allowance the node had when it started. This is what
+                    // makes depth economic rather than magic.
+                    let remaining = pre_remaining.unwrap_or(0);
+                    let proposed: i64 = result.subtasks.iter().map(|c| c.allocation.max(0)).sum();
+                    let fee = store.split_fee();
+                    if fee + proposed > remaining {
+                        let reason = format!(
+                            "your proposed allocation is over budget: the {fee}-token split-fee \
+                             plus {proposed} in child allocations exceeds your remaining token \
+                             allowance of {remaining}"
+                        );
+                        report.refused += 1;
+                        store
+                            .append_log(
+                                node,
+                                &serde_json::json!({"event":"split_refused","reason":&reason}),
+                            )
+                            .ok();
+                        store
+                            .append_decision(node, &format!("split refused: {reason}"))
+                            .ok();
+                        feedback = Some(format!(
+                            "SPLIT refused by the orchestrator: {reason}. No child nodes were \
+                             created. Complete this contract yourself now, or propose smaller \
+                             allocations that fit."
+                        ));
+                        continue;
+                    }
                 }
                 match store.add_children(node, &result.subtasks) {
                     Ok(children) => {
@@ -656,7 +856,7 @@ fn run_one_node(
                 }
             }
             COMPLETE_VERB => {
-                if children.is_empty()
+                if !has_children
                     && result.artifacts.iter().all(|(_, c)| c.trim().is_empty())
                     && result.deliverable.trim().is_empty()
                     && result.summary.trim().is_empty()
@@ -669,7 +869,7 @@ fn run_one_node(
                 // Fail closed on an empty diff. A leaf is where work lands, so
                 // a leaf that describes its work but changed nothing on disk has
                 // not delivered its contract - however plausible its prose.
-                if children.is_empty() && !crate::git::has_uncommitted_changes(&store.root) {
+                if !has_children && !crate::git::has_uncommitted_changes(&store.root) {
                     report.verify_failures += 1;
                     report.refused += 1;
                     store
@@ -988,4 +1188,118 @@ fn replan_branch(store: &Store, parent: &Node) -> Result<(), String> {
         store.delete_node(&child).map_err(|e| e.to_string())?;
     }
     store.set_status(parent, PENDING).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(id: &str, status: &str, parent: Option<&str>, depth: i64, deps: &[&str]) -> Node {
+        Node {
+            id: id.into(),
+            path: std::path::PathBuf::from(id),
+            parent: parent.map(|p| p.to_string()),
+            depth,
+            status: status.into(),
+            goal: id.into(),
+            summary: String::new(),
+            depends_on: deps.iter().map(|d| d.to_string()).collect(),
+            dep_fp: "{}".into(),
+        }
+    }
+
+    #[test]
+    fn a_stale_dependent_is_selected_before_fresh_work() {
+        let nodes = vec![
+            node("root", SPLIT_STATUS, None, 1, &[]),
+            node("root-00", COMPLETE, Some("root"), 2, &[]),
+            node("root-01", COMPLETE, Some("root"), 2, &["root-00"]),
+            node("root-02", PENDING, Some("root"), 2, &[]),
+        ];
+        let mut stale = HashSet::new();
+        stale.insert("root-01".to_string());
+        let picked = next_nodes(&nodes, &stale);
+        assert_eq!(
+            picked.first().map(|n| n.id.as_str()),
+            Some("root-01"),
+            "the stale dependent must be re-run first"
+        );
+    }
+
+    #[test]
+    fn a_pending_node_waits_for_a_stale_dependency() {
+        let nodes = vec![
+            node("root", SPLIT_STATUS, None, 1, &[]),
+            node("root-01", COMPLETE, Some("root"), 2, &[]),
+            node("root-02", PENDING, Some("root"), 2, &["root-01"]),
+        ];
+        let fresh = next_nodes(&nodes, &HashSet::new());
+        assert!(fresh.iter().any(|n| n.id == "root-02"));
+
+        let mut stale = HashSet::new();
+        stale.insert("root-01".to_string());
+        let picked = next_nodes(&nodes, &stale);
+        assert!(
+            picked.iter().all(|n| n.id != "root-02"),
+            "a dependent must not run while its dependency is stale"
+        );
+    }
+
+    #[test]
+    fn an_aggregator_waits_for_a_stale_child() {
+        let nodes = vec![
+            node("root", SPLIT_STATUS, None, 1, &[]),
+            node("root-01", COMPLETE, Some("root"), 2, &[]),
+        ];
+        assert!(aggregatable(&nodes[0], &nodes, &HashSet::new()));
+        let mut stale = HashSet::new();
+        stale.insert("root-01".to_string());
+        assert!(!aggregatable(&nodes[0], &nodes, &stale));
+    }
+
+    #[test]
+    fn split_topology_rejects_unknown_siblings_and_cycles() {
+        let valid = vec![
+            Contract {
+                goal: "a".into(),
+                id: "a".into(),
+                ..Default::default()
+            },
+            Contract {
+                goal: "b".into(),
+                id: "b".into(),
+                depends_on: vec!["a".into()],
+                ..Default::default()
+            },
+        ];
+        assert!(reject_split_topology(&valid, &[]).is_none());
+
+        let unknown = vec![Contract {
+            goal: "b".into(),
+            id: "b".into(),
+            depends_on: vec!["ghost".into()],
+            ..Default::default()
+        }];
+        assert!(reject_split_topology(&unknown, &[])
+            .unwrap()
+            .contains("unknown sibling"));
+
+        let cyclic = vec![
+            Contract {
+                goal: "a".into(),
+                id: "a".into(),
+                depends_on: vec!["b".into()],
+                ..Default::default()
+            },
+            Contract {
+                goal: "b".into(),
+                id: "b".into(),
+                depends_on: vec!["a".into()],
+                ..Default::default()
+            },
+        ];
+        assert!(reject_split_topology(&cyclic, &[])
+            .unwrap()
+            .contains("cycle"));
+    }
 }

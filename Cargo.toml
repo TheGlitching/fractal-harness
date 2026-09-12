@@ -20,3 +20,7 @@ which = "8"
 ctrlc = "3.5.2"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
+
+[dev-dependencies]
+# Integration tests read the on-disk index directly to assert ledger invariants.
+rusqlite = { version = "0.35", features = ["bundled"] }

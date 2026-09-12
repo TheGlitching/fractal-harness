@@ -69,6 +69,17 @@ fn now() -> String {
     Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
 }
 
+/// A small, dependency-free, stable 64-bit digest used for dependency
+/// fingerprints. Not cryptographic; only needs to change when a deliverable does.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Contract {
     pub goal: String,
@@ -81,7 +92,6 @@ pub struct Contract {
     /// Shell commands that must exit 0 before this node may complete.
     /// Explicit gates apply at every scope, including leaves.
     pub verification: Vec<String>,
-    #[allow(dead_code)]
     pub allocation: i64,
 }
 
@@ -305,8 +315,13 @@ impl Store {
         let mut guard = self.conn.lock().unwrap();
         if guard.is_none() {
             let conn = Connection::open(&self.db_path)?;
+            // A rollback journal plus synchronous=FULL means a committed status
+            // has reached the disk before the next model call starts. That is
+            // what makes a SIGKILL survivable: after a crash the index may lag
+            // the filesystem, but a status it reports as durable really is.
+            // WAL/NORMAL is faster but can lose the last commits on power loss.
             conn.execute_batch(
-                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+                "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
             )?;
             *guard = Some(conn);
         }
@@ -320,8 +335,27 @@ impl Store {
         Ok(())
     }
 
+    /// A per-subtree ledger exists when the root was initialised with a
+    /// `FRACTAL_BUDGET` (or when one is supplied directly in tests). The env
+    /// var is only consulted as a fallback so a resumed project whose ledger
+    /// is already on disk stays economically bounded even when the variable is
+    /// not exported in the new shell.
     pub fn budget_enabled(&self) -> bool {
-        std::env::var("FRACTAL_BUDGET").is_ok()
+        if std::env::var("FRACTAL_BUDGET").is_ok() {
+            return true;
+        }
+        if !self.db_path.exists() {
+            return false;
+        }
+        self.with_conn(|conn| {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM budget WHERE node_id=?1",
+                params![ROOT_ID],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        })
+        .unwrap_or(false)
     }
 
     pub fn split_fee(&self) -> i64 {
@@ -332,6 +366,18 @@ impl Store {
     }
 
     pub fn init(&self, goal: &str) -> Result<Node, StoreError> {
+        let budget = match std::env::var("FRACTAL_BUDGET") {
+            Ok(raw) => Some(raw.parse().unwrap_or(100_000)),
+            Err(_) => None,
+        };
+        self.init_with_budget(goal, budget)
+    }
+
+    /// `budget` of `Some(n)` creates the root ledger with allowance `n`; `None`
+    /// (the default) leaves the tree under the hard depth cap. Kept separate
+    /// from `init` so tests can create a bounded tree without mutating the
+    /// process-global environment.
+    pub fn init_with_budget(&self, goal: &str, budget: Option<i64>) -> Result<Node, StoreError> {
         fs::create_dir_all(&self.tree_dir)?;
         fs::create_dir_all(&self.global_dir)?;
         fs::create_dir_all(&self.state_dir)?;
@@ -376,11 +422,7 @@ impl Store {
         let stamp = now();
         self.with_conn(|conn| {
             Self::insert_node(conn, &root_node)?;
-            if self.budget_enabled() {
-                let initial_budget: i64 = std::env::var("FRACTAL_BUDGET")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(100_000);
+            if let Some(initial_budget) = budget {
                 conn.execute(
                     "INSERT OR REPLACE INTO budget (node_id, allowance, calls, debits, fee_paid, children) VALUES (?1, ?2, 0, 0, 0, 0)",
                     params![ROOT_ID, initial_budget],
@@ -479,19 +521,15 @@ impl Store {
 
         for (i, c) in contracts.iter().enumerate() {
             let cid = format!("{}-{:02}", parent.id, existing + i + 1);
+            // Resolve each proposed dependency against the known sibling ids.
+            // A name that resolves to nothing is preserved verbatim rather than
+            // dropped: silently stripping it would make the child immediately
+            // runnable before the work it says it needs, which is worse than an
+            // unresolvable edge the scheduler refuses to schedule.
             let resolved_deps: Vec<String> = c
                 .depends_on
                 .iter()
-                .filter_map(|dep| {
-                    let resolved = id_map.get(dep).cloned();
-                    if resolved.is_none() {
-                        eprintln!(
-                            "  fractal: warning — depends_on '{}' for {} does not match any known id, stripping",
-                            dep, cid
-                        );
-                    }
-                    resolved
-                })
+                .map(|dep| id_map.get(dep).cloned().unwrap_or_else(|| dep.clone()))
                 .collect();
 
             let mut child_contract = c.clone();
@@ -515,10 +553,31 @@ impl Store {
             Self::materialise_node(&cnode, &child_contract)?;
             children.push(cnode);
         }
+
+        let budget = self.budget_enabled();
+        let allocations: Vec<i64> = contracts.iter().map(|c| c.allocation.max(0)).collect();
+        let fee = self.split_fee();
         let stamp = now();
         self.with_conn(|conn| {
             for ch in &children {
                 Self::insert_node(conn, ch)?;
+            }
+            if budget {
+                // Charge the split to the parent and open a ledger row for each
+                // child carrying the allocation the parent granted it. Without
+                // this the allocation is cosmetic and a child could recurse on
+                // unbounded credit.
+                let granted: i64 = allocations.iter().sum();
+                conn.execute(
+                    "UPDATE budget SET fee_paid=fee_paid+?1, children=children+?2, debits=debits+?1 WHERE node_id=?3",
+                    params![fee, granted, parent.id],
+                )?;
+                for (ch, allocation) in children.iter().zip(allocations.iter()) {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO budget (node_id, allowance, calls, debits, fee_paid, children) VALUES (?1, ?2, 0, 0, 0, 0)",
+                        params![ch.id, allocation],
+                    )?;
+                }
             }
             conn.execute(
                 "UPDATE nodes SET status=?1,updated_at=?2 WHERE id=?3",
@@ -546,6 +605,10 @@ impl Store {
             )?;
             Ok(())
         })?;
+        // Snapshot the dependencies' fingerprints at acceptance. If one of them
+        // is later reopened and changes, this dependent is detected as stale and
+        // re-run rather than trusted forever.
+        self.record_dependencies(node)?;
         Ok(())
     }
 
@@ -877,6 +940,7 @@ impl Store {
         let _ = fs::remove_dir_all(&node.path);
         self.with_conn(|conn| {
             conn.execute("DELETE FROM nodes WHERE id=?1", params![node.id])?;
+            conn.execute("DELETE FROM budget WHERE node_id=?1", params![node.id])?;
             Ok(())
         })?;
         Ok(())
@@ -999,28 +1063,72 @@ impl Store {
         self.require_initialised()?;
         let disk = self.walk_disk();
         self.with_conn(|conn| {
-            for (path, node_id, parent, depth) in &disk {
-                let exists: bool = conn.query_row(
-                    "SELECT COUNT(*) FROM nodes WHERE id=?1",
-                    params![node_id],
-                    |r| r.get::<_, i64>(0),
-                )? > 0;
-                if !exists {
-                    let has_children = !Self::child_dirs(path).is_empty();
-                    let status = if has_children { SPLIT } else { PENDING };
-                    let n = Node {
-                        id: node_id.clone(),
-                        path: path.clone(),
-                        parent: parent.clone(),
-                        depth: *depth,
-                        status: status.to_string(),
-                        goal: Self::goal_on_disk(path),
-                        summary: String::new(),
-                        depends_on: vec![],
-                        dep_fp: "{}".into(),
-                    };
-                    Self::insert_node(conn, &n)?;
+            // Snapshot the existing rows first: we adopt, repair and delete
+            // against it, then drop whatever the filesystem no longer holds.
+            let mut rows: std::collections::HashMap<String, (Option<String>, i64, String)> =
+                std::collections::HashMap::new();
+            {
+                let mut stmt = conn.prepare("SELECT id,parent,depth,status FROM nodes")?;
+                let mut iter = stmt.query([])?;
+                while let Some(r) = iter.next()? {
+                    rows.insert(
+                        r.get::<_, String>(0)?,
+                        (
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, String>(3)?,
+                        ),
+                    );
                 }
+            }
+
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for (path, node_id, parent, depth) in &disk {
+                seen.insert(node_id.clone());
+                let has_children = !Self::child_dirs(&path.join(CHILDREN_DIRNAME)).is_empty();
+                match rows.get(node_id) {
+                    None => {
+                        let status = if has_children { SPLIT } else { PENDING };
+                        let n = Node {
+                            id: node_id.clone(),
+                            path: path.clone(),
+                            parent: parent.clone(),
+                            depth: *depth,
+                            status: status.to_string(),
+                            goal: Self::goal_on_disk(path),
+                            summary: String::new(),
+                            depends_on: vec![],
+                            dep_fp: "{}".into(),
+                        };
+                        Self::insert_node(conn, &n)?;
+                    }
+                    Some((row_parent, row_depth, status)) => {
+                        // A crash can leave a node `running` (or a freshly
+                        // created one `pending`) that actually split before it
+                        // died. The filesystem is authoritative for both the
+                        // status and the topology.
+                        let repaired = if status == RUNNING || status == PENDING {
+                            if has_children {
+                                SPLIT
+                            } else {
+                                PENDING
+                            }
+                        } else {
+                            status.as_str()
+                        };
+                        if repaired != status || row_parent != parent || *row_depth != *depth {
+                            conn.execute(
+                                "UPDATE nodes SET status=?1,parent=?2,depth=?3,updated_at=?4 WHERE id=?5",
+                                params![repaired, parent, depth, now(), node_id],
+                            )?;
+                        }
+                    }
+                }
+            }
+
+            for node_id in rows.keys().filter(|id| !seen.contains(*id)) {
+                conn.execute("DELETE FROM nodes WHERE id=?1", params![node_id])?;
+                conn.execute("DELETE FROM budget WHERE node_id=?1", params![node_id])?;
             }
             Ok(())
         })
@@ -1207,20 +1315,37 @@ impl Store {
 
         Ok(reopened)
     }
+    /// The token allowance still spendable by `node_id`, with one split-fee set
+    /// aside for the split it may still propose. A node with no ledger row has
+    /// no budget: returning zero (rather than erroring) fails it closed.
     pub fn budget_remaining(&self, node_id: &str) -> Result<i64, StoreError> {
+        use rusqlite::OptionalExtension;
         self.with_conn(|conn| {
-            let (a, c, f, ch): (i64, i64, i64, i64) = conn.query_row(
-                "SELECT allowance,calls,fee_paid,children FROM budget WHERE node_id=?1",
-                params![node_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )?;
-            Ok(a - c - f - ch - self.split_fee())
+            let row = conn
+                .query_row(
+                    "SELECT allowance,calls,fee_paid,children FROM budget WHERE node_id=?1",
+                    params![node_id],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, i64>(2)?,
+                            r.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            match row {
+                Some((a, c, f, ch)) => Ok(a - c - f - ch - self.split_fee()),
+                None => Ok(0),
+            }
         })
     }
 
-    #[allow(dead_code)]
+    /// Charge a model call's actual usage to the node's ledger. Safe when no
+    /// ledger exists: the update simply matches no rows.
     pub fn debit_call(&self, node: &Node, tokens: i64) -> Result<(), StoreError> {
-        if tokens <= 0 || !self.budget_enabled() {
+        if tokens <= 0 {
             return Ok(());
         }
         self.with_conn(|conn| {
@@ -1230,6 +1355,96 @@ impl Store {
             )?;
             Ok(())
         })
+    }
+
+    /// A stable, non-cryptographic digest of everything a node's deliverable
+    /// comprises: its summary and the contents of every artifact it left. Used
+    /// only to notice that a dependency changed after it was accepted, so FNV-1a
+    /// is enough; it never needs to resist an adversary.
+    pub fn fingerprint(&self, node: &Node) -> String {
+        let mut acc = String::new();
+        acc.push_str(node.summary.trim());
+        let dir = node.artifacts_dir();
+        let mut files: Vec<PathBuf> = Vec::new();
+        if dir.is_dir() {
+            Self::collect_files(&dir, &mut files);
+            files.sort();
+        }
+        for f in files {
+            if let Ok(rel) = f.strip_prefix(&dir) {
+                acc.push('\u{0}');
+                acc.push_str(&rel.to_string_lossy());
+                if let Ok(content) = fs::read_to_string(&f) {
+                    acc.push('\u{0}');
+                    acc.push_str(&content);
+                }
+            }
+        }
+        format!("{:016x}", fnv1a(acc.as_bytes()))
+    }
+
+    fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    Self::collect_files(&p, out);
+                } else if p.is_file() {
+                    out.push(p);
+                }
+            }
+        }
+    }
+
+    /// Snapshot the fingerprints of a node's dependencies at acceptance.
+    pub fn record_dependencies(&self, node: &Node) -> Result<(), StoreError> {
+        if node.depends_on.is_empty() {
+            return Ok(());
+        }
+        let mut current = serde_json::Map::new();
+        for dep in &node.depends_on {
+            let fp = match self.get(dep) {
+                Ok(dep_node) => self.fingerprint(&dep_node),
+                Err(_) => String::new(),
+            };
+            current.insert(dep.clone(), serde_json::Value::String(fp));
+        }
+        let encoded = serde_json::to_string(&current)?;
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE nodes SET dep_fp=?1, updated_at=?2 WHERE id=?3",
+                params![encoded, &now(), node.id],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Complete nodes whose recorded dependency fingerprints no longer match
+    /// disk: their dependency was reopened and its deliverable changed after
+    /// they were accepted, so their own verification is no longer trustworthy.
+    pub fn stale_ids(&self) -> Result<std::collections::HashSet<String>, StoreError> {
+        let nodes = self.walk()?;
+        let by_id: std::collections::HashMap<&str, &Node> =
+            nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        let mut stale = std::collections::HashSet::new();
+        for node in &nodes {
+            if node.status != COMPLETE || node.depends_on.is_empty() {
+                continue;
+            }
+            let recorded: std::collections::HashMap<String, String> =
+                serde_json::from_str(&node.dep_fp).unwrap_or_default();
+            for dep in &node.depends_on {
+                if let Some(dep_node) = by_id.get(dep.as_str()) {
+                    if recorded.get(dep).map(String::as_str)
+                        != Some(self.fingerprint(dep_node).as_str())
+                    {
+                        stale.insert(node.id.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(stale)
     }
 
     fn next_global_id(&self) -> Result<String, StoreError> {
@@ -1560,6 +1775,207 @@ mod tests {
         assert!(
             compacted.contains("valuable episodic detail"),
             "compaction must preserve the child's trace: {compacted}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn budget_ledger_honours_allocations_and_debits() {
+        let (store, dir) = temp_store("budget");
+        let root = store.init_with_budget("build a thing", Some(1000)).unwrap();
+        let fee = store.split_fee();
+        assert!(store.budget_enabled());
+        assert_eq!(store.budget_remaining("root").unwrap(), 1000 - fee);
+
+        store.debit_call(&root, 50).unwrap();
+        assert_eq!(store.budget_remaining("root").unwrap(), 950 - fee);
+
+        let children = store
+            .add_children(
+                &root,
+                &[Contract {
+                    goal: "producer".into(),
+                    id: "a".into(),
+                    allocation: 300,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        // The parent pays the fee and the grant; the child receives the grant.
+        // `remaining` also keeps one further split-fee in reserve.
+        assert_eq!(
+            store.budget_remaining("root").unwrap(),
+            1000 - 50 - 2 * fee - 300
+        );
+        assert_eq!(store.budget_remaining(&children[0].id).unwrap(), 300 - fee);
+
+        // debits is the node's own call usage plus its split fee.
+        let total: i64 = store
+            .with_conn(|conn| {
+                Ok(
+                    conn.query_row("SELECT debits FROM budget WHERE node_id='root'", [], |r| {
+                        r.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(total, 50 + fee);
+
+        // Allocation is not cosmetic: a grandchild inherits it.
+        let grandchildren = store
+            .add_children(
+                &children[0],
+                &[Contract {
+                    goal: "leaf".into(),
+                    id: "b".into(),
+                    allocation: 100,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            store.budget_remaining(&grandchildren[0].id).unwrap(),
+            100 - fee
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reconcile_repairs_topology_and_drops_vanished_nodes() {
+        let (store, dir) = temp_store("reconcile");
+        let root = store.init("build a thing").unwrap();
+        let children = store
+            .add_children(
+                &root,
+                &[
+                    Contract {
+                        goal: "stays".into(),
+                        id: "a".into(),
+                        ..Default::default()
+                    },
+                    Contract {
+                        goal: "vanishes".into(),
+                        id: "b".into(),
+                        ..Default::default()
+                    },
+                ],
+            )
+            .unwrap();
+        let stays = children[0].clone();
+        let vanishes = children[1].clone();
+
+        // Corrupt the surviving child's topology in the index.
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE nodes SET depth=99, parent='ghost' WHERE id=?1",
+                    params![stays.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        // A directory the index never saw, adopted on reconcile.
+        let stray_dir = root.children_dir().join("root-77");
+        fs::create_dir_all(&stray_dir).unwrap();
+        fs::write(
+            stray_dir.join("contract.md"),
+            "# Contract: root-77\n\n- node: root-77\n\n## Goal\n\nstray work\n",
+        )
+        .unwrap();
+        // A directory that is gone while its row remains.
+        fs::remove_dir_all(&vanishes.path).unwrap();
+
+        store.reconcile().unwrap();
+        let nodes = store.walk().unwrap();
+        let repaired = nodes.iter().find(|n| n.id == stays.id).unwrap();
+        assert_eq!(repaired.depth, 2, "depth must be repaired from disk");
+        assert_eq!(repaired.parent.as_deref(), Some("root"));
+        assert_eq!(repaired.status, PENDING, "a childless node is pending");
+        assert_eq!(
+            nodes.iter().find(|n| n.id == "root").unwrap().status,
+            SPLIT,
+            "a node with children on disk is split"
+        );
+        assert!(
+            !nodes.iter().any(|n| n.id == vanishes.id),
+            "a row whose directory is gone must be deleted"
+        );
+        assert!(
+            nodes.iter().any(|n| n.id == "root-77"),
+            "a directory the index never saw must be adopted"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn changed_dependency_marks_dependent_stale() {
+        let (store, dir) = temp_store("stale");
+        let root = store.init("build a thing").unwrap();
+        let kids = store
+            .add_children(
+                &root,
+                &[
+                    Contract {
+                        goal: "producer".into(),
+                        id: "a".into(),
+                        ..Default::default()
+                    },
+                    Contract {
+                        goal: "consumer".into(),
+                        id: "b".into(),
+                        depends_on: vec!["a".into()],
+                        ..Default::default()
+                    },
+                ],
+            )
+            .unwrap();
+        let producer = kids.iter().find(|n| n.goal == "producer").unwrap().clone();
+        let consumer = kids.iter().find(|n| n.goal == "consumer").unwrap().clone();
+        assert_eq!(
+            consumer.depends_on,
+            vec![producer.id.clone()],
+            "the model-proposed sibling id must resolve to the real node id"
+        );
+
+        store
+            .complete(
+                &producer,
+                "v1",
+                "deliverable",
+                &[("a.txt".into(), "v1".into())],
+            )
+            .unwrap();
+        store
+            .complete(
+                &consumer,
+                "done",
+                "deliverable",
+                &[("b.txt".into(), "done".into())],
+            )
+            .unwrap();
+        assert!(
+            store.stale_ids().unwrap().is_empty(),
+            "a freshly accepted dependent is not stale"
+        );
+
+        // Reopen the producer and change what it delivers.
+        store.set_status(&producer, PENDING).unwrap();
+        store
+            .complete(
+                &producer,
+                "v2",
+                "deliverable",
+                &[("a.txt".into(), "v2".into())],
+            )
+            .unwrap();
+        let stale = store.stale_ids().unwrap();
+        assert!(
+            stale.contains(&consumer.id),
+            "a dependent must be re-run when its dependency changes: {stale:?}"
+        );
+        assert!(
+            !stale.contains(&producer.id),
+            "the changed producer is not itself stale"
         );
         let _ = fs::remove_dir_all(&dir);
     }

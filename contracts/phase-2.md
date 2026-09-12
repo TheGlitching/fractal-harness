@@ -19,3 +19,8 @@ AC2.3 Exhaustion produces a degraded-complete or failed node, and the
       ledger's total debits equal the sum of recorded call costs exactly.
 AC2.4 The hardcoded depth cap is deleted; the depth-3 test from AC0.4 is
       reimplemented as a budget that affords exactly 3 levels.
+
+> Superseded on AC2.4: the hard depth cap is kept as a backstop, and a budget
+> may never be the only bound. `FRACTAL_BUDGET` bounds recursion economically
+> on top of the cap rather than removing it. See `docs/SPEC.md` Gap 4 and the
+> state-semantics task.
