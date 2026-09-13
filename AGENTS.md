@@ -7,9 +7,7 @@
 - Tests are the acceptance criteria. Never weaken, skip, or delete a test to
   make it pass. If a test seems wrong, write your reasoning in notes.md and stop.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`
-  before finishing. `tests/legacy-python/` preserves the original Python
-  acceptance suite as the porting reference for intended scheduler semantics;
-  CI does not run it.
+  before finishing.
 - Nodes execute one at a time on the shared working tree; per-node diffs,
   verification and commits rely on that. Do not re-enable concurrent node
   execution without solving diff/commit attribution first, and keep the
