@@ -351,6 +351,40 @@ pub fn commit_node_work(
     Ok(Some(sha))
 }
 
+/// The commits authored for a node, newest first, as `(sha, subject)`.
+fn node_commits(root: &Path, node_id: &str) -> Vec<(String, String)> {
+    let prefix = format!("{node_id}:");
+    git(root, &["log", "--format=%H %s"])
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(_, subject)| subject.starts_with(&prefix))
+        .map(|(sha, subject)| (sha.to_string(), subject.to_string()))
+        .collect()
+}
+
+/// The patch each commit authored for `node_id` touched, newest first. A node may
+/// have been reopened and recommitted, so every matching commit is shown, not
+/// just the latest. Empty when the node has no commit (a decomposition node, or
+/// one that changed no tracked file).
+pub fn node_diff(root: &Path, node_id: &str, stat: bool) -> Result<String, String> {
+    let commits = node_commits(root, node_id);
+    if commits.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::new();
+    for (sha, subject) in commits {
+        out.push_str(&format!("=== {subject} @ {}\n", &sha[..sha.len().min(8)]));
+        if stat {
+            out.push_str(&git(root, &["show", "--stat", "--oneline", &sha])?);
+        } else {
+            out.push_str(&git(root, &["show", &sha])?);
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
 /// Files a node touched, relative to the repo root.
 pub fn changed_files_since(root: &Path, base: &str) -> Vec<String> {
     git(root, &["diff", "--name-only", base, "HEAD"])

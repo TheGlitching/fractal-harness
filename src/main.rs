@@ -1,3 +1,4 @@
+mod dashboard;
 mod git;
 mod runner;
 mod scheduler;
@@ -112,6 +113,21 @@ enum Commands {
     },
     /// Find modules that exist but nothing imports (advisory; JS/TS projects)
     IntegrateCheck,
+    /// Serve a local web dashboard over the tree (read-only unless steering is used)
+    Serve {
+        /// TCP port to listen on
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        /// Address to bind (default: 127.0.0.1)
+        #[arg(long)]
+        host: Option<String>,
+        /// Bind 0.0.0.0 so another device (e.g. a phone) can reach the dashboard
+        #[arg(long)]
+        bind_all: bool,
+        /// Allow steering (POST) from non-local addresses; off by default
+        #[arg(long = "allow-remote-mutations")]
+        allow_remote_mutations: bool,
+    },
 }
 fn install_panic_hook() {
     let original = std::panic::take_hook();
@@ -471,6 +487,28 @@ fn main() {
                 INTEGRATE_CHECK_SCRIPT,
                 &[project.to_string_lossy().into_owned()],
             );
+        }
+        Commands::Serve {
+            port,
+            host,
+            bind_all,
+            allow_remote_mutations,
+        } => {
+            let s = store::Store::new(&project);
+            if let Err(e) = s.require_initialised() {
+                eprintln!("fractal: {e}");
+                std::process::exit(2);
+            }
+            let cfg = dashboard::ServerConfig {
+                host,
+                port,
+                bind_all,
+                allow_remote_mutations,
+            };
+            if let Err(e) = dashboard::serve(&project, cfg) {
+                eprintln!("fractal: {e}");
+                std::process::exit(1);
+            }
         }
     }
 }

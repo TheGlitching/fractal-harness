@@ -1049,6 +1049,25 @@ impl Store {
         Ok(true)
     }
 
+    /// Persist an edited contract: render it to the node's `contract.md` and
+    /// keep the index's denormalised `goal` column in step, so `status`/`walk`
+    /// and the contract file never disagree about a node's goal. The caller
+    /// records the change in `decisions.md`.
+    pub fn write_contract(&self, node: &Node, contract: &Contract) -> Result<(), StoreError> {
+        fs::write(
+            node.contract_path(),
+            contract.render(&node.id, node.depth, node.parent.as_deref()),
+        )?;
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE nodes SET goal=?1,updated_at=?2 WHERE id=?3",
+                params![contract.goal.trim(), &now(), node.id],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Add a dependency edge `node -> dep_id`. This is the `depends_on`
     /// resolution: the escalating node cannot proceed until the sibling it
     /// discovered it needs has been accepted.
