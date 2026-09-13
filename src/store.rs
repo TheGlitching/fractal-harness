@@ -18,6 +18,26 @@ const LOG_DIRNAME: &str = "log";
 const ARTIFACTS_DIRNAME: &str = "artifacts";
 const CHILDREN_DIRNAME: &str = "children";
 const EVENTS_FILENAME: &str = "events.jsonl";
+const ACTIVITY_DIRNAME: &str = "activity";
+/// The dashboard shows one latest line per node; a bound keeps a runaway
+/// executor line from bloating the state directory.
+const ACTIVITY_MAX_CHARS: usize = 400;
+
+/// A node id is a directory name or a path segment in the tree, not a free-form
+/// string, but activity files are scratch state so they must not escape their
+/// directory even if an id ever contains a separator.
+fn sanitize_id(node_id: &str) -> String {
+    node_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
 pub const PENDING: &str = "pending";
 pub const RUNNING: &str = "running";
@@ -837,6 +857,43 @@ impl Store {
         file.write_all(format!("{line}\n").as_bytes())?;
         let _ = self.record_memory_digest(node);
         Ok(())
+    }
+
+    /// Where the live activity scratch file for a node lives. It is display-only
+    /// state, deliberately outside `log/events.jsonl`: it is not part of the
+    /// audit trail and never enters the tamper digest, so a rewound line cannot
+    /// look like forged memory.
+    pub fn activity_path(&self, node_id: &str) -> PathBuf {
+        self.state_dir
+            .join(ACTIVITY_DIRNAME)
+            .join(sanitize_id(node_id))
+    }
+
+    /// Record the latest executor output line for a node, for the dashboard to
+    /// show while the node runs. Best-effort by contract: a display aid must
+    /// never fail a run, so callers ignore the error.
+    pub fn write_activity(&self, node_id: &str, line: &str) -> Result<(), StoreError> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let mut body: String = trimmed.chars().take(ACTIVITY_MAX_CHARS).collect();
+        if trimmed.chars().count() > ACTIVITY_MAX_CHARS {
+            body.push('…');
+        }
+        let path = self.activity_path(node_id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, body)?;
+        Ok(())
+    }
+
+    /// The last activity line recorded for a node, if any.
+    pub fn read_activity(&self, node_id: &str) -> Option<String> {
+        fs::read_to_string(self.activity_path(node_id))
+            .ok()
+            .filter(|s| !s.trim().is_empty())
     }
 
     /// The bytes of the harness's own per-node memory: `decisions.md` followed by
@@ -1720,6 +1777,31 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         (Store::new(&dir), dir)
+    }
+
+    #[test]
+    fn activity_round_trips_without_touching_the_audit_trail() {
+        let (store, dir) = temp_store("activity");
+        let root = store.init("build a thing").unwrap();
+        let before = store.memory_intact(&root);
+        store
+            .write_activity(&root.id, "  compiling the widget  ")
+            .unwrap();
+        assert_eq!(
+            store.read_activity(&root.id).as_deref(),
+            Some("compiling the widget")
+        );
+        assert!(
+            store.read_activity("never-ran").is_none(),
+            "a node with no activity file has no activity"
+        );
+        assert_eq!(
+            store.memory_intact(&root),
+            before,
+            "display-only activity must not alter the tamper digest"
+        );
+        assert!(store.tampered_nodes().is_empty());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A parent that splits again to add a capability produces a child which

@@ -226,9 +226,17 @@ pub fn run(
         for node in batch {
             let state_output = state.clone();
             let nid = node.id.clone();
+            // The dashboard reads node state from disk, not from this process's
+            // TUI state, so the latest output line is mirrored to a scratch file
+            // as it arrives. `Store::new` only builds paths (no db open), so an
+            // owned, 'static writer is cheap inside the output closure.
+            let activity_store = crate::store::Store::new(&store.root);
             let on_output: crate::runner::OutputFn = Arc::new(move |line: &str| {
+                let clean = line.trim().to_string();
+                if !clean.is_empty() {
+                    activity_store.write_activity(&nid, &clean).ok();
+                }
                 if let Ok(mut s) = state_output.lock() {
-                    let clean = line.trim().to_string();
                     s.log_lines.push(clean.clone());
                     s.node_activities.insert(nid.clone(), clean.clone());
                     if !clean.is_empty() {
@@ -298,7 +306,7 @@ pub fn run(
 /// itself may still be `split` and individually retryable. Surfacing the failure
 /// here makes the run report and exit say `failed` instead of hiding it behind a
 /// non-terminal root status.
-fn surface_root_status(nodes: &[Node]) -> String {
+pub(crate) fn surface_root_status(nodes: &[Node]) -> String {
     let root = nodes
         .first()
         .map(|n| n.status.clone())
