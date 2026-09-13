@@ -551,6 +551,7 @@ fn main() {
                 port,
                 bind_all,
                 allow_remote_mutations,
+                model: headless_model(model_override.as_deref()),
             };
             if let Err(e) = dashboard::serve(&project, cfg) {
                 eprintln!("fractal: {e}");
@@ -612,15 +613,7 @@ fn main() {
                     std::process::exit(2);
                 }
             };
-            let model = model_override
-                .clone()
-                .filter(|m| !m.is_empty())
-                .or_else(|| {
-                    std::env::var("FRACTAL_MODEL")
-                        .ok()
-                        .filter(|m| !m.is_empty())
-                })
-                .unwrap_or_else(|| "default".to_string());
+            let model = headless_model(model_override.as_deref());
             match butler::tool(&s, &request, &model) {
                 Ok(value) => {
                     println!(
@@ -656,6 +649,21 @@ fn run_embedded_script(script: &str, args: &[String]) -> ! {
             std::process::exit(1);
         }
     }
+}
+
+/// Model for a non-interactive surface (the dashboard's butler, the butler
+/// tools): an explicit override or `FRACTAL_MODEL`, else the default. Never
+/// prompts.
+fn headless_model(model_override: Option<&str>) -> String {
+    model_override
+        .map(str::to_string)
+        .filter(|m| !m.is_empty())
+        .or_else(|| {
+            std::env::var("FRACTAL_MODEL")
+                .ok()
+                .filter(|m| !m.is_empty())
+        })
+        .unwrap_or_else(|| "default".to_string())
 }
 
 fn pick_model(model_override: Option<&str>, interactive: bool) -> String {
@@ -950,7 +958,7 @@ fn run_scheduler(
 /// Tell the user where to watch progress. The dashboard is auto-served for the
 /// run's lifetime; when serving is turned off (CI) or cannot bind, the run still
 /// proceeds and the exact command to start it is printed instead.
-fn announce_dashboard(project: &Path, auto_dashboard: bool) {
+fn announce_dashboard(project: &Path, auto_dashboard: bool, model: &str) {
     let fallback = format!(
         "fractal started - see progress here: run 'fractal serve -p {}'",
         project.display()
@@ -959,7 +967,7 @@ fn announce_dashboard(project: &Path, auto_dashboard: bool) {
         println!("{fallback}");
         return;
     }
-    match dashboard::spawn(project) {
+    match dashboard::spawn(project, model) {
         Ok(url) => println!("{}", dashboard::progress_line(&url)),
         Err(e) => println!("{fallback} ({e})"),
     }
@@ -1053,7 +1061,7 @@ fn run_project(
         scheduler::INTERRUPTED.store(true, Ordering::SeqCst);
     });
 
-    announce_dashboard(project, auto_dashboard);
+    announce_dashboard(project, auto_dashboard, &model);
 
     let state = std::sync::Arc::new(std::sync::Mutex::new(tui::TuiState {
         nodes: vec![],

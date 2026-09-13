@@ -6,93 +6,89 @@
 <title>fractal dashboard</title>
 <style>
   /* ------------------------------------------------------------------
-     fractal dashboard - a technical, rust-leaning visual language.
-     Near-black ground with a faint grid and vignette; hairline surfaces;
-     warm rust/amber primary and a cool cyan reserved for dependencies.
-     Every state is written as a word: colour is never the only carrier.
+     fractal dashboard — La Fabrique à Sites, GREEN theme (template-v2).
+     Dark green ground with a fixed visible 12-column grid; 2px borders;
+     bright green accent; serif display for headings, uppercase mono for
+     labels, ids and body. Every state is written as a word: colour is
+     never the only carrier.
      ------------------------------------------------------------------ */
   :root {
-    --bg: #08090c;
-    --bg-2: #0b0d12;
-    --panel: #0f1218;
-    --panel-2: #141821;
-    --panel-3: #1a1f2b;
-    --line: #242b3a;
-    --line-soft: #1a1f2a;
-    --text: #ece9e2;
-    --muted: #8d94a6;
-    --faint: #5b6377;
-    --rust: #d98a4e;
-    --rust-2: #f0a860;
-    --rust-soft: rgba(217,138,78,.14);
-    --cyan: #58c9d6;
-    --cyan-soft: rgba(88,201,214,.14);
-    --complete: #6fbf8f;
-    --running: #e0a340;
-    --ready: #58c9d6;
-    --failed: #e0716f;
-    --waiting: #9b8fd0;
-    --pending: #717a8d;
-    --suspended: #b48ead;
-    --split: #d98a4e;
+    --bg: oklch(14% 0.012 145);
+    --bg-2: oklch(16% 0.013 145);
+    --panel: oklch(18% 0.014 145);
+    --panel-2: oklch(21% 0.015 145);
+    --panel-3: oklch(25% 0.016 145);
+    --fg: oklch(95% 0.03 130);
+    --text: var(--fg);
+    --muted: oklch(70% 0.04 130);
+    --faint: oklch(55% 0.035 130);
+    --border: oklch(95% 0.03 130);
+    --line: var(--border);
+    --line-soft: color-mix(in oklab, var(--fg) 20%, transparent);
+    --grid: color-mix(in oklab, var(--fg) 12%, transparent);
+    --rust: oklch(86% 0.24 132);
+    --rust-2: oklch(92% 0.2 132);
+    --rust-soft: color-mix(in oklab, var(--accent) 16%, transparent);
+    --cyan: oklch(80% 0.12 200);
+    --cyan-soft: color-mix(in oklab, var(--cyan) 16%, transparent);
+    --complete: oklch(80% 0.2 140);
+    --running: oklch(84% 0.16 85);
+    --ready: oklch(80% 0.12 200);
+    --failed: oklch(70% 0.18 25);
+    --waiting: oklch(78% 0.1 300);
+    --pending: oklch(62% 0.03 130);
+    --suspended: oklch(78% 0.1 330);
+    --split: oklch(84% 0.16 85);
     --accent: var(--rust);
-    --accent-ink: #17100a;
-    --radius: 12px;
-    --shadow: 0 1px 2px rgba(0,0,0,.45), 0 18px 44px -26px rgba(0,0,0,.9);
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --accent-ink: oklch(15% 0.03 132);
+    --bw: 2px;
+    --radius: 0px;
+    --shadow: 0 18px 44px -30px rgba(0,0,0,.9);
+    --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: var(--mono);
+    --serif: "Times New Roman", "Iowan Old Style", Georgia, serif;
+    --ease: cubic-bezier(.2,.7,.15,1);
+    --ease-out: cubic-bezier(0.23,1,0.32,1);
+    --ease-in-out: cubic-bezier(0.77,0,0.175,1);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
     margin: 0;
-    background:
-      radial-gradient(1100px 640px at 50% -12%, rgba(217,138,78,.10), transparent 62%),
-      radial-gradient(900px 620px at 108% 112%, rgba(88,201,214,.06), transparent 60%),
-      linear-gradient(180deg, var(--bg), var(--bg-2));
+    background: var(--bg);
     color: var(--text);
-    font-family: var(--sans);
+    font-family: var(--mono);
     font-size: 15px;
     line-height: 1.5;
+    overflow-x: hidden;
     -webkit-text-size-adjust: 100%;
   }
-  /* A faint technical grid that drifts almost imperceptibly. */
+  /* Fixed visible 12-column grid, low opacity, per the design system. */
   body::before {
-    content: ""; position: fixed; inset: -3px; z-index: -1; pointer-events: none;
-    background-image:
-      repeating-linear-gradient(0deg, rgba(255,255,255,.022) 0 1px, transparent 1px 26px),
-      repeating-linear-gradient(90deg, rgba(255,255,255,.022) 0 1px, transparent 1px 26px);
-    -webkit-mask-image: radial-gradient(ellipse 82% 72% at 50% 26%, #000 32%, transparent 100%);
-    mask-image: radial-gradient(ellipse 82% 72% at 50% 26%, #000 32%, transparent 100%);
-    animation: drift 64s linear infinite;
+    content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background-image: linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: calc(100% / 12) 100%;
   }
-  /* Depth: a vignette that sinks the corners into black. */
-  body::after {
-    content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
-    background: radial-gradient(125% 95% at 50% -18%, transparent 42%, rgba(0,0,0,.6) 100%);
-  }
-  @keyframes drift { to { background-position: 0 260px, 260px 0; } }
-  a { color: var(--rust); text-decoration: none; }
+  a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   code, pre, .mono { font-family: var(--mono); }
+  h1, h2, h3, h4 { font-family: var(--serif); font-weight: 400; letter-spacing: -.01em; }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  ::selection { background: var(--accent); color: var(--accent-ink); }
 
   /* ---------- app bar ---------- */
   .appbar {
     position: sticky; top: 0; z-index: 20;
     display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
     padding: 10px 18px;
-    background: rgba(8,9,12,.82);
-    backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--line);
+    background: var(--bg);
+    border-bottom: var(--bw) solid var(--border);
   }
   .brand {
-    display: inline-flex; align-items: center; gap: 8px;
-    font-weight: 700; letter-spacing: .02em; font-size: 15px;
+    display: inline-flex; align-items: baseline; gap: 8px;
+    font-family: var(--serif); font-weight: 400; letter-spacing: -.02em; font-size: 20px;
   }
-  .brand .spark {
-    color: var(--rust); font-size: 13px;
-    filter: drop-shadow(0 0 6px rgba(217,138,78,.7));
-  }
+  .brand .spark { color: var(--accent); font-size: 13px; }
   .project {
     color: var(--muted); font-family: var(--mono); font-size: 12px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -101,22 +97,22 @@
   .appbar .spacer { flex: 1; }
   .live {
     display: inline-flex; align-items: center; gap: 7px;
-    font-size: 12px; color: var(--muted); white-space: nowrap;
+    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); white-space: nowrap;
     font-family: var(--mono);
   }
   .live .pulse {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: var(--complete); box-shadow: 0 0 0 0 rgba(111,191,143,.5);
+    width: 8px; height: 8px;
+    background: var(--complete);
   }
   .live.busy .pulse { background: var(--running); animation: pulse 1.4s infinite; }
   .live.off .pulse { background: var(--failed); animation: none; }
   @keyframes pulse {
-    0% { box-shadow: 0 0 0 0 rgba(224,163,64,.55); }
-    70% { box-shadow: 0 0 0 7px rgba(224,163,64,0); }
-    100% { box-shadow: 0 0 0 0 rgba(224,163,64,0); }
+    0%, 100% { opacity: 1; }
+    50% { opacity: .45; }
   }
 
-  .wrap { max-width: 1400px; margin: 0 auto; padding: 18px; }
+  .wrap { max-width: 1400px; margin: 0 auto; padding: 18px; position: relative; z-index: 1; }
 
   /* ---------- overview ---------- */
   .overview {
@@ -127,11 +123,6 @@
     box-shadow: var(--shadow);
     padding: 18px 20px;
     margin-bottom: 18px;
-  }
-  .overview::before {
-    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-    background: linear-gradient(180deg, var(--rust), transparent 80%);
-    opacity: .8;
   }
   .overview-top { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
   .overview-goal { flex: 1 1 340px; min-width: 0; }
@@ -164,7 +155,7 @@
   .progress { margin-top: 16px; }
   .progress-head { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 6px; gap: 10px; flex-wrap: wrap; }
   .bar { height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; border: 1px solid var(--line-soft); }
-  .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--rust), var(--rust-2)); width: 0; transition: width .5s ease; box-shadow: 0 0 12px rgba(217,138,78,.5); }
+  .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--rust-2)); width: 0; transition: width .5s var(--ease-out); }
 
   .nowrunning {
     margin-top: 16px; padding: 12px 14px;
@@ -250,20 +241,13 @@
   /* ---------- graph ---------- */
   .graph-scroll { overflow: auto; max-height: calc(100vh - 250px); overscroll-behavior: contain; }
   .graph-scroll.graph-view { overflow: hidden; height: clamp(380px, 64vh, 780px); max-height: none; }
-  .graph {
-    position: relative; width: 100%; min-height: 220px;
-    background:
-      radial-gradient(circle at 50% 50%, rgba(217,138,78,.05), transparent 62%),
-      repeating-linear-gradient(0deg, transparent 0 27px, rgba(255,255,255,.02) 27px 28px),
-      repeating-linear-gradient(90deg, transparent 0 27px, rgba(255,255,255,.02) 27px 28px);
-  }
+  .graph { position: relative; width: 100%; min-height: 220px; background: transparent; }
   .graph-scroll.graph-view .graph { height: 100%; }
   .graph svg.graph-svg { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   .graph svg.graph-svg.panning { cursor: grabbing; }
 
-  .lattice-ring { fill: none; stroke: rgba(255,255,255,.05); stroke-width: 1; }
-  .lattice-frame { fill: none; stroke: rgba(217,138,78,.10); stroke-width: 1; }
-  .lattice-core { fill: url(#coreGlow); }
+  .leader { stroke: color-mix(in oklab, var(--fg) 45%, transparent); stroke-width: 1; }
+  .gnode.hide-label .node-label, .gnode.hide-label .leader { display: none; }
 
   .edge { fill: none; stroke-linecap: round; }
   .edge-parent { stroke: var(--line); stroke-width: 1.15; }
@@ -272,8 +256,7 @@
   .edge-parent.edge-active { stroke: var(--running); stroke-width: 1.7; stroke-dasharray: 6 7; animation: dashflow 1.1s linear infinite; }
   .edge-parent.edge-failed { stroke: var(--failed); stroke-width: 1.7; }
   .edge-parent.onpath {
-    stroke: var(--rust); stroke-width: 2.3; stroke-dasharray: none;
-    filter: drop-shadow(0 0 4px rgba(217,138,78,.55));
+    stroke: var(--accent); stroke-width: 2.3; stroke-dasharray: none;
   }
   .edge-dep { stroke: var(--cyan); stroke-width: 1.15; stroke-dasharray: 3 5; opacity: 0; transition: opacity .18s ease; }
   .edge-dep.show { opacity: .85; animation: dashflow 1.8s linear infinite; }
@@ -285,18 +268,17 @@
   @keyframes dashflow { to { stroke-dashoffset: -26; } }
 
   .gnode { cursor: pointer; }
-  .gnode .node-halo { fill: var(--rust); opacity: 0; transition: opacity .2s ease; }
   .gnode .node-dot {
     fill: var(--panel-3); stroke: var(--line); stroke-width: 1.3;
     transition: stroke .18s ease, stroke-width .18s ease;
   }
-  .gnode:hover .node-dot { stroke: var(--rust); }
+  .gnode:hover .node-dot { stroke: var(--accent); }
   .gnode:focus-visible { outline: none; }
-  .gnode:focus-visible .node-halo { opacity: .22; }
   .gnode .node-glyph { fill: var(--muted); font-family: var(--mono); pointer-events: none; }
-  .gnode.onpath .node-halo { opacity: .14; }
-  .gnode.selected .node-dot { stroke: var(--rust); stroke-width: 2.6; }
-  .gnode.selected .node-halo { opacity: .3; }
+  .gnode.selected .node-dot {
+    stroke: var(--accent); stroke-width: 2.6;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,.6));
+  }
   .gnode.selected .node-label .nl-id { fill: var(--rust-2); }
 
   /* Status is carried by stroke plus the status word on every label. */
@@ -304,7 +286,7 @@
   .gnode.complete .node-glyph { fill: var(--complete); }
   .gnode.running .node-dot { stroke: var(--running); stroke-width: 2; }
   .gnode.running .node-glyph { fill: var(--running); }
-  .gnode.running { animation: nodepulse 1.9s ease-in-out infinite; }
+  .gnode.running .node-dot, .gnode.running .node-glyph { animation: nodepulse 1.7s ease-in-out infinite; }
   .gnode.ready .node-dot { stroke: var(--ready); }
   .gnode.ready .node-glyph { fill: var(--ready); }
   .gnode.waiting .node-dot { stroke: var(--waiting); }
@@ -314,8 +296,8 @@
   .gnode.suspended .node-dot { stroke: var(--suspended); }
   .gnode.split .node-dot { stroke: var(--split); }
   @keyframes nodepulse {
-    0%, 100% { filter: drop-shadow(0 0 1px rgba(224,163,64,.35)); }
-    50% { filter: drop-shadow(0 0 7px rgba(224,163,64,.8)); }
+    0%, 100% { opacity: 1; }
+    50% { opacity: .5; }
   }
   .node-label { font-family: var(--mono); pointer-events: none; }
   .node-label .nl-id { fill: var(--text); letter-spacing: -.02em; }
@@ -338,7 +320,7 @@
     background: rgba(10,12,16,.97);
     border: 1px solid var(--line); border-radius: 10px;
     padding: 10px 12px;
-    box-shadow: 0 16px 46px -16px rgba(0,0,0,.9), 0 0 0 1px rgba(217,138,78,.14);
+    box-shadow: 0 16px 46px -16px rgba(0,0,0,.9);
     font-size: 12.5px; color: var(--text);
   }
   .gtt.show { opacity: 1; transform: none; }
@@ -488,49 +470,78 @@
   details.disclosure[open] > summary::before { content: "▾ "; }
   details.disclosure .inner { padding: 0 12px 12px; }
 
-  /* ---------- steering ---------- */
-  .steer-group { margin-top: 18px; }
-  .steer-group:first-of-type { margin-top: 0; }
-  .steer-group > h4.group-title {
-    margin: 0 0 3px; font-size: 12.5px; font-weight: 700; color: var(--text);
-    text-transform: none; letter-spacing: 0;
+  /* ---------- conversation with the butler ---------- */
+  .workspace {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(330px, 400px);
+    gap: 18px; align-items: start; min-width: 0;
   }
-  .steer-group > p.group-hint { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
-  .steer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
-  .action {
-    background: var(--bg-2); border: 1px solid var(--line-soft);
-    border-radius: 12px; padding: 14px;
-  }
-  .action h4 { margin: 0 0 2px; font-size: 13.5px; color: var(--text); font-weight: 650; text-transform: none; letter-spacing: 0; }
-  .action p.hint { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
-  .action p.hint .when { color: var(--text); font-weight: 600; }
-  .action p.hint .consequence { color: var(--running); }
-  .action.destructive { border-color: rgba(224,113,111,.4); background: rgba(224,113,111,.05); }
-  .action.destructive h4 { color: var(--failed); }
+  .col-main { min-width: 0; }
+  .col-side { position: sticky; top: 66px; min-width: 0; }
 
-  .confirm-row {
-    display: flex; flex-direction: column; gap: 8px; margin-top: 8px;
-    padding: 10px; border-radius: 9px;
-    background: rgba(224,163,64,.08); border: 1px solid rgba(224,163,64,.35);
+  .chat-panel { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+  .chat-status { font-family: var(--mono); font-size: 11px; color: var(--running); }
+  .chat-status:empty { display: none; }
+  .chat-log {
+    display: flex; flex-direction: column; gap: 14px;
+    padding: 14px; overflow-y: auto;
+    max-height: calc(100vh - 210px);
+    overscroll-behavior: contain;
   }
-  .confirm-row .confirm-msg { font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
-  .confirm-row .confirm-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chat-turn { display: flex; flex-direction: column; gap: 9px; }
+  .msg {
+    border-radius: 11px; padding: 9px 12px; font-size: 13.5px;
+    line-height: 1.5; overflow-wrap: anywhere; min-width: 0;
+  }
+  .msg.user {
+    align-self: flex-end; max-width: 92%;
+    background: var(--rust-soft); border: 1px solid rgba(217,138,78,.32);
+    white-space: pre-wrap;
+  }
+  .msg.butler { background: var(--panel-2); border: 1px solid var(--line-soft); }
+  .msg.butler.err { border-color: rgba(224,113,111,.5); color: #ffb4b4; }
+  .msg.butler.working { color: var(--muted); display: flex; align-items: center; gap: 9px; }
+  .wdots { display: inline-flex; gap: 3px; flex: none; }
+  .wdots i {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--running);
+    animation: wdot 1.2s ease-in-out infinite;
+  }
+  .wdots i:nth-child(2) { animation-delay: .18s; }
+  .wdots i:nth-child(3) { animation-delay: .36s; }
+  @keyframes wdot { 0%, 100% { opacity: .28; } 50% { opacity: 1; } }
 
-  .result {
-    margin: 0 0 14px; padding: 11px 13px; border-radius: 10px; font-size: 13px;
-    border: 1px solid var(--line-soft); background: var(--bg-2); overflow-wrap: anywhere;
+  .plan-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .plan-action {
+    display: inline-block; font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .06em; padding: 2px 9px; border-radius: 999px;
+    border: 1px solid currentColor; color: var(--rust-2);
   }
-  .result.ok { border-color: rgba(111,191,143,.5); }
-  .result.err { border-color: rgba(224,113,111,.5); color: #ffb4b4; }
-  .result .head { font-weight: 650; display: block; margin-bottom: 2px; }
-  .result.ok .head { color: var(--complete); }
-  .result.err .head { color: var(--failed); }
-  .result .stale-note { color: var(--running); display: block; margin-top: 5px; }
+  .plan-action.none { color: var(--complete); }
+  .plan-action.reopen, .plan-action.retry { color: var(--running); }
+  .plan-action.split { color: var(--cyan); }
+  .plan-nodes { font-size: 11.5px; color: var(--muted); }
+  .plan-why { margin-top: 8px; color: var(--text); font-size: 13px; }
+  .changes {
+    margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line-soft);
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .changes-title {
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--faint); font-weight: 700;
+  }
+  .change { font-size: 12px; color: var(--muted); }
+  details.disclosure.reply { margin-top: 9px; }
+  details.disclosure.reply .box { max-height: 260px; }
 
-  li.hit, .event.hit {
-    background: rgba(111,191,143,.14); border-radius: 6px;
-    box-shadow: inset 2px 0 0 var(--complete); padding-left: 8px;
+  .chat-form {
+    display: flex; gap: 8px; align-items: flex-end;
+    padding: 12px 14px; border-top: 1px solid var(--line-soft);
   }
+  .chat-form textarea {
+    min-height: 44px; max-height: 160px; resize: vertical; flex: 1 1 auto; min-width: 0;
+  }
+  .chat-form .btn { flex: none; }
+
+  /* Keep the technical language of the graph: hairline surfaces, mono ids. */
   form { display: flex; flex-direction: column; gap: 8px; }
   label { font-size: 12px; color: var(--muted); }
   input[type=text], textarea, select {
@@ -574,6 +585,11 @@
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
   /* ---------- responsive ---------- */
+  @media (max-width: 1000px) {
+    .workspace { grid-template-columns: minmax(0, 1fr); }
+    .col-side { position: static; order: -1; }
+    .chat-log { max-height: 44vh; }
+  }
   @media (max-width: 900px) {
     .wrap { padding: 12px; }
     .project { max-width: 100%; }
@@ -590,8 +606,109 @@
     .detail-head, .detail-body { padding-left: 13px; padding-right: 13px; }
     .panel-head { gap: 8px; }
   }
+  /* ==================================================================
+     La Fabrique (green) theme layer — applied to the whole page.
+     Serif display headings; uppercase letterspaced mono labels, ids and
+     body; 2px borders; square corners; bordered buttons whose fill
+     scales up from the bottom on hover with a colour invert.
+     ================================================================== */
+  .panel, .overview, .stat, .state-note, .chat-panel, .box, .diff-box,
+  .disclosure, .toast, .gtt { border-radius: 0; }
+  .panel, .overview { border: var(--bw) solid var(--border); }
+  .panel-head { border-bottom: var(--bw) solid var(--border); }
+  .goal-title { font-family: var(--serif); font-weight: 400; letter-spacing: -.01em; }
+
+  .panel-head h2, .section h3, .eyebrow, .stat .k, .nextup .label, .label,
+  .chat-status, .legend, .live, .gtoggle, .viewtoggle button, .zoomctl button {
+    font-family: var(--mono); text-transform: uppercase; letter-spacing: .14em;
+  }
+  .panel-head h2, .section h3 { color: var(--muted); }
+  .section h3 { color: var(--accent); }
+  .stat { border: var(--bw) solid var(--border); background: var(--panel-2); }
+  .stat .n { font-family: var(--serif); font-weight: 400; }
+  .legend { border-bottom: var(--bw) solid var(--border); color: var(--muted); }
+  .chip { border-radius: 0; border-width: 1px; letter-spacing: .1em; }
+  .bar { border-radius: 0; border: 1px solid var(--line-soft); height: 10px; }
+  .bar > span { border-radius: 0; background: var(--accent); box-shadow: none; }
+
+  /* Buttons: 2px border, uppercase mono, bottom-up fill + invert. */
+  .btn {
+    position: relative; display: inline-flex; align-items: center; justify-content: center;
+    gap: .5em; padding: .8em 1.35em; min-height: 42px;
+    border: var(--bw) solid var(--border); border-radius: 0;
+    background: transparent; color: var(--fg); font-family: var(--mono);
+    font-size: .72rem; font-weight: 500; letter-spacing: .14em; text-transform: uppercase;
+    overflow: hidden; isolation: isolate;
+    transition: color .2s var(--ease), transform .2s var(--ease);
+  }
+  .btn::after {
+    content: ""; position: absolute; inset: 0; z-index: -1;
+    background: var(--accent); transform: scaleY(0); transform-origin: bottom;
+    transition: transform .3s var(--ease);
+  }
+  .btn:active { transform: translateY(2px); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.warn { border-color: var(--running); }
+  .btn.ghost { border-color: var(--border); }
+  @media (hover: hover) and (pointer: fine) {
+    .btn:hover { color: var(--accent-ink); }
+    .btn:hover::after { transform: scaleY(1); }
+    .btn:focus-visible { color: var(--accent-ink); }
+    .btn:focus-visible::after { transform: scaleY(1); }
+  }
+
+  input[type=text], textarea, select {
+    border: var(--bw) solid var(--border); border-radius: 0; background: var(--bg);
+    font-family: var(--mono);
+  }
+  .chat-form textarea { border-color: color-mix(in oklab, var(--fg) 40%, transparent); }
+  .chat-form textarea:focus { border-color: var(--accent); }
+
+  .msg { border-width: var(--bw); border-radius: 0; }
+  .msg.user { background: color-mix(in oklab, var(--accent) 14%, transparent); border-color: var(--accent); }
+  .msg.butler { background: var(--panel-2); }
+  .plan-action { border-radius: 0; border-width: var(--bw); }
+  .wdots i { background: var(--accent); }
+
+  .gtt { border: var(--bw) solid var(--border); background: var(--bg); }
+  .gtt-id { color: var(--accent); }
+  /* Origin-aware tooltip: anchored to the pointer, instant after the first. */
+  .gtt { transition: opacity .18s var(--ease), transform .18s var(--ease); }
+  .gtt.instant { transition: none; }
+
+  .row, .gnode { transition: background-color .2s var(--ease), border-color .2s var(--ease); }
+  .row.selected { background: color-mix(in oklab, var(--accent) 14%, transparent); border-color: var(--accent); }
+
+  @media (hover: hover) and (pointer: fine) {
+    .row:hover { background: var(--panel-2); }
+  }
+
+  /* Browser surfaces that ship with no design system: selection (above),
+     caret, scrollbars, placeholder, underline offset, tabular numerals. */
+  html {
+    caret-color: var(--accent);
+    scrollbar-color: var(--line-soft) var(--bg);
+    scrollbar-width: thin;
+  }
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--line-soft); border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  ::placeholder { color: var(--muted); opacity: 1; }
+  a { text-underline-offset: 3px; }
+  .mono, .stat .n, .num, .event .t, .node-label, .row-tag, .change,
+  .plan-nodes, .goal-sub, .project, .gtt-metric, .gtt-metrics, .clock {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Reduced motion: keep opacity and colour, drop movement. */
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; transition: none !important; }
+    *, *::before, *::after {
+      animation: none !important;
+      transition-duration: .001ms !important;
+      transition-property: opacity, color, background-color, border-color !important;
+    }
+    .btn:active, .btn::after { transform: none !important; }
   }
 </style>
 </head>
@@ -604,47 +721,66 @@
   </header>
 
   <div class="wrap">
-    <section class="overview" id="overview">
-      <div class="state-note">Loading run state…</div>
-    </section>
-    <section class="panel graph-panel">
-      <div class="panel-head">
-        <h2>Task graph</h2>
-        <div class="gtools">
-          <label class="gtoggle" title="Draw every depends_on edge. Off, only the hovered or selected node's dependencies are drawn, so the graph stays readable.">
-            <input type="checkbox" id="show-deps" /> All dependencies
-          </label>
-          <div class="zoomctl" role="group" aria-label="Zoom">
-            <button type="button" id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
-            <span class="sep"></span>
-            <button type="button" id="zoom-fit" title="Fit to view" aria-label="Fit to view">⤢</button>
-            <span class="sep"></span>
-            <button type="button" id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+    <div class="workspace">
+      <div class="col-main">
+        <section class="overview" id="overview">
+          <div class="state-note">Loading run state…</div>
+        </section>
+        <section class="panel graph-panel">
+          <div class="panel-head">
+            <h2>Task graph</h2>
+            <div class="gtools">
+              <label class="gtoggle" title="Draw every depends_on edge. Off, only the hovered or selected node's dependencies are drawn, so the graph stays readable.">
+                <input type="checkbox" id="show-deps" /> All dependencies
+              </label>
+              <div class="zoomctl" role="group" aria-label="Zoom">
+                <button type="button" id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
+                <span class="sep"></span>
+                <button type="button" id="zoom-fit" title="Fit to view" aria-label="Fit to view">⤢</button>
+                <span class="sep"></span>
+                <button type="button" id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+              </div>
+              <div class="viewtoggle" role="group" aria-label="Tree view">
+                <button type="button" id="view-graph" class="active" aria-pressed="true">Graph</button>
+                <button type="button" id="view-rows" aria-pressed="false">Rows</button>
+              </div>
+            </div>
+            <span class="muted" id="treeCount"></span>
           </div>
-          <div class="viewtoggle" role="group" aria-label="Tree view">
-            <button type="button" id="view-graph" class="active" aria-pressed="true">Graph</button>
-            <button type="button" id="view-rows" aria-pressed="false">Rows</button>
+          <div class="legend" id="legend">
+            <span class="item"><span class="swatch parent"></span>parent → child</span>
+            <span class="item"><span class="swatch dep"></span>depends on</span>
+            <span class="item"><span class="swatch active"></span>active path</span>
+            <span class="item"><span class="swatch complete"></span>done</span>
+            <span class="item"><span class="swatch failed"></span>failed</span>
+            <span class="item"><span class="swatch pending"></span>waiting</span>
+            <span class="item hint">hover a node for its dependencies</span>
           </div>
-        </div>
-        <span class="muted" id="treeCount"></span>
+          <div class="nextup" id="nextup" aria-live="polite"></div>
+          <div class="graph-scroll" id="graph-scroll">
+            <div class="graph" id="tree"><div class="state-note">Waiting for nodes…</div></div>
+          </div>
+        </section>
+        <section class="panel detail" id="detail">
+          <div class="state-note">Select a node to see its contract, activity and diff.</div>
+        </section>
       </div>
-      <div class="legend" id="legend">
-        <span class="item"><span class="swatch parent"></span>parent → child</span>
-        <span class="item"><span class="swatch dep"></span>depends on</span>
-        <span class="item"><span class="swatch active"></span>active path</span>
-        <span class="item"><span class="swatch complete"></span>done</span>
-        <span class="item"><span class="swatch failed"></span>failed</span>
-        <span class="item"><span class="swatch pending"></span>waiting</span>
-        <span class="item hint">hover a node for its dependencies</span>
-      </div>
-      <div class="nextup" id="nextup" aria-live="polite"></div>
-      <div class="graph-scroll" id="graph-scroll">
-        <div class="graph" id="tree"><div class="state-note">Waiting for nodes…</div></div>
-      </div>
-    </section>
-    <section class="panel detail" id="detail">
-      <div class="state-note">Select a node to see its contract, activity and controls.</div>
-    </section>
+      <aside class="col-side">
+        <section class="panel chat-panel">
+          <div class="panel-head">
+            <h2>Conversation</h2>
+            <span class="chat-status" id="chat-status" aria-live="polite"></span>
+          </div>
+          <div class="chat-log" id="chat-log">
+            <div class="state-note">Ask the butler to change the plan in plain language — it decides the smallest correct change.</div>
+          </div>
+          <form class="chat-form" id="chat-form">
+            <textarea id="chat-input" placeholder="e.g. the tracker should use real data, not simulated" aria-label="Message the butler"></textarea>
+            <button class="btn" type="submit" id="chat-send">Send</button>
+          </form>
+        </section>
+      </aside>
+    </div>
   </div>
 
   <div class="gtt" id="gtt" role="tooltip" aria-hidden="true"></div>
@@ -661,10 +797,12 @@ let selected = null;
 let selectedSig = "";
 let detailBusy = false;
 let showDeps = false;
-/* The last steering result persists across poll re-renders so the user is never
-   left guessing whether an action landed; `highlight` marks the text it added. */
-let lastAction = null;
-let highlight = null;
+/* The durable conversation with the butler, mirrored from GET /api/butler.
+   `chatSig` avoids rebuilding the log on every poll, and re-rendering never
+   touches the input element, so what the user is typing survives. */
+let conversation = [];
+let chatSig = "";
+let chatBusy = false;
 /* Graph interaction state: the node under the cursor, the built SVG and its
    viewBox (so zoom/pan can adjust it), and a cache signature so the 2s poll
    does not thrash a graph whose structure has not changed. */
@@ -672,6 +810,9 @@ let hover = null;
 let graphAPI = null;
 let graphSig = "";
 let suppressClick = false;
+/* The first tooltip eases in; every one after it is instant, so scanning a
+   dense graph is not a queue of little animations. */
+let tooltipSeen = false;
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
@@ -761,11 +902,11 @@ async function jget(url) {
   if (!r.ok || data.error) throw new Error(data.error || ("HTTP " + r.status));
   return data;
 }
-async function jpost(action) {
-  const r = await fetch("/api/action", {
+async function jpost(url, payload) {
+  const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(action),
+    body: JSON.stringify(payload),
   });
   return r.json().catch(() => ({ ok: false, error: "HTTP " + r.status }));
 }
@@ -777,6 +918,104 @@ function toast(msg, isErr) {
   box.className = "toast show " + (isErr ? "err" : "ok");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { box.className = "toast"; }, 5000);
+}
+
+/* ---------- conversation with the butler ----------
+   The button is the way you steer: a plain-language message goes to POST
+   /api/butler, which claims a turn and runs the butler agent off the request.
+   The transcript is durable (GET /api/butler), so a refresh shows the same
+   conversation, including a request that is still working. */
+const ACTION_WORD = {
+  none: "Kept — no change", reopen: "Reopened", split: "Added new nodes",
+  amend: "Amended", edit_contract: "Edited contract", retry: "Retried",
+  resolve: "Resolved",
+};
+function conversationSig() {
+  return JSON.stringify(conversation.map((t) => [
+    t.id, t.status, (t.reply || "").length, t.error || "", t.plan && t.plan.rationale,
+    (t.tree_changes || []).length,
+  ]));
+}
+function renderTurn(t) {
+  const user = `<div class="msg user">${esc(t.message)}</div>`;
+  let butler;
+  if (t.status === "working") {
+    butler = `<div class="msg butler working"><span class="wdots"><i></i><i></i><i></i></span>
+      The butler is inspecting the tree and applying the smallest correct change…</div>`;
+  } else if (t.status === "failed") {
+    butler = `<div class="msg butler err"><b>Request failed.</b> ${esc(t.error || "unknown error")}</div>`;
+  } else {
+    butler = renderReply(t);
+  }
+  return `<div class="chat-turn">${user}${butler}</div>`;
+}
+function renderReply(t) {
+  const plan = t.plan || {};
+  const action = plan.action || "none";
+  const nodes = plan.nodes || [];
+  const changes = t.tree_changes || [];
+  const word = ACTION_WORD[action] || action;
+  const head = `<div class="plan-head">
+      <span class="plan-action ${esc(action)}">${esc(word)}</span>
+      ${nodes.length ? `<span class="plan-nodes mono">${nodes.map(esc).join(", ")}</span>` : ""}
+    </div>`;
+  const why = plan.rationale ? `<div class="plan-why">${esc(plan.rationale)}</div>` : "";
+  const changeList = changes.length
+    ? `<div class="changes"><div class="changes-title">Tree changes</div>${changes.map((c) =>
+        `<div class="change mono">${esc(c.id)} ${esc(c.from)} → ${esc(c.to)}</div>`).join("")}</div>`
+    : "";
+  const notes = t.reply
+    ? `<details class="disclosure reply"><summary>Butler's notes</summary><div class="inner"><pre class="box">${esc(t.reply)}</pre></div></details>`
+    : "";
+  return `<div class="msg butler">${head}${why}${changeList}${notes}</div>`;
+}
+function renderChat(force) {
+  const log = el("chat-log");
+  if (!log) return;
+  const sig = conversationSig();
+  if (!force && sig === chatSig) return;
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  chatSig = sig;
+  log.innerHTML = conversation.length
+    ? conversation.map(renderTurn).join("")
+    : '<div class="state-note">Ask the butler to change the plan in plain language — it decides the smallest correct change.</div>';
+  const last = conversation[conversation.length - 1];
+  chatBusy = !!(last && last.status === "working");
+  const send = el("chat-send");
+  if (send) send.disabled = chatBusy;
+  const status = el("chat-status");
+  if (status) status.textContent = chatBusy ? "working…" : "";
+  if (force || atBottom) log.scrollTop = log.scrollHeight;
+}
+async function pollConversation(force) {
+  try {
+    const data = await jget("/api/butler");
+    conversation = data.turns || [];
+    renderChat(force);
+  } catch (err) {
+    if (force) toast("Could not load the conversation — " + err, true);
+  }
+}
+async function sendChat(ev) {
+  ev.preventDefault();
+  const input = el("chat-input");
+  const message = (input.value || "").trim();
+  if (!message || chatBusy) return;
+  const send = el("chat-send");
+  send.disabled = true;
+  try {
+    const res = await jpost("/api/butler", { message });
+    if (res && res.ok) {
+      input.value = "";
+      await pollConversation(true);
+    } else {
+      toast((res && res.error) || "the butler could not start", true);
+      send.disabled = false;
+    }
+  } catch (err) {
+    toast("Request failed — " + err, true);
+    send.disabled = false;
+  }
 }
 
 /* ---------- overview ---------- */
@@ -992,9 +1231,9 @@ function renderGraph() {
   const S = 0.82;
   const ringR = [0];
   for (let d = 1; d <= maxDepth; d++) ringR[d] = 92 * Math.pow(d, 0.72);
-  const maxR = Math.max(ringR[maxDepth], 1);
   const baseNodeR = (d) => Math.max(4.5, 15 * Math.pow(S, d));
-  const fsOf = (d) => Math.max(9, 12.5 * Math.pow(0.93, d));
+  // Legible type: never below 11px, and it shrinks gently with depth.
+  const fsOf = (d) => Math.max(11, 13 * Math.pow(0.94, d));
 
   // Recursive placement: a node's angle is its wedge's bisector.
   const pos = {};
@@ -1020,10 +1259,11 @@ function renderGraph() {
   };
   place(root, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2, 0);
 
-  // Labels. A candidate label is resolved against every other node dot and
-  // every already-placed label: shallow nodes keep their goal line, deeper
-  // nodes fall back to id + status, and a label that would still collide is
-  // hidden entirely (the tooltip always has goal, status and counts).
+  // Labels. Fewer by default: only the root and the first generation are
+  // labelled up front; deeper labels are gathered for a node and revealed on
+  // hover or selection, so a wide graph stays readable. A leader line ties each
+  // label to its dot, and a candidate that would collide is hidden (the tooltip
+  // always has goal, status and counts).
   const labels = {};
   for (const id in pos) {
     const p = pos[id];
@@ -1039,7 +1279,10 @@ function renderGraph() {
       goalTxt = clip(nodeName(n), Math.max(10, Math.min(22, maxLen - idTxt.length - statusWord.length - 2)));
       if (goalTxt.length < 8) goalTxt = "";
     }
-    labels[id] = { fs, idTxt, statusWord, goalTxt, st: st, x: null, two: false };
+    labels[id] = {
+      fs, idTxt, statusWord, goalTxt, st: st,
+      x: null, two: false, below: false, byDefault: p.depth <= 1,
+    };
   }
 
   const occupied = [];
@@ -1051,9 +1294,18 @@ function renderGraph() {
   const byDepth = Object.keys(pos).sort((a, b) => pos[a].depth - pos[b].depth);
   for (const id of byDepth) {
     const p = pos[id], L = labels[id];
+    const idLen = L.idTxt.length + L.statusWord.length + 1;
+    if (p.depth === 0) {
+      // The root sits at the centre with children all around, so its label
+      // goes below the core: a side label would run into a child.
+      const w = Math.max(idLen, L.goalTxt.length) * L.fs * 0.58;
+      const box = [p.x - w / 2 - 2, p.x + w / 2 + 2, p.y + p.nodeR + 4, p.y + p.nodeR + 4 + L.fs * 1.8];
+      if (!hits(box)) { occupied.push(box); L.x = p.x; L.below = true; }
+      else { labels[id] = null; }
+      continue;
+    }
     const right = p.x >= 0;
     const x = right ? p.x + p.nodeR + 7 : p.x - p.nodeR - 7;
-    const idLen = L.idTxt.length + L.statusWord.length + 1;
     const idW = idLen * L.fs * 0.58;
     const idBox = right ? [x, x + idW, p.y - L.fs * 0.6, p.y + L.fs * 0.6] : [x - idW, x, p.y - L.fs * 0.6, p.y + L.fs * 0.6];
     if (L.goalTxt) {
@@ -1112,42 +1364,38 @@ function renderGraph() {
     });
   }
 
-  // Lattice: concentric rings plus nested sector frames for the first
-  // generations - the recursive framing that makes the structure read fractal.
-  const lattice = [];
-  for (let d = 1; d <= maxDepth; d++) {
-    lattice.push(`<circle class="lattice-ring" cx="0" cy="0" r="${ringR[d].toFixed(1)}" />`);
-  }
-  for (const id in pos) {
-    const p = pos[id];
-    if (p.depth < 1 || p.depth > 2 || p.span < 0.16) continue;
-    const r0 = ringR[p.depth - 1], r1 = ringR[p.depth];
-    const x0 = Math.cos(p.a0), y0 = Math.sin(p.a0), x1 = Math.cos(p.a1), y1 = Math.sin(p.a1);
-    const large = p.span > Math.PI ? 1 : 0;
-    lattice.push(`<path class="lattice-frame" d="M${(x0 * r0).toFixed(1)},${(y0 * r0).toFixed(1)} L${(x0 * r1).toFixed(1)},${(y0 * r1).toFixed(1)} A${r1.toFixed(1)},${r1.toFixed(1)} 0 ${large} 1 ${(x1 * r1).toFixed(1)},${(y1 * r1).toFixed(1)} L${(x1 * r0).toFixed(1)},${(y1 * r0).toFixed(1)}" />`);
-  }
-
+  // No decorative ring frame: the globe reads from the radial node
+  // arrangement and its edges alone.
   const nodeMarkup = nodes.filter((n) => pos[n.id]).map((n) => {
     const p = pos[n.id], L = labels[n.id];
     const rightHalf = p.x >= 0;
     const anchor = rightHalf ? "start" : "end";
     const glyph = p.nodeR >= 6 ? `<text class="node-glyph" text-anchor="middle" dominant-baseline="central" font-size="${(p.nodeR * 1.05).toFixed(1)}">${GLYPH[runState(n).key] || "○"}</text>` : "";
-    let label = "";
-    if (L) {
-      const x = (L.x - p.x).toFixed(1);
-      const y1 = L.two ? (-L.fs * 0.45).toFixed(1) : "0";
-      const y2 = (L.fs * 0.7).toFixed(1);
-      const goal = L.goalTxt ? `<tspan class="nl-goal" x="${x}" y="${y2}">${esc(L.goalTxt)}</tspan>` : "";
-      label = `<text class="node-label" text-anchor="${anchor}" dominant-baseline="central" font-size="${L.fs.toFixed(1)}">
-        <tspan class="nl-id" x="${x}" y="${y1}">${esc(L.idTxt)}&#160;</tspan><tspan class="nl-st st-${esc(L.st.key)}" y="${y1}">${esc(L.statusWord)}</tspan>${goal}
-      </text>`;
+    let label = "", leader = "";
+    if (L && L.x != null) {
+      if (L.below) {
+        label = `<text class="node-label" text-anchor="middle" dominant-baseline="central" font-size="${L.fs.toFixed(1)}" y="${(p.nodeR + L.fs * 1.2).toFixed(1)}">
+          <tspan class="nl-id" x="0" y="0">${esc(L.idTxt)}&#160;</tspan><tspan class="nl-st st-${esc(L.st.key)}" y="0">${esc(L.statusWord)}</tspan>
+        </text>`;
+      } else {
+        const lx = L.x - p.x;
+        const y1 = L.two ? (-L.fs * 0.45).toFixed(1) : "0";
+        const y2 = (L.fs * 0.7).toFixed(1);
+        const goal = L.goalTxt ? `<tspan class="nl-goal" x="${lx.toFixed(1)}" y="${y2}">${esc(L.goalTxt)}</tspan>` : "";
+        const from = rightHalf ? p.nodeR + 2 : -(p.nodeR + 2);
+        leader = `<line class="leader" x1="${from.toFixed(1)}" y1="0" x2="${lx.toFixed(1)}" y2="0" />`;
+        label = `<text class="node-label" text-anchor="${anchor}" dominant-baseline="central" font-size="${L.fs.toFixed(1)}">
+          <tspan class="nl-id" x="${lx.toFixed(1)}" y="${y1}">${esc(L.idTxt)}&#160;</tspan><tspan class="nl-st st-${esc(L.st.key)}" y="${y1}">${esc(L.statusWord)}</tspan>${goal}
+        </text>`;
+      }
     }
-    return `<g class="gnode ${esc(runState(n).key)}${n.status === "running" ? " running" : ""}${selected === n.id ? " selected" : ""}"
-      data-id="${esc(n.id)}" transform="translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})"
+    const collapsed = L && !L.byDefault ? " hide-label" : "";
+    return `<g class="gnode ${esc(runState(n).key)}${n.status === "running" ? " running" : ""}${selected === n.id ? " selected" : ""}${collapsed}"
+      data-id="${esc(n.id)}" data-depth="${p.depth}" transform="translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})"
       role="button" tabindex="0" aria-label="${esc(nodeName(n))} — ${esc(runState(n).label)}">
-      <circle class="node-halo" r="${(p.nodeR + 7).toFixed(1)}" />
       <circle class="node-dot" r="${p.nodeR.toFixed(1)}" />
       ${glyph}
+      ${leader}
       ${label}
     </g>`;
   }).join("");
@@ -1162,13 +1410,7 @@ function renderGraph() {
       <marker id="arrowDep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
         <path d="M0,0 L10,5 L0,10 z" class="arrow-dep" />
       </marker>
-      <radialGradient id="coreGlow" cx="50%" cy="50%" r="50%">
-        <stop offset="0%" stop-color="rgba(217,138,78,.16)" />
-        <stop offset="100%" stop-color="rgba(217,138,78,0)" />
-      </radialGradient>
     </defs>
-    <circle class="lattice-core" cx="0" cy="0" r="${(maxR * 0.5).toFixed(1)}" />
-    <g class="lattice">${lattice.join("")}</g>
     <g class="edges">${parentEdges.join("")}${depEdges.join("")}</g>
     <g class="nodes">${nodeMarkup}</g>
   </svg>`;
@@ -1205,6 +1447,12 @@ function applyFocus() {
     g.classList.toggle("onpath", !!id && pathSet.has(gid) && gid !== id);
     g.classList.toggle("selected", gid === selected);
     g.classList.toggle("hover", gid === hover);
+    // Fewer labels by default: only the root and the first generation stay
+    // labelled; a deeper node's label is revealed while it is hovered or
+    // selected, and hidden again after. The layout depth is `data-depth`, not
+    // the store's `depth` (which counts differently).
+    const depth = Number(g.dataset.depth || 0);
+    g.classList.toggle("hide-label", !(depth <= 1 || gid === id));
   });
 }
 
@@ -1218,6 +1466,8 @@ function positionTooltip(x, y) {
   if (top + h > window.innerHeight - 8) top = Math.max(8, y - h - 16);
   t.style.left = left + "px";
   t.style.top = top + "px";
+  // Origin-aware: the tooltip grows out of the corner nearest the pointer.
+  t.style.transformOrigin = `${left < x ? "right" : "left"} ${top < y ? "bottom" : "top"}`;
 }
 function showTooltip(id, anchor) {
   const n = byId(id);
@@ -1237,6 +1487,8 @@ function showTooltip(id, anchor) {
       <span>descendants <b>${desc}</b></span>
     </div>
     ${n.activity ? `<div class="gtt-act">▸ ${esc(clip(n.activity, 150))}</div>` : ""}`;
+  if (tooltipSeen) t.classList.add("instant");
+  else { t.classList.remove("instant"); tooltipSeen = true; }
   t.classList.add("show");
   t.setAttribute("aria-hidden", "false");
   if (anchor) positionTooltip(anchor.x, anchor.y);
@@ -1345,7 +1597,6 @@ function selectNode(id) {
   if (selected === id) return;
   selected = id;
   selectedSig = "";
-  highlight = null;
   // Re-render (a no-op when the graph structure is unchanged) so the selected
   // node's dependency edges appear and the root path lights up.
   renderTree();
@@ -1353,11 +1604,10 @@ function selectNode(id) {
 }
 
 /* ---------- detail ---------- */
-function listOr(items, renderItem, hit) {
+function listOr(items, renderItem) {
   if (!items || !items.length) return '<div class="empty">none</div>';
   return `<ul class="clean">${items.map((i) => {
-    const isHit = hit && String(i).includes(hit);
-    return `<li class="${isHit ? "hit" : ""}">${renderItem ? renderItem(i) : esc(i)}</li>`;
+    return `<li>${renderItem ? renderItem(i) : esc(i)}</li>`;
   }).join("")}</ul>`;
 }
 
@@ -1461,11 +1711,11 @@ function renderDetail(n) {
             : `<span class="mono">${esc(d)}</span>`;
         })}
         <h4>Interfaces</h4>${listOr(interfaces)}
-        <h4>Inherited constraints</h4>${listOr(constraints, null, highlight)}
+        <h4>Inherited constraints</h4>${listOr(constraints)}
       </div>
 
       <div class="section">
-        <h3>Decisions</h3>${listOr(dc, null, highlight)}
+        <h3>Decisions</h3>${listOr(dc)}
       </div>
 
       <div class="section">
@@ -1500,8 +1750,6 @@ function renderDetail(n) {
           <div class="inner"><pre class="box">${esc(n.context || "")}</pre></div>
         </details>
       </div>
-
-      ${steering(n)}
     </div>`;
 }
 
@@ -1518,243 +1766,10 @@ function gateList(items) {
   }).join("")}</div>`;
 }
 
-function steering(n) {
-  const allIds = (state ? state.nodes.map((x) => x.id) : []).filter((id) => id !== n.id);
-  return `
-    <div class="section">
-      <h3>Steer this node</h3>
-      <p class="hint" style="color:var(--muted);font-size:12.5px;margin:0 0 12px">
-        Every action below is applied through the same state the scheduler and TUI use. Nothing changes until you confirm.
-      </p>
-      ${actionResult(n)}
-
-      <div class="steer-group">
-        <h4 class="group-title">Add guidance</h4>
-        <p class="group-hint">Additive: pins a requirement or idea onto the work without rewriting it.</p>
-        <div class="steer-grid">
-          <div class="action">
-            <h4>Add a constraint or idea</h4>
-            <p class="hint">
-              What it is: text added to this node's contract.<br />
-              When: you want the work to respect something it currently does not.<br />
-              Consequence: <span class="consequence">applies to this node and every descendant</span>, and is queued for a live run's next scheduler step.
-            </p>
-            <form id="f-constraint">
-              <label for="fc-text">Constraint text</label>
-              <input id="fc-text" type="text" name="text" placeholder="e.g. use the existing Store, never a parallel path" required />
-              <button class="btn" type="submit">Add constraint</button>
-            </form>
-          </div>
-        </div>
-      </div>
-
-      <div class="steer-group">
-        <h4 class="group-title">Change the plan</h4>
-        <p class="group-hint">Rewrites what the node must do, how it is checked, or what must finish first.</p>
-        <div class="steer-grid">
-          <div class="action">
-            <h4>Edit the contract</h4>
-            <p class="hint">
-              What it is: change the goal, acceptance criteria, verification commands and manual verification.<br />
-              When: the task is mis-scoped or checked the wrong way. The fields are pre-filled with the current contract.<br />
-              Consequence: <span class="consequence">the node must satisfy the new contract to be accepted.</span>
-            </p>
-            <form id="f-edit">
-              <label for="fe-goal">Goal</label>
-              <textarea id="fe-goal" name="goal">${esc(n.goal || "")}</textarea>
-              <label for="fe-ac">Acceptance criteria (one per line)</label>
-              <textarea id="fe-ac" name="acceptance_criteria">${esc((n.acceptance_criteria || []).join("\n"))}</textarea>
-              <label for="fe-v">Verification commands (one per line)</label>
-              <textarea id="fe-v" name="verification" style="min-height:52px">${esc((n.verification || []).join("\n"))}</textarea>
-              <label for="fe-mv">Manual verification (one per line)</label>
-              <textarea id="fe-mv" name="manual_verification" style="min-height:52px">${esc((n.manual_verification || []).join("\n"))}</textarea>
-              <button class="btn" type="submit">Save contract</button>
-            </form>
-          </div>
-
-          <div class="action">
-            <h4>Answer or route an escalation</h4>
-            <p class="hint">
-              What it is: amend an inherited constraint that proved false, or make this node wait for another.<br />
-              When: a node escalated because an assumption does not hold on this machine.<br />
-              Consequence: the amendment is written into the affected contracts; a dependency <span class="consequence">blocks this node until the named node is complete.</span>
-            </p>
-            <form id="f-amend">
-              <label for="fa-old">Assumption that proved false</label>
-              <input id="fa-old" type="text" name="old" placeholder="the assumption that proved false" required />
-              <label for="fa-new">Amended constraint</label>
-              <input id="fa-new" type="text" name="new" placeholder="what should be true instead" required />
-              <button class="btn" type="submit">Amend constraint</button>
-            </form>
-            <form id="f-dep" style="margin-top:12px">
-              <label for="fd-dep">Require this node to finish first</label>
-              <input id="fd-dep" type="text" name="dependency" list="node-ids" placeholder="node id" required />
-              <datalist id="node-ids">${allIds.map((id) => `<option value="${esc(id)}">${esc(nodeName(byId(id)))}</option>`).join("")}</datalist>
-              <button class="btn ghost" type="submit">Add dependency</button>
-            </form>
-          </div>
-        </div>
-      </div>
-
-      <div class="steer-group">
-        <h4 class="group-title" style="color:var(--failed)">Destructive — removes work</h4>
-        <p class="group-hint">Irreversible from the dashboard. Always confirmed before it runs.</p>
-        <div class="steer-grid">
-          <div class="action destructive">
-            <h4>Retry this node</h4>
-            <p class="hint">
-              What it is: reset this node and its whole subtree back to pending.<br />
-              When: a node failed or was accepted on stale assumptions and must run again.<br />
-              Consequence: <span class="consequence">partial work is reverted and every descendant restarts.</span>
-            </p>
-            <form id="f-retry">
-              <button class="btn warn" type="submit">Retry node and subtree</button>
-            </form>
-          </div>
-        </div>
-      </div>
-    </div>`;
-}
-
-/* A run is live when a node is actually running. If nothing is running the
-   dashboard must say so plainly, because a steering action is recorded and
-   queued but only a resumed scheduler applies it. */
-function isRunLive() {
-  return !!(state && state.nodes.some((n) => n.status === "running"));
-}
-function runLivenessNote() {
-  if (isRunLive()) {
-    return 'A live run will pick this up on its next scheduler step.';
-  }
-  const root = state && state.root_status ? state.root_status : "";
-  const where = root ? ` (the run is ${root})` : "";
-  return `No scheduler is running right now${where}. The change is recorded in the contracts and queued, but you must resume it with "fractal run" before it takes effect.`;
-}
-function actionResult(node) {
-  if (!lastAction || lastAction.node !== node.id) return "";
-  return `<div class="result ${lastAction.ok ? "ok" : "err"}">
-    <span class="head">${lastAction.ok ? "Applied" : "Rejected"} — ${esc(lastAction.message)}</span>
-    ${lastAction.ok ? runLivenessNote() : ""}
-  </div>`;
-}
-
-/* Inline confirmation: one prompt per action, no blocking window.confirm(),
-   no duplicate dialogs. Resolves true only when Confirm is clicked. */
-function inlineConfirm(f, btn, message) {
-  return new Promise((resolve) => {
-    if (f.dataset.armed === "1") return;
-    f.dataset.armed = "1";
-    const row = document.createElement("div");
-    row.className = "confirm-row";
-    const msg = document.createElement("span");
-    msg.className = "confirm-msg";
-    msg.textContent = message;
-    const btns = document.createElement("div");
-    btns.className = "confirm-btns";
-    const go = document.createElement("button");
-    go.type = "button"; go.className = "btn"; go.textContent = "Confirm";
-    const cancel = document.createElement("button");
-    cancel.type = "button"; cancel.className = "btn ghost"; cancel.textContent = "Cancel";
-    btns.append(go, cancel);
-    row.append(msg, btns);
-    if (btn) btn.style.display = "none";
-    f.appendChild(row);
-    const cleanup = () => { f.dataset.armed = "0"; row.remove(); if (btn) btn.style.display = ""; };
-    go.addEventListener("click", () => { cleanup(); resolve(true); });
-    cancel.addEventListener("click", () => { cleanup(); resolve(false); });
-  });
-}
-
-/* ---------- steering bindings ---------- */
-function bindSteering(n) {
-  const submit = (id, cfg) => {
-    const f = el(id);
-    if (!f) return;
-    f.addEventListener("submit", async (ev) => {
-      ev.preventDefault();
-      if (f.dataset.busy === "1" || f.dataset.armed === "1") return;
-      const btn = f.querySelector("button[type=submit]");
-      const message = typeof cfg.confirm === "function" ? cfg.confirm(f) : cfg.confirm;
-      const go = await inlineConfirm(f, btn, message);
-      if (!go) return;
-      f.dataset.busy = "1";
-      if (btn) btn.disabled = true;
-      try {
-        const res = await jpost(cfg.action(f));
-        if (res && res.ok) {
-          lastAction = { ok: true, message: res.message || "done", node: n.id };
-          highlight = cfg.highlight ? cfg.highlight(f) : null;
-          if (cfg.clear) cfg.clear(f);
-          toast("Applied — " + (res.message || "done"), false);
-        } else {
-          const err = (res && res.error) || "unknown error";
-          lastAction = { ok: false, message: err, node: n.id };
-          highlight = null;
-          toast("Rejected — " + err, true);
-        }
-      } catch (err) {
-        lastAction = { ok: false, message: String(err), node: n.id };
-        highlight = null;
-        toast("Request failed — " + err, true);
-      } finally {
-        f.dataset.busy = "0";
-        if (btn) btn.disabled = false;
-      }
-      tick(true);
-    });
-  };
-
-  submit("f-constraint", {
-    confirm: (f) => `Add this constraint to ${n.id} and all its descendants?\n\n"${f.text.value.trim()}"`,
-    action: (f) => ({ action: "constraint", node: n.id, text: f.text.value.trim() }),
-    highlight: (f) => f.text.value.trim() || null,
-    clear: (f) => { f.text.value = ""; },
-  });
-  submit("f-edit", {
-    confirm: `Save these contract changes to ${n.id}?`,
-    action: (f) => {
-      const action = { action: "edit_contract", node: n.id };
-      if (f.goal.value.trim()) action.goal = f.goal.value.trim();
-      action.acceptance_criteria = lines(f.acceptance_criteria.value);
-      action.verification = lines(f.verification.value);
-      action.manual_verification = lines(f.manual_verification.value);
-      return action;
-    },
-  });
-  submit("f-retry", {
-    confirm: `Retry ${n.id}?\n\nThis resets the node and its whole subtree to pending and reverts its partial work. It cannot be undone from the dashboard.`,
-    action: () => ({ action: "retry", node: n.id }),
-  });
-  submit("f-amend", {
-    confirm: (f) => `Amend the falsified constraint on ${n.id}?\n\n"${f.old.value.trim()}"\nbecomes\n"${f.new.value.trim()}"`,
-    action: (f) => ({ action: "resolve", node: n.id, resolution: "amend", old: f.old.value.trim(), new: f.new.value.trim() }),
-    highlight: (f) => f.new.value.trim() || null,
-    clear: (f) => { f.old.value = ""; f.new.value = ""; },
-  });
-  submit("f-dep", {
-    confirm: (f) => `Make ${n.id} wait for ${f.dependency.value.trim()}? It will not start until that node is complete.`,
-    action: (f) => ({ action: "resolve", node: n.id, resolution: "depends_on", dependency: f.dependency.value.trim() }),
-    clear: (f) => { f.dependency.value = ""; },
-  });
-}
-function lines(v) {
-  return String(v || "").split("\n").map((s) => s.trim()).filter(Boolean);
-}
-
 /* ---------- detail polling ---------- */
-function formFocused() {
-  const a = document.activeElement;
-  return !!(a && el("detail").contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
-}
-function confirmOpen() {
-  return !!el("detail").querySelector(".confirm-row");
-}
 
 async function tickDetail(force) {
   if (!selected || detailBusy) return;
-  // Never clobber what someone is typing, and never remove an open inline
-  // confirmation out from under them mid-action.
-  if (!force && (formFocused() || confirmOpen())) return;
   detailBusy = true;
   try {
     const n = await jget("/api/node?id=" + encodeURIComponent(selected));
@@ -1763,7 +1778,6 @@ async function tickDetail(force) {
     if (force || sig !== selectedSig) {
       selectedSig = sig;
       el("detail").innerHTML = renderDetail(n);
-      bindSteering(n);
     }
   } catch (err) {
     el("detail").innerHTML = `<div class="state-note err">Could not load node ${esc(selected)} — ${esc(err)}</div>`;
@@ -1801,6 +1815,9 @@ async function tick(force) {
       el("tree").innerHTML = '<div class="state-note err">No state available.</div>';
     }
   }
+  // The conversation polls on the same cadence; the butler may still be
+  // working, and the turn settles when it finishes.
+  await pollConversation(false);
 }
 
 document.addEventListener("click", (ev) => {
@@ -1818,6 +1835,15 @@ el("zoom-out").addEventListener("click", () => zoomBy(1.25));
 el("zoom-fit").addEventListener("click", fitGraph);
 bindGraphInteraction();
 
+el("chat-form").addEventListener("submit", sendChat);
+el("chat-input").addEventListener("keydown", (ev) => {
+  // Enter sends; Shift+Enter makes a new line.
+  if (ev.key === "Enter" && !ev.shiftKey) {
+    ev.preventDefault();
+    el("chat-form").requestSubmit();
+  }
+});
+
 /* A narrow phone gets the flat Rows view by default: the graph still works and
    is one tap away, but a wide graph must not be the first thing on a 390px
    screen. The choice is the viewer's after that. */
@@ -1825,6 +1851,7 @@ if (window.innerWidth < 640) setView("rows");
 
 setInterval(tick, 2000);
 tick(true);
+pollConversation(true);
 </script>
 </body>
 </html>
