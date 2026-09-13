@@ -191,21 +191,23 @@ The page is built around three things, in order of importance:
 
 - **The graph — the hero.** The tree drawn as a **fractal radial layout**: each
   subtree owns an angular wedge subdivided by leaf weight, every depth sits on
-  its own ring. Only the root is open at first, so every drawn node keeps a
-  legible label; a node with hidden children shows `+N` and opens when clicked.
-  Each node carries its **state as a shape, a glyph and a word** — `done`,
-  `running`, `ready`, `waiting`, `failed`, `blocked` — so the six states stay
-  distinct in a greyscale screenshot; colour is never the only cue. Parent →
-  child edges are always drawn; a node's `depends_on` edges appear only while it
-  is selected or hovered, so the graph stays free of crossing spaghetti. Hover
-  focuses the node — it scales, its label appears, its path from the root lights
-  up and the rest recedes. Click selects it, expands its children and seeds the
-  butler context below. **Wheel / pinch zooms, drag pans, double-click fits**,
-  all applied as one SVG transform so the graph stays smooth on the GPU. The
-  hide-and-seek viewBox fitting and the separate Rows view are gone; a node's
-  label is measured from the DOM so it can never be clipped, and the page never
-  scrolls horizontally at any node count. Decorative rings, the core glow and
-  coloured halos are gone; depth comes from the graph itself.
+  its own ring. Only the root is open at first; a node with hidden children
+  opens when clicked. Every node is a **plain circle**: there are no shapes,
+  glyphs or per-node words, and **colour carries the state** — `done`, `running`,
+  `ready`, `waiting`, `blocked`, `failed`, `split` each own one distinct hue,
+  named in the compact legend under the graph and in the detail chip so the
+  mapping stays learnable. **Every link is always drawn**: parent → child curves
+  and dashed `depends_on` edges together, never hidden behind hover or selection.
+  **Hover is the zoom**: the node scales into focus, its name and state appear
+  in the caption under the graph, its path from the root lights up and the rest
+  recedes. Click selects it, expands its
+  children and seeds the butler context below. **Drag pans** (direct
+  manipulation — the graph follows the pointer), pinch zooms on touch, and
+  double-click fits; the wheel is not a zoom control. All view motion is one SVG
+  transform so the graph stays smooth on the GPU. Enter, state-change, hover and
+  selection motion are visible and expressive; node bounds are measured from the
+  DOM so the graph can never be clipped, and the page never scrolls horizontally
+  at any node count.
 - **The butler conversation — the one steering surface.** On a laptop it rides
   a sticky right-hand rail, so it is one keystroke away at any scroll. Type a
   message in plain language (`the tracker should use real data, not simulated`),
@@ -220,6 +222,9 @@ The page is built around three things, in order of importance:
   restart, which settles an interrupted turn as failed) shows the same
   conversation. The individual constraint / edit-contract / amend / retry widgets
   are gone: the butler covers them, and there is one steering path, not two.
+  The panel is stripped to a title, the conversation and one input with a Send
+  action — no suggested prompts, example sentences or chips, because the page
+  should not tell the user what to type.
 - **Node detail — read-only.** Select a node and the page describes it: what it
   is (goal and "done when" criteria), what it is doing now (latest activity) and
   its **live events**, with the committed diff under **Code changes**. There are
@@ -247,7 +252,8 @@ labels, ids and body, and a bright green accent. Buttons are bordered and fill
 from the bottom on hover with a colour invert; hover is gated behind
 `(hover: hover) and (pointer: fine)`, focus-visible is a 3px accent ring,
 selection, caret and scrollbars are themed, and data uses tabular numerals.
-Colour is never the only carrier: every status state is named in words as well.
+State is carried by colour on the node and named in words in the legend and in
+the detail chip, so the mapping is always recoverable.
 Motion is transform/opacity only with custom curves, and `prefers-reduced-motion`
 keeps opacity and colour while dropping movement. It is responsive down to
 ~390 px.
