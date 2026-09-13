@@ -10,42 +10,43 @@
      fractal dashboard — a from-scratch surface over `fractal serve`.
 
      Three concerns, ranked:
-       1. The graph: the hero. It is the design and navigation of the run.
-          Round and radial, real zoom and pan, hover focus, click selects.
-       2. The butler: the only steering surface. Every change is asked for
-          in words; there are no action buttons anywhere else.
-       3. The node detail: read-only. A description and the live events of
-          the selected step. No actions, no editing.
+       1. The graph: the hero. Circles only, colour carries state, every
+          link is always drawn, hover scales a node into focus, drag pans,
+          click selects.
+       2. The butler: the only steering surface. One input, nothing else.
+       3. The node detail: read-only.
 
      Visual language is the pinned La Fabrique à Sites green theme:
      near-black green ground, a fixed visible 12-column grid, bright green
-     accent, serif display headings, uppercase monospace labels and ids,
-     2px rules, bottom-up button fill. Offline: system stacks only.
+     accent, serif display headings, uppercase monospace labels, 2px rules.
+     Offline: system stacks only.
      ------------------------------------------------------------------ */
   :root {
     --bg:         oklch(14% 0.012 145);
     --bg-2:       oklch(16.5% 0.013 145);
     --panel:      oklch(18% 0.014 145);
     --fg:         oklch(95% 0.03 130);
-    --muted:      oklch(75% 0.045 132);
-    --faint:      oklch(64% 0.04 132);
+    --muted:      oklch(70% 0.04 130);
+    --faint:      oklch(58% 0.04 132);
     --accent:     oklch(86% 0.24 132);
     --accent-ink: oklch(15% 0.03 132);
     --border:     oklch(95% 0.03 130);
-    --line-soft:  color-mix(in oklab, var(--fg) 22%, transparent);
+    --line-soft:  color-mix(in oklab, var(--fg) 20%, transparent);
     --grid:       color-mix(in oklab, var(--fg) 11%, transparent);
-    --done:       oklch(80% 0.2 140);
-    --run:        oklch(85% 0.17 88);
-    --ready:      oklch(80% 0.13 205);
-    --failed:     oklch(72% 0.19 27);
-    --blocked:    oklch(78% 0.11 300);
-    --pending:    oklch(66% 0.035 132);
+    /* Each state owns one hue. The graph is circles, so colour is the story. */
+    --done:       oklch(82% 0.21 142);
+    --run:        oklch(86% 0.17 92);
+    --ready:      oklch(78% 0.14 235);
+    --failed:     oklch(70% 0.21 28);
+    --blocked:    oklch(78% 0.13 305);
+    --pending:    oklch(58% 0.035 145);
+    --split:      oklch(80% 0.11 180);
     --bw: 2px;
     --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
     --serif: "Times New Roman", "Iowan Old Style", Georgia, serif;
     --ease: cubic-bezier(.2, .7, .15, 1);
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-    --s1: 8px; --s2: 16px; --s3: 24px; --s4: 40px;
+    --s2: 16px; --s3: 24px;
     --gap: clamp(14px, 3vw, 40px);
   }
   * { box-sizing: border-box; }
@@ -78,12 +79,11 @@
   ::-webkit-scrollbar { width: 11px; height: 11px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--line-soft); border: 2px solid var(--bg); }
-  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
-  ::placeholder { color: var(--muted); opacity: 1; }
+  ::placeholder { color: var(--faint); opacity: 1; }
   :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-  .num, time { font-variant-numeric: tabular-nums; }
+  time { font-variant-numeric: tabular-nums; }
 
-  /* ---------- top bar ---------- */
+  /* ---------- top bar: brand and life, nothing else ---------- */
   .bar {
     position: sticky; top: 0; z-index: 30;
     display: flex; align-items: center; gap: var(--s2);
@@ -94,8 +94,6 @@
   .brand { display: inline-flex; align-items: baseline; gap: 8px; font-family: var(--serif); font-size: 21px; letter-spacing: -.02em; white-space: nowrap; }
   .brand .spark { color: var(--accent); font-size: 13px; }
   .bar .spacer { flex: 1; }
-  .bar-run { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12.5px; }
-  .bar-run b { color: var(--fg); font-weight: 400; }
   .live { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
   .live .dot { width: 8px; height: 8px; background: var(--done); flex: none; }
   .live.busy .dot { background: var(--run); animation: pulse 1.4s ease-in-out infinite; }
@@ -106,24 +104,20 @@
   .wrap { position: relative; z-index: 1; width: min(100% - 2 * var(--gap), 1280px); margin-inline: auto; }
   section { padding: clamp(28px, 4vw, 52px) 0; border-bottom: var(--bw) solid var(--border); }
   section:last-of-type { border-bottom: 0; }
-  .sec-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; margin-bottom: var(--s3); }
-  .sec-head .titles { min-width: 0; }
-  .sec-head h2 { font-size: clamp(22px, 3vw, 34px); }
-  .sec-head .lead { color: var(--muted); font-size: 13.5px; max-width: 68ch; margin-top: 8px; }
-  .sec-head .lead b { color: var(--fg); font-weight: 400; }
+  .sec-head { min-width: 0; margin-bottom: var(--s3); }
+  .sec-head h2 { font-size: clamp(20px, 2.4vw, 26px); }
 
   /* ---------- hero: the run and its graph ---------- */
   .hero h1 { font-size: clamp(23px, 3.1vw, 40px); max-width: 34ch; overflow-wrap: anywhere; }
   .hero .now { margin-top: 14px; color: var(--muted); font-size: 14px; display: flex; gap: 9px; align-items: baseline; flex-wrap: wrap; }
   .hero .now .what { color: var(--fg); }
   .hero .now .pulse-dot { width: 8px; height: 8px; flex: none; background: var(--run); animation: pulse 1.4s ease-in-out infinite; align-self: center; }
-  .hero .counts { margin-top: 6px; color: var(--faint); font-size: 12.5px; }
   .progress { height: 3px; background: color-mix(in oklab, var(--fg) 12%, transparent); margin-top: var(--s3); }
   .progress > span { display: block; height: 100%; background: var(--accent); width: 0; transition: width .6s var(--ease-out); }
 
   .graph-frame {
     position: relative; margin-top: var(--s3);
-    height: clamp(400px, 56vh, 600px);
+    height: clamp(400px, 58vh, 620px);
     border: var(--bw) solid var(--border);
     background: var(--bg-2);
     overflow: hidden; touch-action: none;
@@ -133,81 +127,63 @@
   .graph svg.graph-svg.panning { cursor: grabbing; }
   .graph-empty { display: grid; place-items: center; height: 100%; color: var(--faint); font-size: 13.5px; }
 
-  /* ---------- graph fallback / edges ---------- */
-  .edge { fill: none; }
-  .edge-parent { stroke: color-mix(in oklab, var(--fg) 24%, transparent); stroke-width: 1.3; transition: stroke .2s var(--ease), stroke-width .2s var(--ease), opacity .2s var(--ease); }
+  /* ---------- edges: every link, always drawn ---------- */
+  .edge { fill: none; stroke: color-mix(in oklab, var(--fg) 30%, transparent); stroke-width: 1.3; transition: stroke .35s var(--ease-out), stroke-width .35s var(--ease-out); }
   .edge-parent.onpath { stroke: var(--accent); stroke-width: 2.2; }
-  .edge-parent.edge-running { stroke: var(--run); stroke-dasharray: 3 4; }
-  .edge-parent.edge-complete { stroke: color-mix(in oklab, var(--done) 50%, transparent); }
+  .edge-parent.edge-running { stroke: var(--run); stroke-dasharray: 3 5; animation: dash 1.2s linear infinite; }
+  .edge-parent.edge-complete { stroke: color-mix(in oklab, var(--done) 55%, transparent); }
   .edge-parent.edge-failed { stroke: var(--failed); }
-  .edge-dep { stroke: var(--ready); stroke-width: 1.5; stroke-dasharray: 4 4; opacity: .0; transition: opacity .22s var(--ease-out); }
-  .edge-dep.show { opacity: 1; }
-  .edge-dep.edge-failed { stroke: var(--failed); }
-  .arrow-dep { fill: var(--ready); }
-  .svg-focus .gnode, .svg-focus .edge-parent { transition: opacity .22s var(--ease-out); }
-  .svg-focus .gnode.dim { opacity: .28; }
-  .svg-focus .edge-parent.dim { opacity: .16; }
+  .edge-dep { stroke: color-mix(in oklab, var(--fg) 24%, transparent); stroke-width: 1; stroke-dasharray: 2 5; }
+  .edge-dep.onpath { stroke: color-mix(in oklab, var(--accent) 70%, transparent); }
+  @keyframes dash { to { stroke-dashoffset: -8; } }
 
-  /* ---------- nodes: shape + glyph + word, so greyscale survives ---------- */
-  .gnode { cursor: pointer; outline: none; }
-  .gnode .shape { stroke: var(--pending); stroke-width: 1.6; fill: var(--bg-2); transition: transform .18s var(--ease-out), stroke .18s var(--ease), fill .18s var(--ease); transform-box: fill-box; transform-origin: center; }
-  .gnode .glyph { font-family: var(--mono); fill: var(--pending); pointer-events: none; }
+  /* ---------- nodes: plain circles, colour is the state ---------- */
+  .gnode { cursor: pointer; outline: none; transition: opacity .28s var(--ease-out); }
+  .gnode .shape {
+    fill: var(--pending); stroke: none;
+    transform-box: fill-box; transform-origin: center;
+    transition: transform .24s var(--ease-out), fill .35s var(--ease-out), opacity .24s var(--ease-out);
+  }
+  .gnode .halo { fill: none; stroke: transparent; transition: stroke .2s var(--ease-out), stroke-width .2s var(--ease-out); }
   .gnode .hit { fill: transparent; }
-  .gnode .halo { stroke: transparent; }
-  .gnode.hover .shape, .gnode:focus-visible .shape { transform: scale(1.18); }
-  .gnode.hover .halo, .gnode:focus-visible .halo, .gnode.selected .halo { stroke: var(--accent); stroke-width: 2; }
+  .gnode.complete .shape { fill: var(--done); }
+  .gnode.running .shape { fill: var(--run); }
+  .gnode.ready .shape { fill: var(--ready); }
+  .gnode.failed .shape { fill: var(--failed); }
+  .gnode.suspended .shape { fill: var(--blocked); }
+  .gnode.split .shape { fill: var(--split); }
+  .gnode.waiting .shape, .gnode.pending .shape { fill: var(--pending); }
+  .gnode.hover .shape { transform: scale(1.6); }
+  .gnode.selected .shape { transform: scale(1.35); }
+  .gnode.selected .halo, .gnode.hover .halo, .gnode:focus-visible .halo { stroke: var(--accent); stroke-width: 2; }
   .gnode:focus-visible .halo { stroke-width: 3; }
-  .gnode.complete .shape { fill: var(--done); stroke: var(--done); }
-  .gnode.complete .glyph { fill: var(--bg); }
-  .gnode.running .shape { fill: var(--bg-2); stroke: var(--run); stroke-width: 2.6; }
-  .gnode.running .glyph { fill: var(--run); }
-  .gnode.ready .shape { fill: var(--bg-2); stroke: var(--ready); stroke-width: 2; }
-  .gnode.ready .glyph { fill: var(--ready); }
-  .gnode.waiting .shape { fill: transparent; stroke: var(--pending); stroke-dasharray: 4 4; }
-  .gnode.waiting .glyph, .gnode.pending .glyph { fill: var(--pending); }
-  .gnode.pending .shape { fill: transparent; stroke: color-mix(in oklab, var(--pending) 70%, transparent); stroke-dasharray: 1.5 4; }
-  .gnode.failed .shape { fill: var(--bg-2); stroke: var(--failed); stroke-width: 2.6; }
-  .gnode.failed .glyph { fill: var(--failed); }
-  .gnode.suspended .shape { fill: var(--bg-2); stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 3 3; }
-  .gnode.suspended .glyph { fill: var(--blocked); }
-  .gnode.split .shape { fill: var(--bg-2); stroke: var(--muted); stroke-dasharray: 2 3; }
-  .gnode.split .glyph { fill: var(--muted); }
-  .gnode .ring { fill: none; stroke: var(--run); stroke-width: 1.3; stroke-dasharray: 3 5; transform-box: fill-box; transform-origin: center; animation: spin 7s linear infinite; }
+  .gnode .ring { fill: none; stroke: var(--run); stroke-width: 1.4; stroke-dasharray: 3 5; transform-box: fill-box; transform-origin: center; animation: spin 7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  .node-label { font-family: var(--mono); pointer-events: none; opacity: 0; transition: opacity .2s var(--ease-out); }
-  .gnode.labelled .node-label, .gnode.hover .node-label, .gnode.selected .node-label, .gnode:focus-visible .node-label { opacity: 1; }
-  .node-label .nl-goal { fill: var(--fg); }
-  .node-label .nl-state { font-size: .9em; letter-spacing: .05em; }
-  .st-complete { fill: var(--done); } .st-running { fill: var(--run); } .st-ready { fill: var(--ready); }
-  .st-waiting { fill: var(--pending); } .st-pending { fill: var(--pending); } .st-failed { fill: var(--failed); }
-  .st-suspended { fill: var(--blocked); } .st-split { fill: var(--muted); }
-  .gnode.enter { animation: nodeIn .3s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 36ms); }
+  .gnode.enter { animation: nodeIn .4s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 28ms); }
+  .gnode.enter .shape { animation: shapeIn .5s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 28ms); }
   @keyframes nodeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes shapeIn { from { transform: scale(.25); } to { transform: scale(1); } }
+  .gnode.change .shape { animation: statePop .7s var(--ease-out); }
+  @keyframes statePop { 0% { transform: scale(1); } 38% { transform: scale(1.5); } 100% { transform: scale(1); } }
 
-  .graph-foot { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; margin-top: 12px; }
-  .key { display: flex; gap: 14px; flex-wrap: wrap; color: var(--faint); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  .svg-focus .gnode.dim { opacity: .25; }
+
+  .graph-foot { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; margin-top: 14px; }
+  .key { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
   .key span { display: inline-flex; align-items: center; gap: 6px; }
-  .key i { font-style: normal; font-family: var(--mono); }
+  .key i { width: 9px; height: 9px; border-radius: 50%; background: var(--c); font-style: normal; flex: none; }
   .hint { color: var(--faint); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
   .hint b { color: var(--muted); font-weight: 400; }
 
-  /* ---------- butler chat ---------- */
+  /* ---------- butler chat: title, conversation, one input ---------- */
   .butler .chat-log {
     display: flex; flex-direction: column; gap: var(--s2);
-    min-height: 120px; max-height: clamp(240px, 40vh, 460px);
+    min-height: 90px; max-height: clamp(240px, 40vh, 460px);
     overflow-y: auto; overscroll-behavior: contain;
     padding-right: 6px;
   }
-  .chat-empty { display: flex; flex-direction: column; gap: 14px; align-items: flex-start; }
-  .chat-empty p { color: var(--muted); font-size: 14px; max-width: 62ch; }
-  .examples { display: flex; flex-wrap: wrap; gap: 8px; }
-  .example {
-    font: inherit; font-size: 12.5px; color: var(--fg); cursor: pointer;
-    background: transparent; border: 1px solid var(--line-soft); padding: 7px 12px;
-    transition: border-color .18s var(--ease), color .18s var(--ease), background-color .18s var(--ease);
-  }
-  @media (hover: hover) and (pointer: fine) { .example:hover { border-color: var(--accent); color: var(--accent); } }
+  .chat-empty { color: var(--faint); font-size: 13.5px; }
   .turn { display: flex; flex-direction: column; gap: 10px; }
   .msg { border: var(--bw) solid var(--line-soft); padding: 12px 14px; font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
   .msg.user { align-self: flex-end; max-width: min(88%, 640px); background: color-mix(in oklab, var(--accent) 13%, transparent); border-color: var(--accent); white-space: pre-wrap; }
@@ -239,20 +215,19 @@
 
   .chat-form { margin-top: var(--s2); display: flex; gap: 10px; align-items: flex-end; }
   .chat-form textarea {
-    flex: 1 1 auto; min-width: 0; min-height: 58px; max-height: 180px; resize: vertical;
+    flex: 1 1 auto; min-width: 0; min-height: 50px; max-height: 180px; resize: vertical;
     background: var(--bg); color: var(--fg); border: var(--bw) solid var(--line-soft);
-    padding: 13px 15px; font: inherit; font-size: 15px; line-height: 1.45;
+    padding: 12px 14px; font: inherit; font-size: 15px; line-height: 1.45;
   }
   .chat-form textarea:focus { outline: none; border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-  .chat-context { margin-top: 10px; font-size: 12.5px; color: var(--muted); display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-  .chat-context .ctx { color: var(--fg); }
-  .chat-context button { font: inherit; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; }
-  @media (hover: hover) and (pointer: fine) { .chat-context button:hover { text-decoration: underline; } }
+  .chat-context { margin-top: 10px; font-size: 12px; color: var(--faint); display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .chat-context .ctx { color: var(--muted); }
+  .chat-context button { font: inherit; font-size: 12px; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; }
 
   /* ---------- buttons ---------- */
   .btn {
-    position: relative; display: inline-flex; align-items: center; justify-content: center; gap: .5em;
-    padding: .8em 1.35em; min-height: 46px; cursor: pointer; overflow: hidden; isolation: isolate;
+    position: relative; display: inline-flex; align-items: center; justify-content: center;
+    padding: .75em 1.2em; min-height: 44px; cursor: pointer; overflow: hidden; isolation: isolate;
     border: var(--bw) solid var(--border); background: transparent; color: var(--fg);
     font-family: var(--mono); font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
     transition: color .2s var(--ease), transform .2s var(--ease);
@@ -311,23 +286,8 @@
   .chip.ready { color: var(--ready); }
   .chip.failed { color: var(--failed); }
   .chip.suspended { color: var(--blocked); }
-  .chip.split { color: var(--muted); }
+  .chip.split { color: var(--split); }
   .chip.waiting, .chip.pending { color: var(--pending); }
-
-  /* ---------- tooltip ---------- */
-  .tooltip {
-    position: fixed; z-index: 60; pointer-events: none; max-width: min(86vw, 340px);
-    background: var(--bg); border: var(--bw) solid var(--border); padding: 12px 14px;
-    opacity: 0; transform: translateY(5px) scale(.98);
-    transition: opacity .14s var(--ease-out), transform .14s var(--ease-out);
-  }
-  .tooltip.show { opacity: 1; transform: none; }
-  .tooltip.instant { transition: none; }
-  .tooltip .tt-id { font-family: var(--mono); font-size: 11px; color: var(--accent); margin-bottom: 4px; overflow-wrap: anywhere; }
-  .tooltip .tt-goal { font-size: 14px; line-height: 1.35; overflow-wrap: anywhere; }
-  .tooltip .tt-row { margin-top: 9px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .tooltip .tt-meta { margin-top: 9px; border-top: 1px solid var(--line-soft); padding-top: 8px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-  .tooltip .tt-meta b { color: var(--fg); font-weight: 400; }
 
   .toast {
     position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 14px); z-index: 70;
@@ -342,7 +302,7 @@
   @media (min-width: 1040px) {
     /* Laptop and up: the graph owns the main column, the butler rides a
        sticky rail so every change is one keystroke away at any scroll. */
-    .wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 440px); column-gap: var(--s3); }
+    .wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 400px); column-gap: var(--s3); }
     section { border-bottom: 0; }
     .hero { grid-column: 1; grid-row: 1; border-bottom: var(--bw) solid var(--border); }
     .detail { grid-column: 1; grid-row: 2; }
@@ -356,23 +316,21 @@
     .butler .sec-head { margin-bottom: var(--s2); }
   }
   @media (max-width: 720px) {
-    .bar-run { display: none; }
     .graph-frame { height: 52vh; }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
-      animation: none !important;
+      animation-duration: .001ms !important;
+      animation-iteration-count: 1 !important;
       transition-duration: .001ms !important;
-      transition-property: opacity, color, background-color, border-color, stroke !important;
     }
-    .gnode.hover .shape, .gnode:focus-visible .shape, .btn:active, .btn::after { transform: none !important; }
+    .gnode.hover .shape, .gnode.selected .shape { transform: none !important; }
   }
 </style>
 </head>
 <body>
   <header class="bar">
     <span class="brand"><span class="spark">◆</span>fractal</span>
-    <span class="bar-run" id="bar-run" aria-live="polite"></span>
     <span class="spacer"></span>
     <span class="live off" id="live"><span class="dot"></span><span id="liveText">connecting…</span></span>
   </header>
@@ -381,36 +339,32 @@
     <section class="hero" aria-labelledby="hero-title">
       <h1 id="hero-title">Loading run…</h1>
       <p class="now" id="hero-now" aria-live="polite"></p>
-      <p class="counts" id="hero-counts"></p>
       <div class="progress" role="progressbar" aria-label="Run progress"><span id="progress-fill"></span></div>
       <div class="graph-frame" id="graph-frame">
         <div class="graph" id="tree"><div class="graph-empty">Waiting for the run…</div></div>
       </div>
       <div class="graph-foot">
         <div class="key" aria-hidden="true">
-          <span><i style="color:var(--done)">✓</i>done</span>
-          <span><i style="color:var(--run)">●</i>running</span>
-          <span><i style="color:var(--ready)">◇</i>ready</span>
-          <span><i style="color:var(--pending)">○</i>waiting</span>
-          <span><i style="color:var(--failed)">✕</i>failed</span>
-          <span><i style="color:var(--blocked)">⬡</i>blocked</span>
+          <span><i style="--c:var(--done)"></i>done</span>
+          <span><i style="--c:var(--run)"></i>running</span>
+          <span><i style="--c:var(--ready)"></i>ready</span>
+          <span><i style="--c:var(--pending)"></i>waiting</span>
+          <span><i style="--c:var(--blocked)"></i>blocked</span>
+          <span><i style="--c:var(--failed)"></i>failed</span>
+          <span><i style="--c:var(--split)"></i>split</span>
         </div>
-        <div class="hint"><b>scroll</b> zoom · <b>drag</b> pan · <b>click</b> open</div>
+        <div class="hint" id="graph-hint"><b>drag</b> pan · <b>hover</b> focus · <b>click</b> open</div>
       </div>
     </section>
 
     <div class="rail">
     <section class="sec butler" aria-labelledby="butler-title">
       <div class="sec-head">
-        <div class="titles">
-          <h2 id="butler-title">Talk to the run</h2>
-          <p class="lead">Every change is asked for here. The butler reads the run, decides the smallest correct change, and makes it.</p>
-        </div>
-        <span class="chat-status" id="chat-status" role="status" aria-live="polite" style="font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--run)"></span>
+        <h2 id="butler-title">Talk to the run</h2>
       </div>
       <div class="chat-log" id="chat-log"></div>
       <form class="chat-form" id="chat-form">
-        <textarea id="chat-input" rows="1" placeholder="e.g. the accompaniment should sound like one piano, not six voices" aria-label="Message the butler"></textarea>
+        <textarea id="chat-input" rows="1" aria-label="Message the butler"></textarea>
         <button class="btn" type="submit" id="chat-send">Send</button>
       </form>
       <div class="chat-context" id="chat-context" hidden></div>
@@ -422,7 +376,6 @@
     </section>
   </main>
 
-  <div class="tooltip" id="tooltip" role="tooltip" aria-hidden="true"></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -499,11 +452,9 @@ let hasMoved = false;
 let view = { x: 0, y: 0, k: 1 };
 let viewport = null;
 let suppressClick = false;
-let tooltipSeen = false;
 let conversation = [];
 let chatSig = "";
 let chatBusy = false;
-let selectedContext = null;
 
 const byId = (id) => (state && state.nodes.find((n) => n.id === id)) || null;
 const childrenOf = (id) => (state ? state.nodes.filter((n) => (n.parent || null) === (id || null)) : []);
@@ -526,8 +477,6 @@ function runState(n) {
   }
   return { key: "ready", label: "ready to start" };
 }
-const STATE_WORD = { complete: "done", running: "running", ready: "ready", waiting: "waiting", failed: "failed", split: "split", suspended: "blocked", pending: "waiting" };
-const GLYPH = { complete: "✓", running: "●", ready: "◇", waiting: "", failed: "✕", split: "≡", suspended: "⬡", pending: "" };
 
 function stateChip(n) {
   const st = runState(n);
@@ -544,7 +493,6 @@ function renderRun() {
   const complete = c.complete || 0;
   const running = state.nodes.filter((n) => n.status === "running");
   const failed = c.failed || 0;
-  const waiting = state.nodes.filter((n) => runState(n).key === "waiting").length;
   const ready = state.nodes.filter((n) => runState(n).key === "ready").length;
 
   el("hero-title").textContent = clip(nodeName({ id: "root", goal: state.root_goal }), 96) || "This run";
@@ -560,25 +508,17 @@ function renderRun() {
   } else if (total && complete === total) {
     now = `<span class="what">Every step is done.</span>`;
   } else {
-    now = `<span class="what">Nothing is running right now.</span>` +
+    now = `<span class="what">Idle.</span>` +
       (ready ? `<span>${ready} step${ready === 1 ? "" : "s"} can start next.</span>` : "");
   }
   el("hero-now").innerHTML = now;
-
-  const bits = [`${complete} of ${total} done`];
-  if (running.length) bits.push(`${running.length} running`);
-  if (failed) bits.push(`${failed} failed`);
-  if (ready) bits.push(`${ready} ready`);
-  if (waiting) bits.push(`${waiting} waiting`);
-  el("hero-counts").textContent = bits.join(" · ");
-  el("bar-run").innerHTML = `<b>${esc(clip(state.root_goal || "this run", 64))}</b> · ${esc(bits.join(" · "))}`;
 }
 
 /* ==================================================================
    The graph. Layout: each expanded subtree owns an angular wedge,
    subdivided by leaf weight, every depth on its own ring. Only the root
-   is open at first, so the drawn labels stay legible; a node with hidden
-   children shows "+N" and opens when clicked.
+   is open at first, so the drawing stays legible; a node with hidden
+   children opens when clicked. Nodes are circles; colour is the state.
    ================================================================== */
 function visibleChildren(n) { return expanded.has(n.id) ? childrenOf(n.id) : []; }
 function visibleCount(root) {
@@ -591,7 +531,7 @@ function layoutSignature() {
   return JSON.stringify(state.nodes.map((n) => [n.id, n.parent, n.depends_on])) + "|" + [...expanded].sort().join(",");
 }
 function contentSignature() {
-  return JSON.stringify(state.nodes.map((n) => [n.id, n.status, n.goal, n.stale, n.tampered, n.activity]));
+  return JSON.stringify(state.nodes.map((n) => [n.id, n.status, n.goal, n.stale, n.activity]));
 }
 function openChain(id) {
   let cur = byId(id);
@@ -655,85 +595,44 @@ function renderGraph() {
     });
   })(root, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2, 0);
 
-  const nodeR = (id) => (id === root.id ? 24 : 17);
+  const nodeR = (id) => (id === root.id ? 25 : 18);
 
-  // ---- labels, with collision avoidance ----
-  const labels = {};
-  const boxes = [];
-  const fs = 12.5;
-  const lineH = fs * 1.5;
-  const collide = (b) => boxes.some((o) => b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1]);
-  for (const id in pos) { const p = pos[id], rr = nodeR(id) + 3; boxes.push([p.x - rr, p.y - rr, p.x + rr, p.y + rr]); }
-  const byDepth = Object.keys(pos).sort((a, b) => pos[a].depth - pos[b].depth);
-  for (const id of byDepth) {
-    const p = pos[id], n = byId(id), st = runState(n);
-    const hidden = childrenOf(id).length - visibleChildren(n).length;
-    const more = hidden > 0 ? ` +${hidden}` : "";
-    const goalText = id === root.id ? "Your run" : clip(nodeName(n), 16);
-    const stateText = (STATE_WORD[st.key] || st.key) + more;
-    const wide = Math.max(goalText.length, stateText.length) * fs * 0.6 + 8;
-    const tall = lineH * 2;
-    const cand = [];
-    if (id === root.id) {
-      cand.push({ anchor: "middle", x: p.x, y0: p.y + nodeR(id) + 9 });
-    } else {
-      const ox = Math.cos(p.angle), oy = Math.sin(p.angle);
-      const off = nodeR(id) + 10;
-      if (Math.abs(ox) > 0.32) {
-        cand.push({ anchor: ox > 0 ? "start" : "end", x: p.x + Math.sign(ox) * off, y0: p.y - tall / 2 + oy * 6 });
-        cand.push({ anchor: ox > 0 ? "end" : "start", x: p.x - Math.sign(ox) * off, y0: p.y - tall / 2 + oy * 6 });
-      } else {
-        const down = oy > 0;
-        cand.push({ anchor: "middle", x: p.x, y0: p.y + (down ? off : -off - tall) });
-        cand.push({ anchor: "middle", x: p.x, y0: p.y + (down ? -off - tall : off) });
-      }
-    }
-    let placed = null;
-    for (const c of cand) {
-      const x0 = c.anchor === "start" ? c.x : c.anchor === "end" ? c.x - wide : c.x - wide / 2;
-      const b = [x0, c.y0, x0 + wide, c.y0 + tall];
-      if (!collide(b)) { placed = c; boxes.push(b); break; }
-    }
-    labels[id] = placed ? { ...placed, goalText, stateText, st, fs } : null;
-  }
-
-  // ---- bounds are measured from the rendered nodes after insertion, so a
-  //      label can never be clipped by the frame -----
-  const pad = 34;
-
-  // ---- edges ----
+  // ---- edges: parent links and dependency links, all drawn, always ----
   const edges = [];
+  const deps = [];
   for (const id in pos) {
     const n = byId(id);
-    if (!n || !n.parent || !pos[n.parent]) continue;
-    const a = pos[n.parent], b = pos[id];
-    const mid = (a.r + b.r) / 2;
-    const c1x = Math.cos(a.angle) * mid, c1y = Math.sin(a.angle) * mid;
-    const c2x = Math.cos(b.angle) * mid, c2y = Math.sin(b.angle) * mid;
-    edges.push(`<path class="edge edge-parent" data-to="${esc(id)}" d="M${a.x.toFixed(1)},${a.y.toFixed(1)} C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${b.x.toFixed(1)},${b.y.toFixed(1)}" />`);
+    if (!n) continue;
+    if (n.parent && pos[n.parent]) {
+      const a = pos[n.parent], b = pos[id];
+      const mid = (a.r + b.r) / 2;
+      const c1x = Math.cos(a.angle) * mid, c1y = Math.sin(a.angle) * mid;
+      const c2x = Math.cos(b.angle) * mid, c2y = Math.sin(b.angle) * mid;
+      edges.push(`<path class="edge edge-parent" data-to="${esc(id)}" d="M${a.x.toFixed(1)},${a.y.toFixed(1)} C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${b.x.toFixed(1)},${b.y.toFixed(1)}" />`);
+    }
+    for (const dep of (n.depends_on || [])) {
+      const a = pos[dep], b = pos[id];
+      if (!a || !b) continue;
+      const cx = (a.x + b.x) * 0.32, cy = (a.y + b.y) * 0.32;
+      deps.push(`<path class="edge edge-dep" data-from="${esc(dep)}" data-to="${esc(id)}" d="M${a.x.toFixed(1)},${a.y.toFixed(1)} Q${cx.toFixed(1)},${cy.toFixed(1)} ${b.x.toFixed(1)},${b.y.toFixed(1)}" />`);
+    }
   }
 
-  // ---- nodes ----
+  // ---- nodes: plain circles ----
   const nextIds = new Set(Object.keys(pos));
   let enterIndex = 0;
   const nodesMarkup = Object.keys(pos).map((id) => {
     const p = pos[id], n = byId(id), st = runState(n);
     const r = nodeR(id);
-    const L = labels[id];
-    const shape = shapeFor(st.key, r);
     const isNew = !renderedIds.has(id) && renderedIds.size > 0;
-    const label = L ? `<text class="node-label" text-anchor="${L.anchor}" font-size="${L.fs}">
-        <tspan class="nl-goal" x="${L.x.toFixed(1)}" y="${(L.y0 + L.fs).toFixed(1)}">${esc(L.goalText)}</tspan>
-        <tspan class="nl-state st-${esc(L.st.key)}" x="${L.x.toFixed(1)}" y="${(L.y0 + L.fs + lineH).toFixed(1)}">${esc(L.stateText)}</tspan>
-      </text>` : "";
-    return `<g class="gnode ${esc(st.key)}${L ? " labelled" : ""}${isNew ? " enter" : ""}${selected === id ? " selected" : ""}" data-id="${esc(id)}"
+    return `<g class="gnode ${esc(st.key)}${isNew ? " enter" : ""}${selected === id ? " selected" : ""}" data-id="${esc(id)}" data-st="${esc(st.key)}"
       ${isNew ? `style="--i:${enterIndex++}"` : ""}
       transform="translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})" role="button" tabindex="0"
       aria-label="${esc(nodeName(n))} — ${esc(st.label)}">
-      <circle class="halo" r="${(r + 5).toFixed(1)}" />
-      ${shape}
-      <circle class="hit" r="${(r + 8).toFixed(1)}" />
-      ${label}
+      <circle class="halo" r="${(r + 6).toFixed(1)}" />
+      <circle class="shape" r="${r.toFixed(1)}" />
+      <circle class="hit" r="${(r + 10).toFixed(1)}" />
+      ${st.key === "running" ? `<circle class="ring" r="${(r + 8).toFixed(1)}" />` : ""}
     </g>`;
   }).join("");
   renderedIds = nextIds;
@@ -741,20 +640,15 @@ function renderGraph() {
   // Provisional viewBox from the node centres only; the real one is measured
   // from the laid-out nodes and their labels right after insertion.
   let pa = Infinity, pb = -Infinity, pc = Infinity, pd = -Infinity;
-  for (const id in pos) { const p = pos[id], r = nodeR(id) + 140; pa = Math.min(pa, p.x - r); pb = Math.max(pb, p.x + r); pc = Math.min(pc, p.y - r); pd = Math.max(pd, p.y + r); }
+  for (const id in pos) { const p = pos[id], r = nodeR(id) + 150; pa = Math.min(pa, p.x - r); pb = Math.max(pb, p.x + r); pc = Math.min(pc, p.y - r); pd = Math.max(pd, p.y + r); }
   const provisional = { x: pa, y: pc, w: Math.max(1, pb - pa), h: Math.max(1, pd - pc) };
 
   tree.innerHTML = `<svg class="graph-svg" viewBox="${provisional.x.toFixed(1)} ${provisional.y.toFixed(1)} ${provisional.w.toFixed(1)} ${provisional.h.toFixed(1)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Run graph">
-    <defs>
-      <marker id="arrowDep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 z" class="arrow-dep" />
-      </marker>
-    </defs>
-    <g class="viewport"><g class="edges">${edges.join("")}</g><g class="nodes">${nodesMarkup}</g></g>
+    <g class="viewport"><g class="edges">${edges.join("")}</g><g class="deps">${deps.join("")}</g><g class="nodes">${nodesMarkup}</g></g>
   </svg>`;
   svg = tree.querySelector("svg.graph-svg");
   viewport = svg.querySelector(".viewport");
-  home = measureHome(svg, pad);
+  home = measureHome(svg, 38);
   vb = { ...home };
   if (!hasMoved) view = { x: 0, y: 0, k: 1 };
   applyVB();
@@ -763,11 +657,11 @@ function renderGraph() {
   bindNodes();
   applyFocus();
   applyVB();
-  tree.querySelectorAll(".gnode.enter").forEach((g) => setTimeout(() => g.classList.remove("enter"), 700));
+  tree.querySelectorAll(".gnode.enter").forEach((g) => setTimeout(() => g.classList.remove("enter"), 900));
 }
 
 /* The true bounds of the drawn graph, in user units, read back from the DOM so
-   every label is inside the frame by construction. */
+   every node is inside the frame by construction. */
 function measureHome(svg, pad) {
   const inv = svg.getScreenCTM().inverse();
   let a = Infinity, b = -Infinity, c = Infinity, d = -Infinity;
@@ -786,45 +680,21 @@ function measureHome(svg, pad) {
 function applyVB() { if (svg && vb) svg.setAttribute("viewBox", `${vb.x.toFixed(1)} ${vb.y.toFixed(1)} ${vb.w.toFixed(1)} ${vb.h.toFixed(1)}`); }
 function applyView() { if (viewport) viewport.setAttribute("transform", `translate(${view.x.toFixed(2)} ${view.y.toFixed(2)}) scale(${view.k.toFixed(4)})`); }
 
-function shapeFor(key, r) {
-  const glyph = GLYPH[key] || "";
-  const text = glyph && r >= 9
-    ? `<text class="glyph" text-anchor="middle" dominant-baseline="central" font-size="${(r * (key === "complete" ? 1.15 : 0.95)).toFixed(1)}">${glyph}</text>`
-    : "";
-  const ring = key === "running" ? `<circle class="ring" r="${(r + 7).toFixed(1)}" />` : "";
-  if (key === "failed") {
-    const s = r * 1.28;
-    return `<polygon class="shape" points="0,${(-s).toFixed(1)} ${(s * 0.87).toFixed(1)},${(s * 0.5).toFixed(1)} ${(-s * 0.87).toFixed(1)},${(s * 0.5).toFixed(1)}" />${text}${ring}`;
-  }
-  if (key === "ready") {
-    const s = r * 1.16;
-    return `<polygon class="shape" points="0,${(-s).toFixed(1)} ${s.toFixed(1)},0 0,${s.toFixed(1)} ${(-s).toFixed(1)},0" />${text}${ring}`;
-  }
-  if (key === "suspended") {
-    const pts = [];
-    for (let i = 0; i < 6; i++) { const a = -Math.PI / 2 + i * Math.PI / 3; pts.push(`${(Math.cos(a) * r * 1.14).toFixed(1)},${(Math.sin(a) * r * 1.14).toFixed(1)}`); }
-    return `<polygon class="shape" points="${pts.join(" ")}" />${text}${ring}`;
-  }
-  return `<circle class="shape" r="${r.toFixed(1)}" />${text}${ring}`;
-}
-
-/* Update status colouring and state words without rebuilding the tree, so a
-   poll never flickers the graph or drops the hover. */
+/* Update status colouring without rebuilding the tree, so a poll never
+   flickers the graph or drops the hover. */
 function paintGraph() {
   const tree = el("tree");
   tree.querySelectorAll(".gnode").forEach((g) => {
     const n = byId(g.dataset.id);
     if (!n) return;
     const st = runState(n);
+    const prev = g.dataset.st;
+    g.dataset.st = st.key;
     const isNew = g.classList.contains("enter");
-    g.setAttribute("class", `gnode ${st.key}${g.classList.contains("labelled") ? " labelled" : ""}${isNew ? " enter" : ""}` +
-      `${selected === g.dataset.id ? " selected" : ""}${hover === g.dataset.id ? " hover" : ""}`);
-    const word = g.querySelector(".nl-state");
-    if (word) {
-      const hidden = childrenOf(g.dataset.id).length - visibleChildren(n).length;
-      word.textContent = (STATE_WORD[st.key] || st.key) + (hidden > 0 ? ` +${hidden}` : "");
-      word.setAttribute("class", `nl-state st-${st.key}`);
-    }
+    const changed = prev && prev !== st.key;
+    g.setAttribute("class", `gnode ${st.key}${isNew ? " enter" : ""}${selected === g.dataset.id ? " selected" : ""}` +
+      `${hover === g.dataset.id ? " hover" : ""}${changed ? " change" : ""}`);
+    if (changed) setTimeout(() => g.classList.remove("change"), 800);
   });
   tree.querySelectorAll(".edge-parent").forEach((p) => {
     const n = byId(p.dataset.to);
@@ -837,7 +707,7 @@ function paintGraph() {
 }
 
 /* ==================================================================
-   Graph interaction: hover focus, click select, zoom, pan, pinch.
+   Graph interaction: hover focus, click select, pinch, pan.
    ================================================================== */
 function bindNodes() {
   const tree = el("tree");
@@ -847,16 +717,11 @@ function bindNodes() {
       selectNode(g.dataset.id);
     });
     if (window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
-      g.addEventListener("mouseenter", () => { hover = g.dataset.id; applyFocus(); showTooltip(g.dataset.id); });
-      g.addEventListener("mouseleave", () => { hover = null; applyFocus(); hideTooltip(); });
-      g.addEventListener("mousemove", (ev) => positionTooltip(ev.clientX, ev.clientY));
+      g.addEventListener("mouseenter", () => { hover = g.dataset.id; applyFocus(); });
+      g.addEventListener("mouseleave", () => { if (hover === g.dataset.id) { hover = null; applyFocus(); } });
     }
-    g.addEventListener("focus", () => {
-      hover = g.dataset.id; applyFocus();
-      const r = g.getBoundingClientRect();
-      showTooltip(g.dataset.id, { x: r.left + r.width / 2, y: r.bottom });
-    });
-    g.addEventListener("blur", () => { if (hover === g.dataset.id) { hover = null; applyFocus(); hideTooltip(); } });
+    g.addEventListener("focus", () => { hover = g.dataset.id; applyFocus(); });
+    g.addEventListener("blur", () => { if (hover === g.dataset.id) { hover = null; applyFocus(); } });
     g.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectNode(g.dataset.id); }
     });
@@ -865,22 +730,27 @@ function bindNodes() {
 
 function applyFocus() {
   if (!svg) return;
-  const id = hover || selected;
+  // Focus (and the dimming of everything else) is a hover-only effect, so the
+  // full graph reads at a glance by default; selection only marks the node.
+  const id = hover;
   const path = new Set();
   for (let cur = id ? byId(id) : null; cur; cur = cur.parent ? byId(cur.parent) : null) path.add(cur.id);
   svg.classList.toggle("svg-focus", !!id);
   svg.querySelectorAll(".gnode").forEach((g) => {
     const gid = g.dataset.id;
-    g.classList.toggle("onpath", path.has(gid) && gid !== id);
     g.classList.toggle("selected", gid === selected);
     g.classList.toggle("hover", gid === hover);
     g.classList.toggle("dim", !!id && !path.has(gid) && gid !== id);
   });
-  svg.querySelectorAll(".edge-parent").forEach((p) => {
-    const to = p.dataset.to, from = byId(to) && byId(to).parent;
-    p.classList.toggle("onpath", !!id && path.has(to) && path.has(from));
-    p.classList.toggle("dim", !!id && !(path.has(to) && path.has(from)));
+  svg.querySelectorAll(".edge-parent, .edge-dep").forEach((p) => {
+    const to = p.dataset.to, from = p.dataset.from || (byId(to) && byId(to).parent);
+    p.classList.toggle("onpath", !!id && path.has(to) && !!from && path.has(from));
   });
+  const hint = el("graph-hint");
+  if (hint) {
+    const h = byId(hover);
+    hint.innerHTML = h ? `<b>${esc(nodeName(h))}</b> — ${esc(runState(h).label)}` : "<b>drag</b> pan · <b>hover</b> focus · <b>click</b> open";
+  }
 }
 
 function selectNode(id) {
@@ -898,7 +768,7 @@ function selectNode(id) {
   tickDetail(true);
 }
 
-/* ---------- zoom / pan / pinch ---------- */
+/* ---------- pan / pinch / reset ---------- */
 function toUser(x, y) {
   const pt = svg.createSVGPoint(); pt.x = x; pt.y = y;
   return pt.matrixTransform(svg.getScreenCTM().inverse());
@@ -936,13 +806,6 @@ function bindGraphInteraction() {
   const pointers = new Map();
   let panning = false, moved = false, lastX = 0, lastY = 0, pinchDist = 0;
 
-  frame.addEventListener("wheel", (ev) => {
-    if (!svg) return;
-    if (!ev.target.closest("svg.graph-svg")) return;
-    ev.preventDefault();
-    zoomAt(Math.exp(ev.deltaY * 0.0014), ev.clientX, ev.clientY);
-  }, { passive: false });
-
   frame.addEventListener("dblclick", (ev) => {
     if (!ev.target.closest("svg.graph-svg")) return;
     resetView(true);
@@ -951,7 +814,6 @@ function bindGraphInteraction() {
   frame.addEventListener("pointerdown", (ev) => {
     if (!svg || !ev.target.closest("svg.graph-svg")) return;
     pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
-    try { frame.setPointerCapture(ev.pointerId); } catch (e) { /* fine */ }
     if (pointers.size === 1) { panning = true; moved = false; lastX = ev.clientX; lastY = ev.clientY; svg.classList.add("panning"); }
     else if (pointers.size === 2) { panning = false; const [a, b] = [...pointers.values()]; pinchDist = Math.hypot(a.x - b.x, a.y - b.y); }
   });
@@ -968,12 +830,18 @@ function bindGraphInteraction() {
     }
     if (!panning) return;
     const dx = ev.clientX - lastX, dy = ev.clientY - lastY;
-    if (!moved && Math.hypot(dx, dy) > 4) moved = true;
+    // Capture only once a real drag begins, so a plain click still reaches
+    // the node (pointer capture would retarget its click event to the frame).
+    if (!moved && Math.hypot(dx, dy) > 4) {
+      moved = true;
+      try { frame.setPointerCapture(ev.pointerId); } catch (e) { /* fine */ }
+    }
     lastX = ev.clientX; lastY = ev.clientY;
     if (!moved || !vb) return;
     const m = svg.getScreenCTM();
     if (!m || !m.a || !m.d) return;
-    view.x -= dx / m.a / view.k; view.y -= dy / m.d / view.k; hasMoved = true;
+    // Direct manipulation: the graph moves with the pointer.
+    view.x += dx / m.a; view.y += dy / m.d; hasMoved = true;
     applyView();
   });
 
@@ -989,45 +857,11 @@ function bindGraphInteraction() {
   frame.addEventListener("pointercancel", end);
 }
 
-/* ---------- tooltip ---------- */
-function positionTooltip(x, y) {
-  const t = el("tooltip");
-  const w = t.offsetWidth || 240, h = t.offsetHeight || 120;
-  let left = x + 16, top = y + 16;
-  if (left + w > window.innerWidth - 8) left = Math.max(8, x - w - 16);
-  if (top + h > window.innerHeight - 8) top = Math.max(8, y - h - 16);
-  t.style.left = left + "px"; t.style.top = top + "px";
-  t.style.transformOrigin = `${left < x ? "right" : "left"} ${top < y ? "bottom" : "top"}`;
-}
-function showTooltip(id, anchor) {
-  const n = byId(id);
-  if (!n) return;
-  const deps = (n.depends_on || []).map((d) => byId(d) ? clip(nodeName(byId(d)), 26) : d);
-  const t = el("tooltip");
-  t.innerHTML = `${esc(n.id)}
-    <div class="tt-goal">${esc(nodeName(n))}</div>
-    <div class="tt-row">${stateChip(n)}</div>
-    ${deps.length ? `<div class="tt-meta">waits on <b>${deps.map(esc).join(", ")}</b></div>` : ""}
-    ${n.activity ? `<div class="tt-meta">${esc(clip(firstLine(n.activity), 140))}</div>` : ""}`;
-  if (tooltipSeen) t.classList.add("instant"); else { t.classList.remove("instant"); tooltipSeen = true; }
-  t.classList.add("show"); t.setAttribute("aria-hidden", "false");
-  if (anchor) positionTooltip(anchor.x, anchor.y);
-}
-function hideTooltip() {
-  const t = el("tooltip");
-  if (t) { t.classList.remove("show"); t.setAttribute("aria-hidden", "true"); }
-}
-
 /* ==================================================================
    The butler conversation — the only steering surface. The selected
    node rides along as context so "reopen this" is unambiguous.
    ================================================================== */
 const ACTION_WORD = { none: "No change needed", reopen: "Reopened", split: "Added steps", amend: "Amended", edit_contract: "Edited the contract", retry: "Retried", resolve: "Settled" };
-const EXAMPLES = [
-  "The last step did not do what I asked",
-  "Add a step that checks it on my phone",
-  "This part sounds wrong, redo it",
-];
 function conversationSig() {
   return JSON.stringify(conversation.map((t) => [t.id, t.status, (t.reply || "").length, t.error || "", t.plan && t.plan.rationale, (t.tree_changes || []).length]));
 }
@@ -1059,12 +893,6 @@ function renderReply(t) {
   const notes = t.reply ? `<details class="reply"><summary>Full reply</summary><pre>${esc(t.reply)}</pre></details>` : "";
   return `<div class="msg butler">${head}${why}${changeList}${notes}</div>`;
 }
-function chatEmpty() {
-  return `<div class="chat-empty">
-    <p class="empty">Nothing has been asked yet. Say what is wrong, or what should change.</p>
-    <div class="examples">${EXAMPLES.map((e) => `<button type="button" class="example" data-example="${esc(e)}">${esc(e)}</button>`).join("")}</div>
-  </div>`;
-}
 function renderChat(force) {
   const log = el("chat-log");
   if (!log) return;
@@ -1072,13 +900,13 @@ function renderChat(force) {
   if (!force && sig === chatSig) return;
   const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
   chatSig = sig;
-  log.innerHTML = conversation.length ? conversation.map(renderTurn).join("") : chatEmpty();
+  log.innerHTML = conversation.length
+    ? conversation.map(renderTurn).join("")
+    : '<p class="chat-empty">No messages yet.</p>';
   const last = conversation[conversation.length - 1];
   chatBusy = !!(last && last.status === "working");
   const send = el("chat-send");
   if (send) send.disabled = chatBusy;
-  const status = el("chat-status");
-  if (status) status.textContent = chatBusy ? "working…" : "";
   if (force || atBottom) log.scrollTop = log.scrollHeight;
 }
 async function pollConversation(force) {
@@ -1115,12 +943,11 @@ async function sendChat(ev) {
 }
 function setContext(id) {
   const n = byId(id);
-  selectedContext = n ? id : null;
   const box = el("chat-context");
   if (!box) return;
   if (!n) { box.hidden = true; box.innerHTML = ""; return; }
   box.hidden = false;
-  box.innerHTML = `Asking about <span class="ctx">${esc(clip(nodeName(n), 70))}</span> <button type="button" id="ctx-clear" aria-label="Clear the selected step">clear</button>`;
+  box.innerHTML = `about <span class="ctx">${esc(clip(nodeName(n), 70))}</span> <button type="button" id="ctx-clear" aria-label="Clear the selected step">clear</button>`;
 }
 
 /* ==================================================================
@@ -1252,8 +1079,6 @@ async function tick(force) {
    Wiring.
    ================================================================== */
 document.addEventListener("click", (ev) => {
-  const ex = ev.target.closest("[data-example]");
-  if (ex) { const input = el("chat-input"); input.value = ex.dataset.example; input.focus(); return; }
   if (ev.target.closest("#ctx-clear")) { setContext(null); return; }
 });
 el("chat-form").addEventListener("submit", sendChat);
@@ -1264,9 +1089,6 @@ el("chat-input").addEventListener("input", (ev) => {
   const t = ev.target;
   t.style.height = "auto";
   t.style.height = Math.min(t.scrollHeight, 180) + "px";
-});
-document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape") { hideTooltip(); }
 });
 window.addEventListener("resize", () => {
   if (!home || !svg || hasMoved) return;
