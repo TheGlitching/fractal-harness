@@ -19,7 +19,19 @@ use std::path::PathBuf;
 const BUTLER_DIRNAME: &str = "butler";
 const PLAN_FILENAME: &str = "last-plan.json";
 const LOG_FILENAME: &str = "log.jsonl";
+const CONVERSATION_FILENAME: &str = "conversation.json";
 const MAX_DIFF_CHARS: usize = 8_000;
+const MAX_REPLY_CHARS: usize = 8_000;
+/// How many turns the durable conversation keeps. It is a display log, not the
+/// audit trail (`log.jsonl` is); older turns roll off so a long session cannot
+/// grow without bound.
+const MAX_TURNS: usize = 50;
+
+/// Serialises `begin_turn`/`update_turn` within one process so two HTTP requests
+/// cannot both read a conversation and write it back over each other. The
+/// conversation file itself is the cross-process guard: a `working` turn is
+/// visible to any other butler entrypoint.
+static TURN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn now() -> String {
     chrono::Utc::now()
@@ -100,6 +112,105 @@ fn append_log(store: &Store, record: &Value) {
 pub fn read_plan(store: &Store) -> Option<Value> {
     let text = std::fs::read_to_string(plan_path(store)).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+fn conversation_path(store: &Store) -> PathBuf {
+    butler_dir(store).join(CONVERSATION_FILENAME)
+}
+
+/// The durable conversation: one turn per user message, each carrying the
+/// butler's reply, plan and the tree changes it caused. Read by the dashboard
+/// chat panel, so it survives a page refresh and a server restart.
+pub fn read_conversation(store: &Store) -> Vec<Value> {
+    std::fs::read_to_string(conversation_path(store))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+}
+
+fn write_conversation(store: &Store, turns: &[Value]) -> Result<(), StoreError> {
+    let path = conversation_path(store);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&Value::Array(turns.to_vec()))?,
+    )?;
+    Ok(())
+}
+
+fn is_working(turn: &Value) -> bool {
+    turn.get("status").and_then(Value::as_str) == Some("working")
+}
+
+/// Claim the next turn and persist it as `working` before any agent runs, so a
+/// refresh (or another entrypoint) sees the request immediately. Refuses while a
+/// previous turn is still working: the tree has one steering agent at a time.
+pub fn begin_turn(store: &Store, message: &str) -> Result<String, StoreError> {
+    let _guard = TURN_LOCK.lock().unwrap();
+    let mut turns = read_conversation(store);
+    if turns.last().map(is_working).unwrap_or(false) {
+        return Err(StoreError::Other(
+            "a butler request is already running".into(),
+        ));
+    }
+    // Unique even after old turns roll off the front of the history.
+    let id = format!(
+        "turn-{}-{}",
+        turns.len() + 1,
+        chrono::Utc::now().timestamp_millis()
+    );
+    turns.push(json!({
+        "id": id,
+        "at": now(),
+        "status": "working",
+        "message": message,
+    }));
+    if turns.len() > MAX_TURNS {
+        let drop = turns.len() - MAX_TURNS;
+        turns.drain(0..drop);
+    }
+    write_conversation(store, &turns)?;
+    Ok(id)
+}
+
+fn update_turn(store: &Store, turn_id: &str, patch: Value) -> Result<(), StoreError> {
+    let _guard = TURN_LOCK.lock().unwrap();
+    let mut turns = read_conversation(store);
+    let Some(turn) = turns.iter_mut().find(|t| t["id"] == turn_id) else {
+        return Ok(());
+    };
+    if let (Some(obj), Some(fields)) = (turn.as_object_mut(), patch.as_object()) {
+        for (key, value) in fields {
+            obj.insert(key.clone(), value.clone());
+        }
+    }
+    write_conversation(store, &turns)
+}
+
+/// Mark any turn left `working` by a dead process as failed, so a restart does
+/// not show a phantom run in progress or block the next request forever.
+pub fn recover_interrupted(store: &Store) {
+    let _guard = TURN_LOCK.lock().unwrap();
+    let mut turns = read_conversation(store);
+    let mut changed = false;
+    for turn in turns.iter_mut() {
+        if is_working(turn) {
+            if let Some(obj) = turn.as_object_mut() {
+                obj.insert("status".into(), json!("failed"));
+                obj.insert(
+                    "error".into(),
+                    json!("the butler was interrupted before it finished this request"),
+                );
+            }
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = write_conversation(store, &turns);
+    }
 }
 
 fn node_summary(node: &Node) -> Value {
@@ -458,8 +569,39 @@ fn build_prompt(store: &Store, message: &str) -> Result<String, StoreError> {
 
 /// Run one butler session: build the prompt, run the executor agent (which
 /// inspects and steers through the tools), then surface the plan it recorded and
-/// the tree changes it produced. Recorded to `.fractal/butler/log.jsonl`.
+/// the tree changes it produced. Recorded to `.fractal/butler/log.jsonl` (the
+/// audit trail) and to the durable conversation the dashboard chat panel reads.
 pub fn run(store: &Store, message: &str, model: &str) -> Result<Value, String> {
+    let turn_id = begin_turn(store, message).map_err(|e| e.to_string())?;
+    run_turn(store, &turn_id, message, model)
+}
+
+/// Run the already-claimed turn `turn_id` and settle it as done or failed. Split
+/// from `run` so the dashboard can claim a turn synchronously, return to the
+/// browser, and run the agent in the background.
+pub fn run_turn(store: &Store, turn_id: &str, message: &str, model: &str) -> Result<Value, String> {
+    let outcome = run_session(store, message, model);
+    match &outcome {
+        Ok(record) => {
+            let _ = update_turn(
+                store,
+                turn_id,
+                json!({
+                    "status": "done",
+                    "reply": record.get("reply").cloned().unwrap_or(Value::Null),
+                    "plan": record.get("plan").cloned().unwrap_or(Value::Null),
+                    "tree_changes": record.get("tree_changes").cloned().unwrap_or(Value::Null),
+                }),
+            );
+        }
+        Err(error) => {
+            let _ = update_turn(store, turn_id, json!({"status": "failed", "error": error}));
+        }
+    }
+    outcome
+}
+
+fn run_session(store: &Store, message: &str, model: &str) -> Result<Value, String> {
     store.reconcile().map_err(|e| e.to_string())?;
     // A new session must not inherit a previous session's plan.
     let _ = std::fs::remove_file(plan_path(store));
@@ -468,8 +610,9 @@ pub fn run(store: &Store, message: &str, model: &str) -> Result<Value, String> {
     let prompt = build_prompt(store, message).map_err(|e| e.to_string())?;
     let on_output: crate::runner::OutputFn = std::sync::Arc::new(|line: &str| eprintln!("{line}"));
 
-    crate::runner::run_butler_agent(&prompt, &butler_dir(store), &store.root, model, on_output)
-        .map_err(|e| e.to_string())?;
+    let reply =
+        crate::runner::run_butler_agent(&prompt, &butler_dir(store), &store.root, model, on_output)
+            .map_err(|e| e.to_string())?;
 
     let plan = read_plan(store).unwrap_or_else(|| {
         json!({
@@ -482,6 +625,7 @@ pub fn run(store: &Store, message: &str, model: &str) -> Result<Value, String> {
     let record = json!({
         "at": now(),
         "message": message,
+        "reply": cap_chars(&reply, MAX_REPLY_CHARS),
         "plan": plan,
         "tree_changes": status_changes(&before, &after),
     });
@@ -765,5 +909,61 @@ mod tests {
         assert_eq!(describe_action(&plan), "reopen — only root-01 changed");
         let none = json!({"action":"none","rationale":"already satisfied"});
         assert_eq!(describe_action(&none), "no change — already satisfied");
+    }
+
+    #[test]
+    fn begin_turn_persists_the_message_and_refuses_a_second_run() {
+        let (store, dir) = temp_store("begin_turn");
+        let id = begin_turn(&store, "make the tracker use real data").unwrap();
+        let turns = read_conversation(&store);
+        assert_eq!(turns.len(), 1, "the request must be recorded immediately");
+        assert_eq!(turns[0]["id"], id);
+        assert_eq!(turns[0]["status"], "working");
+        assert_eq!(turns[0]["message"], "make the tracker use real data");
+
+        let second = begin_turn(&store, "another request");
+        assert!(
+            second.is_err(),
+            "a working turn must block a second concurrent request"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_settled_turn_carries_the_plan_and_the_reply() {
+        let (store, dir) = temp_store("settle_turn");
+        let id = begin_turn(&store, "fix the wiring").unwrap();
+        update_turn(
+            &store,
+            &id,
+            json!({
+                "status": "done",
+                "reply": "reopened root-01 only",
+                "plan": {"action": "reopen", "rationale": "root-01 is wrong", "nodes": ["root-01"]},
+                "tree_changes": [{"id": "root-01", "from": "complete", "to": "pending"}],
+            }),
+        )
+        .unwrap();
+        let turns = read_conversation(&store);
+        assert_eq!(turns[0]["status"], "done");
+        assert_eq!(turns[0]["plan"]["action"], "reopen");
+        assert_eq!(turns[0]["tree_changes"][0]["to"], "pending");
+        // A settled turn no longer blocks the next request.
+        assert!(begin_turn(&store, "a follow-up").is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recover_interrupted_fails_a_leftover_working_turn() {
+        let (store, dir) = temp_store("recover");
+        begin_turn(&store, "a request whose process died").unwrap();
+        recover_interrupted(&store);
+        let turns = read_conversation(&store);
+        assert_eq!(turns[0]["status"], "failed");
+        assert!(
+            begin_turn(&store, "the next request").is_ok(),
+            "recovery must unblock the next request"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

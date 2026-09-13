@@ -228,29 +228,45 @@ The page is organised so a run can be understood at a glance, then acted on:
   diff rendered **the way git prints it** - `diff --git` / `---` / `+++`
   headers, `@@` hunk headers, green additions, red removals and context lines
   in monospace, scrollable both directions. Raw JSON is never the default view.
-- **Steering**: grouped actions on the selected node - add a constraint/idea
-  (propagates to descendants), edit the contract, answer/route an escalation,
-  and a separate, visually marked **destructive** group for retry. Each action
-  states what it is, when to use it and its consequence. The edit-contract form
-  is **pre-filled** with the node's current goal, acceptance criteria,
-  verification and manual verification, ready to change - never a placeholder.
-  Every action is confirmed **inline** (one prompt, no blocking browser
-  dialog), and on success the input clears, a persistent result is shown, and
-  the added constraint/decision is highlighted in the node's contract and
-  decisions. When no scheduler is running the result says so plainly: the
-  change is recorded in the contracts and queued, and `fractal run` must be
-  resumed for it to take effect. Each mutation is an explicit form submit that
-  routes through the same `Store` methods as the TUI and scheduler; the server
-  never mutates implicitly.
+- **Conversation with the butler** (the right-hand panel, or above the graph on
+  a narrow screen): the way you steer, instead of a panel of parameters. Type a
+  message in plain language (`the tracker should use real data, not simulated`),
+  Send, and the butler inspects the tree and replies with its plan and its
+  rationale — kept, or which nodes it reopened or added, and why — plus the
+  resulting tree changes (`root-01: complete -> pending`). The request is
+  claimed and shown as working immediately, the butler runs off the request
+  thread, and the panel polls until the turn settles; the page is never blocked.
+  The transcript is durable in `.fractal/butler/conversation.json`, so a refresh
+  (or a server restart, which settles an interrupted turn as failed) shows the
+  same conversation. The individual constraint / edit-contract / amend / retry
+  widgets are gone: the butler covers them, and there is one steering path, not
+  two. Node detail still shows the contract, the committed diff and the live
+  activity — the conversation and the graph are the interface.
+
+The dashboard's steering API is `GET /api/butler` (the durable transcript) and
+`POST /api/butler {"message": "..."}`, which claims a turn, runs the butler in
+the background and returns `202` with the turn id; a second request while one is
+working is refused with `409`. Both route through `Store` like everything else.
 
 The page is a single embedded HTML file with inline CSS/JS: no CDN, no build
-step, works offline. Its visual language is deliberately technical: a near-black
-ground with a faint drifting grid and vignette, hairline surfaces, off-white
-text, monospace for identifiers and data, a warm rust/amber primary and a cool
-cyan reserved for dependencies, with every status state named in words as well
-as coloured. Page-level motion is subtle and every animation is disabled under
-`prefers-reduced-motion`, which also leaves the state fully readable in text and
-colour. It is responsive down to ~390 px.
+step, works offline. Its visual language follows the pinned La Fabrique à Sites
+green theme (template-v2): a dark green ground with a fixed visible 12-column
+grid, 2px borders, serif display headings, uppercase letterspaced monospace for
+labels, ids and body, and a bright green accent. Buttons are bordered and fill
+from the bottom on hover with a colour invert; hover is gated behind
+`(hover: hover) and (pointer: fine)`, focus-visible is a 3px accent ring,
+selection, caret and scrollbars are themed, and data uses tabular numerals.
+Colour is never the only carrier: every status state is named in words as well.
+Motion is transform/opacity only with custom curves, and `prefers-reduced-motion`
+keeps opacity and colour while dropping movement. It is responsive down to
+~390 px.
+
+The graph keeps its round/globe radial shape but is read as a graph, not framed
+by one: the decorative rings, core glow and coloured halos are gone. Node labels
+are leader-lined to their dot, only the root and the first generation are
+labelled by default, and a deeper node's label is revealed on hover or
+selection; labels are still collision-resolved so they never overlap, and the
+tooltip always carries goal, status, dependencies and latest activity.
 
 Live activity is written by the running scheduler to `.fractal/activity/<id>`,
 a display-only scratch file outside `log/events.jsonl`: it is not part of the
@@ -416,9 +432,9 @@ and verification, deterministic non-interactive termination, enforced budgets,
 dependency staleness, per-node isolation, workspace exclusion, bounded per-node
 context, failure isolation with unverified checkpointing, a tolerant
 transcript-command completion channel, the butler steering agent and its
-tool surface, and the `omp`/`pi`/`opencode` executors are implemented. Known
-gaps tracked for follow-up work: crash-safe reaping of gate subprocesses and a
-dashboard chat surface for the butler.
+tool surface, the conversation-first dashboard over it, and the
+`omp`/`pi`/`opencode` executors are implemented. Known
+gaps tracked for follow-up work: crash-safe reaping of gate subprocesses.
 
 ## License
 

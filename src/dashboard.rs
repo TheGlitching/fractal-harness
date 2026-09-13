@@ -35,6 +35,9 @@ pub struct ServerConfig {
     pub port: u16,
     pub bind_all: bool,
     pub allow_remote_mutations: bool,
+    /// Model handed to the butler when a chat request runs. Resolved once at
+    /// startup so every request the dashboard serves uses the same one.
+    pub model: String,
 }
 
 /// The address the dashboard binds to. Loopback unless the operator explicitly
@@ -88,6 +91,7 @@ pub fn serve(project: &Path, cfg: ServerConfig) -> Result<(), String> {
         store,
         cfg.allow_remote_mutations,
         project.to_path_buf(),
+        cfg.model,
     );
     Ok(())
 }
@@ -102,12 +106,13 @@ pub fn progress_line(url: &str) -> String {
 /// fail because the dashboard could not bind, so the caller keeps going and
 /// reports how to start it manually. The default port is tried first; if it is
 /// taken, any free port is used so a second run never blocks the first.
-pub fn spawn(project: &Path) -> Result<String, String> {
+pub fn spawn(project: &Path, model: &str) -> Result<String, String> {
     let requested = ServerConfig {
         host: None,
         port: 8787,
         bind_all: false,
         allow_remote_mutations: false,
+        model: model.to_string(),
     };
     let listener = bind_listener(&requested).or_else(|_| {
         bind_listener(&ServerConfig {
@@ -115,6 +120,7 @@ pub fn spawn(project: &Path) -> Result<String, String> {
             port: 0,
             bind_all: false,
             allow_remote_mutations: false,
+            model: model.to_string(),
         })
     })?;
     let port = listener
@@ -124,7 +130,8 @@ pub fn spawn(project: &Path) -> Result<String, String> {
     let url = format!("http://127.0.0.1:{port}/");
     let store = Arc::new(Store::new(project));
     let project = project.to_path_buf();
-    std::thread::spawn(move || serve_listener(listener, store, false, project));
+    let model = model.to_string();
+    std::thread::spawn(move || serve_listener(listener, store, false, project, model));
     Ok(url)
 }
 
@@ -133,13 +140,18 @@ fn serve_listener(
     store: Arc<Store>,
     allow_remote_mutations: bool,
     project: PathBuf,
+    model: String,
 ) {
+    // A fresh server owns the conversation from here: any turn a dead process
+    // left `working` is settled before the first request can be served.
+    crate::butler::recover_interrupted(&store);
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let store = store.clone();
         let project = project.clone();
+        let model = model.clone();
         std::thread::spawn(move || {
-            let _ = handle_connection(stream, &store, &project, allow_remote_mutations);
+            let _ = handle_connection(stream, &store, &project, allow_remote_mutations, &model);
         });
     }
 }
@@ -163,6 +175,7 @@ fn handle_connection(
     store: &Store,
     project: &Path,
     allow_remote_mutations: bool,
+    model: &str,
 ) -> std::io::Result<()> {
     let is_local = stream
         .peer_addr()
@@ -181,6 +194,7 @@ fn handle_connection(
         &req.query,
         &req.content_type,
         &req.body,
+        model,
     );
     write_response(&mut stream, &outcome)
 }
@@ -273,10 +287,12 @@ fn write_response(stream: &mut TcpStream, outcome: &Outcome) -> std::io::Result<
 fn status_text(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        202 => "Accepted",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
         415 => "Unsupported Media Type",
         500 => "Internal Server Error",
         _ => "Error",
@@ -339,6 +355,7 @@ fn route(
     query: &HashMap<String, String>,
     content_type: &str,
     body: &[u8],
+    model: &str,
 ) -> Outcome {
     match (method, path) {
         ("GET", "/") => Outcome {
@@ -360,28 +377,28 @@ fn route(
                 Err(e) => error_outcome(404, e.to_string()),
             }
         }
-        ("POST", "/api/action") => {
-            if !is_local && !allow_remote_mutations {
-                return error_outcome(
-                    403,
-                    "remote mutations are disabled; restart with --allow-remote-mutations to enable them"
-                        .into(),
-                );
-            }
-            if !content_type
-                .to_ascii_lowercase()
-                .contains("application/json")
-            {
-                return error_outcome(415, "Content-Type must be application/json".into());
-            }
-            let action: Value = match serde_json::from_slice(body) {
-                Ok(v) => v,
-                Err(e) => return error_outcome(400, format!("invalid JSON body: {e}")),
-            };
-            match apply_action(store, &action) {
-                Ok(message) => json_outcome(200, json!({"ok": true, "message": message})),
-                Err(e) => error_outcome(400, e.to_string()),
-            }
+        ("GET", "/api/butler") => json_outcome(
+            200,
+            json!({"turns": crate::butler::read_conversation(store)}),
+        ),
+        ("POST", "/api/butler") => {
+            let project = project.to_path_buf();
+            butler_post(
+                store,
+                model,
+                is_local,
+                allow_remote_mutations,
+                content_type,
+                body,
+                move |turn_id, message, model| {
+                    // A butler session can take minutes; run it off the request
+                    // thread and let the page poll the durable conversation.
+                    std::thread::spawn(move || {
+                        let store = Store::new(&project);
+                        let _ = crate::butler::run_turn(&store, &turn_id, &message, &model);
+                    });
+                },
+            )
         }
         ("GET", _) | ("POST", _) => error_outcome(404, "not found".into()),
         _ => error_outcome(405, "method not allowed".into()),
@@ -398,6 +415,57 @@ fn json_outcome(status: u16, value: Value) -> Outcome {
 
 fn error_outcome(status: u16, message: String) -> Outcome {
     json_outcome(status, json!({"ok": false, "error": message}))
+}
+
+/// One chat request to the butler. The turn is claimed and persisted before
+/// `start` is called, so the browser gets an immediate working state while the
+/// agent runs behind it. Split out from `route` so tests can drive the whole
+/// request path without launching an executor.
+fn butler_post<F>(
+    store: &Store,
+    model: &str,
+    is_local: bool,
+    allow_remote_mutations: bool,
+    content_type: &str,
+    body: &[u8],
+    start: F,
+) -> Outcome
+where
+    F: FnOnce(String, String, String),
+{
+    if !is_local && !allow_remote_mutations {
+        return error_outcome(
+            403,
+            "remote mutations are disabled; restart with --allow-remote-mutations to enable them"
+                .into(),
+        );
+    }
+    if !content_type
+        .to_ascii_lowercase()
+        .contains("application/json")
+    {
+        return error_outcome(415, "Content-Type must be application/json".into());
+    }
+    let value: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return error_outcome(400, format!("invalid JSON body: {e}")),
+    };
+    let message = value
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if message.is_empty() {
+        return error_outcome(400, "the butler needs a 'message'".into());
+    }
+    match crate::butler::begin_turn(store, &message) {
+        Ok(turn_id) => {
+            start(turn_id.clone(), message, model.to_string());
+            json_outcome(202, json!({"ok": true, "turn": turn_id}))
+        }
+        Err(e) => error_outcome(409, e.to_string()),
+    }
 }
 
 /// The whole tree plus the run summary. Reading never reconciles: `reconcile`
@@ -590,112 +658,10 @@ fn cap_chars(s: String, max: usize) -> String {
     )
 }
 
-fn strings(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn field<'a>(action: &'a Value, key: &str) -> &'a str {
-    action.get(key).and_then(Value::as_str).unwrap_or("").trim()
-}
-
-/// Apply one explicit steering action through the same `Store` methods the TUI
-/// and scheduler use. Every branch is a POST-driven, named action; nothing runs
-/// implicitly.
-pub fn apply_action(store: &Store, action: &Value) -> Result<String, StoreError> {
-    let kind = field(action, "action");
-    let node_id = field(action, "node");
-    if node_id.is_empty() {
-        return Err(StoreError::Other("action needs a 'node' id".into()));
-    }
-    match kind {
-        "constraint" => {
-            let text = field(action, "text");
-            if text.is_empty() {
-                return Err(StoreError::Other("constraint needs 'text'".into()));
-            }
-            let affected = store.add_constraint_and_propagate(node_id, text)?;
-            // Also queue the same steer so a live scheduler acts on its own
-            // cadence. Re-applying is a no-op: the constraint is deduplicated.
-            store.enqueue_steer("constraint", &format!("{node_id}:{text}"))?;
-            Ok(format!("constraint applied to {affected} node(s)"))
-        }
-        "edit_contract" => {
-            let node = store.get(node_id)?;
-            let mut contract = node.contract();
-            if let Some(goal) = action.get("goal").and_then(Value::as_str) {
-                contract.goal = goal.trim().to_string();
-            }
-            if action.get("acceptance_criteria").is_some() {
-                contract.acceptance_criteria = strings(action.get("acceptance_criteria"));
-            }
-            if action.get("verification").is_some() {
-                contract.verification = strings(action.get("verification"));
-            }
-            if action.get("manual_verification").is_some() {
-                contract.manual_verification = strings(action.get("manual_verification"));
-            }
-            if contract.goal.is_empty() {
-                return Err(StoreError::Other("contract goal must not be empty".into()));
-            }
-            store.write_contract(&node, &contract)?;
-            store.append_decision(&node, "contract edited from the dashboard")?;
-            Ok(format!("contract for {node_id} updated"))
-        }
-        "retry" => {
-            let count = store.retry(node_id)?;
-            store.enqueue_steer("retry", node_id)?;
-            Ok(format!("{count} node(s) reset to pending"))
-        }
-        "resolve" => {
-            let node = store.get(node_id)?;
-            match field(action, "resolution") {
-                "amend" => {
-                    let old = field(action, "old");
-                    let new = field(action, "new");
-                    if old.is_empty() || new.is_empty() {
-                        return Err(StoreError::Other(
-                            "amend needs both 'old' and 'new' constraint text".into(),
-                        ));
-                    }
-                    let changed = store.amend_inherited_constraint(&node, old, new)?;
-                    Ok(format!("amended constraint in {changed} node(s)"))
-                }
-                "depends_on" => {
-                    let dependency = field(action, "dependency");
-                    if dependency.is_empty() {
-                        return Err(StoreError::Other("depends_on needs 'dependency'".into()));
-                    }
-                    let added = store.add_depends_on(&node, dependency)?;
-                    Ok(if added {
-                        format!("{node_id} now depends on {dependency}")
-                    } else {
-                        format!("{node_id} already depends on {dependency}")
-                    })
-                }
-                other => Err(StoreError::Other(format!(
-                    "unknown resolution {other:?}; use 'amend' or 'depends_on'"
-                ))),
-            }
-        }
-        other => Err(StoreError::Other(format!(
-            "unknown action {other:?}; use constraint, edit_contract, retry or resolve"
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Contract, Store, COMPLETE, PENDING};
+    use crate::store::{Contract, Store};
 
     fn project(name: &str) -> (Store, PathBuf) {
         let dir =
@@ -749,6 +715,7 @@ mod tests {
             port: 0,
             bind_all: false,
             allow_remote_mutations: false,
+            model: "default".into(),
         };
         let listener = bind_listener(&cfg).expect("loopback bind must succeed");
         let addr = listener.local_addr().unwrap();
@@ -770,7 +737,7 @@ mod tests {
         // still come up on a free port rather than failing the run.
         let blocker = TcpListener::bind(("127.0.0.1", 8787)).ok();
         let (_store, dir) = tree("spawn_fallback");
-        let url = spawn(&dir).expect("spawn must always find a port");
+        let url = spawn(&dir, "default").expect("spawn must always find a port");
         assert!(url.starts_with("http://127.0.0.1:"), "got {url}");
         assert!(url.ends_with('/'), "got {url}");
         if blocker.is_some() {
@@ -864,152 +831,128 @@ mod tests {
     }
 
     #[test]
-    fn constraint_action_applies_and_propagates() {
-        let (store, dir) = tree("constraint");
-        let action = json!({"action": "constraint", "node": "root-01", "text": "must use serde"});
-        apply_action(&store, &action).unwrap();
-        let nodes = store.walk().unwrap();
-        let child = nodes.iter().find(|n| n.id == "root-01").unwrap();
-        assert!(
-            child
-                .contract()
-                .constraints
-                .iter()
-                .any(|c| c == "must use serde"),
-            "the constraint must land on the target"
-        );
-        let grandchild = nodes.iter().find(|n| n.id == "root-01-01").unwrap();
-        assert!(
-            grandchild
-                .contract()
-                .constraints
-                .iter()
-                .any(|c| c == "must use serde"),
-            "the constraint must propagate to descendants"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn retry_action_resets_a_completed_node() {
-        let (store, dir) = tree("retry");
-        let target = store.get("root-01").unwrap();
-        store.set_status(&target, COMPLETE).unwrap();
-        let action = json!({"action": "retry", "node": "root-01"});
-        apply_action(&store, &action).unwrap();
-        assert_eq!(store.get("root-01").unwrap().status, PENDING);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn edit_contract_updates_goal_and_index_together() {
-        let (store, dir) = tree("edit");
-        let action = json!({
-            "action": "edit_contract",
-            "node": "root-01",
-            "goal": "a sharper goal",
-            "acceptance_criteria": ["it is sharper"],
-            "verification": ["true"],
-            "manual_verification": ["looks clean"],
-        });
-        apply_action(&store, &action).unwrap();
-        let node = store.get("root-01").unwrap();
-        assert_eq!(node.goal, "a sharper goal", "walk must see the new goal");
-        let contract = node.contract();
-        assert_eq!(contract.acceptance_criteria, vec!["it is sharper"]);
-        assert_eq!(contract.verification, vec!["true"]);
-        assert_eq!(contract.manual_verification, vec!["looks clean"]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn remote_requests_are_read_only_unless_enabled() {
-        let (store, dir) = tree("remote");
-        let body = json!({"action": "retry", "node": "root-01"}).to_string();
-
-        let denied = route(
+    fn get_butler_returns_the_durable_conversation() {
+        let (store, dir) = tree("butler_get");
+        let outcome = route(
             &store,
             &dir,
             false,
-            false,
-            "POST",
-            "/api/action",
-            &HashMap::new(),
-            "application/json",
-            body.as_bytes(),
-        );
-        assert_eq!(denied.status, 403, "a remote mutation must be refused");
-
-        let allowed = route(
-            &store,
-            &dir,
-            true,
-            false,
-            "POST",
-            "/api/action",
-            &HashMap::new(),
-            "application/json",
-            body.as_bytes(),
-        );
-        assert_eq!(
-            allowed.status, 200,
-            "explicit opt-in enables remote steering"
-        );
-
-        // A GET can never mutate, whatever the origin.
-        let get = route(
-            &store,
-            &dir,
-            true,
             true,
             "GET",
-            "/api/action",
+            "/api/butler",
             &HashMap::new(),
             "",
             &[],
-        );
-        assert_eq!(get.status, 404);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_loopback_post_steers_through_the_store() {
-        let (store, dir) = tree("loopback");
-        let target = store.get("root-01").unwrap();
-        store.set_status(&target, COMPLETE).unwrap();
-        let body = json!({"action": "retry", "node": "root-01"}).to_string();
-        let outcome = route(
-            &store,
-            &dir,
-            false,
-            true,
-            "POST",
-            "/api/action",
-            &HashMap::new(),
-            "application/json",
-            body.as_bytes(),
+            "default",
         );
         assert_eq!(outcome.status, 200);
-        assert_eq!(store.get("root-01").unwrap().status, PENDING);
+        let value: Value = serde_json::from_slice(&outcome.body).unwrap();
+        assert_eq!(value["turns"].as_array().unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn rejecting_a_post_without_json_content_type() {
-        let (store, dir) = tree("ctype");
-        let body = b"{\"action\":\"retry\",\"node\":\"root-01\"}";
-        let outcome = route(
+    fn butler_post_claims_a_turn_and_hands_it_to_the_runner() {
+        let (store, dir) = tree("butler_post");
+        let started = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = started.clone();
+        let body =
+            json!({"message": "the tracker should use real data, not simulated"}).to_string();
+        let outcome = butler_post(
             &store,
-            &dir,
-            false,
+            "default",
             true,
-            "POST",
-            "/api/action",
-            &HashMap::new(),
-            "text/plain",
-            body,
+            false,
+            "application/json",
+            body.as_bytes(),
+            move |turn_id, message, model| {
+                sink.lock().unwrap().push((turn_id, message, model));
+            },
         );
-        assert_eq!(outcome.status, 415);
+        assert_eq!(
+            outcome.status, 202,
+            "a claimed turn must be accepted at once"
+        );
+        let value: Value = serde_json::from_slice(&outcome.body).unwrap();
+        assert_eq!(value["ok"], true);
+
+        let calls = started.lock().unwrap();
+        assert_eq!(calls.len(), 1, "the runner must be handed exactly one turn");
+        assert_eq!(
+            calls[0].1,
+            "the tracker should use real data, not simulated"
+        );
+        assert_eq!(calls[0].2, "default");
+
+        let turns = crate::butler::read_conversation(&store);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0]["status"], "working",
+            "the page must see it working"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn butler_post_refuses_while_a_request_is_already_running() {
+        let (store, dir) = tree("butler_busy");
+        crate::butler::begin_turn(&store, "the first request").unwrap();
+        let body = json!({"message": "a second request"}).to_string();
+        let outcome = butler_post(
+            &store,
+            "default",
+            true,
+            false,
+            "application/json",
+            body.as_bytes(),
+            |_, _, _| panic!("a second request must not start a run"),
+        );
+        assert_eq!(outcome.status, 409, "a parallel run must be refused");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn butler_post_is_read_only_for_remote_callers_and_rejects_bad_input() {
+        let (store, dir) = tree("butler_guard");
+        let body = json!({"message": "hello"}).to_string();
+
+        let remote = butler_post(
+            &store,
+            "default",
+            false,
+            false,
+            "application/json",
+            body.as_bytes(),
+            |_, _, _| {},
+        );
+        assert_eq!(remote.status, 403, "a remote mutation must be refused");
+
+        let bad_type = butler_post(
+            &store,
+            "default",
+            true,
+            false,
+            "text/plain",
+            body.as_bytes(),
+            |_, _, _| {},
+        );
+        assert_eq!(bad_type.status, 415);
+
+        let empty = butler_post(
+            &store,
+            "default",
+            true,
+            false,
+            "application/json",
+            b"{}",
+            |_, _, _| {},
+        );
+        assert_eq!(empty.status, 400, "an empty message is not a request");
+
+        assert!(
+            crate::butler::read_conversation(&store).is_empty(),
+            "a refused request must not leave a turn behind"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
