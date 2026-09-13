@@ -364,6 +364,7 @@ impl Project {
             .env("FRACTAL_TIMEOUT", "10")
             .env("FRACTAL_MAX_STEPS", "30")
             .env("FRACTAL_PARALLEL", "1")
+            .env("FRACTAL_NO_DASHBOARD", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

@@ -1,4 +1,4 @@
-use crate::store::{Contract, Node, Store, StoreError};
+use crate::store::{strip_ansi, Contract, Node, Store, StoreError};
 use regex::Regex;
 use serde_json::Value;
 use std::fs;
@@ -811,6 +811,10 @@ fn collect_stream(
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
+            let line = strip_ansi(&line);
+            if line.trim().is_empty() {
+                continue;
+            }
             let log_line = format!(" [{}] {}", node_name_out, line);
             let _ = std_tx.send((false, log_line, line));
         }
@@ -819,6 +823,10 @@ fn collect_stream(
     std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines().map_while(Result::ok) {
+            let line = strip_ansi(&line);
+            if line.trim().is_empty() {
+                continue;
+            }
             let log_line = format!(" [{}] ERR: {}", node_name_err, line);
             let _ = std_tx_err.send((true, log_line, line));
         }

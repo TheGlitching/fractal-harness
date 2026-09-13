@@ -31,6 +31,9 @@ struct Cli {
     /// Run without the TUI or model picker (alias for `--yes`).
     #[arg(long = "no-tui", global = true)]
     no_tui: bool,
+    /// Do not auto-serve the web dashboard during a run (also `FRACTAL_NO_DASHBOARD`)
+    #[arg(long = "no-dashboard", global = true)]
+    no_dashboard: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -162,6 +165,14 @@ fn main() {
         && std::io::stdout().is_terminal();
     let model_override = cli.model;
 
+    // The dashboard is auto-served for the duration of a run so the user is
+    // handed a real URL. CI and headless callers opt out with `--no-dashboard`
+    // or `FRACTAL_NO_DASHBOARD`.
+    let auto_dashboard = !cli.no_dashboard
+        && std::env::var("FRACTAL_NO_DASHBOARD")
+            .map(|v| v.is_empty() || v == "0")
+            .unwrap_or(true);
+
     match cli.command {
         Commands::Init { goal } => {
             let goal = goal.join(" ");
@@ -180,7 +191,13 @@ fn main() {
                 Ok(node) => {
                     println!("initialised tree/root ({})", node.status);
                     println!("goal: {goal}");
-                    run_project(&project, &goal, model_override.as_deref(), interactive);
+                    run_project(
+                        &project,
+                        &goal,
+                        model_override.as_deref(),
+                        interactive,
+                        auto_dashboard,
+                    );
                 }
                 Err(e) => {
                     eprintln!("fractal: {e}");
@@ -199,7 +216,13 @@ fn main() {
                 std::process::exit(2);
             }
             let goal = s.get("root").map(|n| n.goal).unwrap_or_default();
-            run_project(&project, &goal, model_override.as_deref(), interactive);
+            run_project(
+                &project,
+                &goal,
+                model_override.as_deref(),
+                interactive,
+                auto_dashboard,
+            );
         }
         Commands::Status => {
             let s = store::Store::new(&project);
@@ -823,12 +846,38 @@ fn run_scheduler(
     }
 }
 
-fn run_project(project: &PathBuf, goal: &str, model_override: Option<&str>, interactive: bool) {
+/// Tell the user where to watch progress. The dashboard is auto-served for the
+/// run's lifetime; when serving is turned off (CI) or cannot bind, the run still
+/// proceeds and the exact command to start it is printed instead.
+fn announce_dashboard(project: &Path, auto_dashboard: bool) {
+    let fallback = format!(
+        "fractal started - see progress here: run 'fractal serve -p {}'",
+        project.display()
+    );
+    if !auto_dashboard {
+        println!("{fallback}");
+        return;
+    }
+    match dashboard::spawn(project) {
+        Ok(url) => println!("{}", dashboard::progress_line(&url)),
+        Err(e) => println!("{fallback} ({e})"),
+    }
+}
+
+fn run_project(
+    project: &PathBuf,
+    goal: &str,
+    model_override: Option<&str>,
+    interactive: bool,
+    auto_dashboard: bool,
+) {
     let model = pick_model(model_override, interactive);
 
     let _ = ctrlc::set_handler(move || {
         scheduler::INTERRUPTED.store(true, Ordering::SeqCst);
     });
+
+    announce_dashboard(project, auto_dashboard);
 
     let state = std::sync::Arc::new(std::sync::Mutex::new(tui::TuiState {
         nodes: vec![],

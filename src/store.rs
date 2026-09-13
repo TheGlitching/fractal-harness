@@ -39,6 +39,49 @@ fn sanitize_id(node_id: &str) -> String {
         .collect()
 }
 
+/// Remove ANSI/terminal escape sequences from captured executor output.
+///
+/// Agent CLIs colourise their streams; the raw bytes must never reach the
+/// activity scratch file or the dashboard, where they render as `[0m` noise.
+/// Covers CSI (`ESC [ ... final`), OSC (`ESC ] ... BEL|ST`) and two-character
+/// escapes. The caller still trims and drops the result if it is empty, so a
+/// line that is nothing but escapes disappears rather than showing as blank.
+pub fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                // CSI: parameters/intermediates end at a final byte in @-~.
+                for n in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC: runs until BEL or the ST pair ESC \.
+                while let Some(n) = chars.next() {
+                    if n == '\u{07}' {
+                        break;
+                    }
+                    if n == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // A two-character escape (e.g. ESC ( B): the second char is consumed.
+            Some(_) | None => {}
+        }
+    }
+    out
+}
+
 pub const PENDING: &str = "pending";
 pub const RUNNING: &str = "running";
 pub const SPLIT: &str = "split";
@@ -873,7 +916,8 @@ impl Store {
     /// show while the node runs. Best-effort by contract: a display aid must
     /// never fail a run, so callers ignore the error.
     pub fn write_activity(&self, node_id: &str, line: &str) -> Result<(), StoreError> {
-        let trimmed = line.trim();
+        let stripped = strip_ansi(line);
+        let trimmed = stripped.trim();
         if trimmed.is_empty() {
             return Ok(());
         }
@@ -889,10 +933,12 @@ impl Store {
         Ok(())
     }
 
-    /// The last activity line recorded for a node, if any.
+    /// The last activity line recorded for a node, if any. Escapes are stripped
+    /// on read too so an activity file written before this rule still renders.
     pub fn read_activity(&self, node_id: &str) -> Option<String> {
         fs::read_to_string(self.activity_path(node_id))
             .ok()
+            .map(|s| strip_ansi(&s))
             .filter(|s| !s.trim().is_empty())
     }
 
@@ -1801,6 +1847,42 @@ mod tests {
             "display-only activity must not alter the tamper digest"
         );
         assert!(store.tampered_nodes().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Agent CLIs colourise their streams; `[root] ERR: [0m` was a bare escape
+    /// sequence shown as if it were output. Escapes must never reach the
+    /// activity store, and an escape-only line must vanish rather than render.
+    #[test]
+    fn activity_strips_ansi_and_drops_escape_only_lines() {
+        assert_eq!(strip_ansi("\u{1b}[0m"), "");
+        assert_eq!(strip_ansi("\u{1b}[31mreal error\u{1b}[0m"), "real error");
+        assert_eq!(
+            strip_ansi("\u{1b}]8;;http://example.com\u{07}link"),
+            "link",
+            "OSC hyperlinks must be stripped whole"
+        );
+
+        let (store, dir) = temp_store("activity_ansi");
+        store.write_activity("root", "\u{1b}[0m").unwrap();
+        assert!(
+            store.read_activity("root").is_none(),
+            "an escape-only line is not output"
+        );
+        store
+            .write_activity("root", "[root] \u{1b}[31mERR: boom\u{1b}[0m")
+            .unwrap();
+        assert_eq!(
+            store.read_activity("root").as_deref(),
+            Some("[root] ERR: boom"),
+            "real error content and the ERR marker must survive"
+        );
+
+        // A file written before this rule must also render clean.
+        fs::write(store.activity_path("legacy"), "\u{1b}[0m").unwrap();
+        assert!(store.read_activity("legacy").is_none());
+        fs::write(store.activity_path("legacy"), "old \u{1b}[32mok\u{1b}[0m").unwrap();
+        assert_eq!(store.read_activity("legacy").as_deref(), Some("old ok"));
         let _ = fs::remove_dir_all(&dir);
     }
 
