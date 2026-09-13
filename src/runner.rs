@@ -1048,6 +1048,85 @@ pub fn call_via_opencode(
     }
 }
 
+/// Run an executor session that is not a tree node: the butler. Same executor
+/// path (omp/pi/opencode), streaming and timeout as a node, but the agent's
+/// output is returned as text rather than parsed as a node decision and it is
+/// not charged to any node ledger. `FRACTAL_BIN` points the agent at the running
+/// binary so it can call the butler tools from its shell.
+pub fn run_butler_agent(
+    system_prompt: &str,
+    agent_dir: &Path,
+    project_root: &Path,
+    model: &str,
+    on_output: OutputFn,
+) -> std::result::Result<String, RunnerError> {
+    fs::create_dir_all(agent_dir).map_err(|e| RunnerError::Other(format!("write: {e}")))?;
+    let claude_path = agent_dir.join("CLAUDE.md");
+    fs::write(&claude_path, system_prompt)
+        .map_err(|e| RunnerError::Other(format!("write: {e}")))?;
+
+    let executor = get_executor();
+    let mut cmd = match executor.as_str() {
+        "opencode" => {
+            let bin = which::which("opencode")
+                .map_err(|_| RunnerError::NotFound("opencode binary not found".into()))?;
+            let mut c = Command::new(bin);
+            c.arg("run").arg("--auto").current_dir(project_root);
+            if !model.is_empty() && model != "default" {
+                c.arg("--model").arg(model);
+            }
+            if std::env::var_os("OPENCODE_CONFIG_CONTENT").is_none() {
+                c.env("OPENCODE_CONFIG_CONTENT", r#"{"permission":{"*":"allow"}}"#);
+            }
+            c
+        }
+        "omp" | "pi" => {
+            let bin = which::which("omp")
+                .or_else(|_| which::which("pi"))
+                .map_err(|_| RunnerError::NotFound("omp/pi binary not found".into()))?;
+            let mut c = Command::new(bin);
+            c.arg("-p")
+                .arg("--cwd")
+                .arg(project_root)
+                .arg("--auto-approve")
+                .arg("--approval-mode=yolo");
+            if !model.is_empty() && model != "default" {
+                c.arg(format!("--model={model}"));
+            }
+            c
+        }
+        other => {
+            return Err(RunnerError::NotFound(format!(
+                "unknown executor {other:?}; supported executors are omp, pi and opencode"
+            )))
+        }
+    };
+
+    // The butler steers through `fractal` subcommands; point it at the running
+    // binary so the tools work even when `fractal` is not on PATH (tests), and
+    // carry the resolved model so a nested `resume` tool uses the same one.
+    cmd.env("FRACTAL_BIN", std::env::current_exe().unwrap_or_default())
+        .env("FRACTAL_NODE_ID", "butler")
+        .env("FRACTAL_MODEL", model)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.arg(system_prompt);
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| RunnerError::Other(format!("spawn: {e}")))?;
+    let timeout_secs = std::env::var("FRACTAL_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
+    let (all_text, _stderr, end) = collect_stream(child, "butler", &on_output, timeout_secs)?;
+    match end {
+        StreamEnd::Exited => Ok(all_text),
+        StreamEnd::TimedOut => Err(RunnerError::Timeout),
+        StreamEnd::Interrupted => Err(RunnerError::Other("interrupted by user".into())),
+    }
+}
+
 pub fn call_critic(
     store: &Store,
     node: &Node,
@@ -1337,6 +1416,65 @@ pub fn verify_node(
     Ok((verdict, details))
 }
 
+/// Parse a `split` decision's subtask array into contracts. Shared by node
+/// decisions and the butler's `split` tool so both build identical contracts
+/// from the same JSON shape.
+pub fn contracts_from_subtasks(items: &[Value]) -> Vec<Contract> {
+    let strings = |item: &Value, key: &str| -> Vec<String> {
+        item.get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    items
+        .iter()
+        .map(|item| Contract {
+            goal: item
+                .get("goal")
+                .and_then(|g| g.as_str())
+                .unwrap_or("")
+                .to_string(),
+            acceptance_criteria: item
+                .get("acceptance_criteria")
+                .and_then(|a| a.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            id: item
+                .get("id")
+                .and_then(|g| g.as_str())
+                .unwrap_or("")
+                .to_string(),
+            interfaces: strings(item, "interfaces"),
+            constraints: strings(item, "constraints"),
+            depends_on: item
+                .get("depends_on")
+                .and_then(|d| d.as_array())
+                .map(|d| {
+                    d.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            verification: strings(item, "verification"),
+            manual_verification: strings(item, "manual_verification"),
+            allocation: item
+                .get("allocation")
+                .and_then(|a| a.as_i64())
+                .unwrap_or(0)
+                .max(0),
+        })
+        .collect()
+}
+
 fn result_from_payload(
     verb: &str,
     payload: &Value,
@@ -1348,72 +1486,7 @@ fn result_from_payload(
     match verb {
         SPLIT => {
             if let Some(arr) = payload.get("subtasks").and_then(|s| s.as_array()) {
-                for item in arr {
-                    let goal = item
-                        .get("goal")
-                        .and_then(|g| g.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let crit: Vec<String> = item
-                        .get("acceptance_criteria")
-                        .and_then(|a| a.as_array())
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let id = item
-                        .get("id")
-                        .and_then(|g| g.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let deps: Vec<String> = item
-                        .get("depends_on")
-                        .and_then(|d| d.as_array())
-                        .map(|d| {
-                            d.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let verification: Vec<String> = item
-                        .get("verification")
-                        .and_then(|v| v.as_array())
-                        .map(|v| {
-                            v.iter()
-                                .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                                .filter(|s| !s.is_empty())
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let strings = |key: &str| -> Vec<String> {
-                        item.get(key)
-                            .and_then(|v| v.as_array())
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|x| x.as_str().map(|s| s.trim().to_string()))
-                                    .filter(|s| !s.is_empty())
-                                    .collect()
-                            })
-                            .unwrap_or_default()
-                    };
-                    r.subtasks.push(Contract {
-                        goal,
-                        acceptance_criteria: crit,
-                        id,
-                        interfaces: strings("interfaces"),
-                        constraints: strings("constraints"),
-                        depends_on: deps,
-                        verification,
-                        manual_verification: strings("manual_verification"),
-                        allocation: item
-                            .get("allocation")
-                            .and_then(|a| a.as_i64())
-                            .unwrap_or(0)
-                            .max(0),
-                    });
-                }
+                r.subtasks = contracts_from_subtasks(arr);
             }
         }
         COMPLETE_VERB => {

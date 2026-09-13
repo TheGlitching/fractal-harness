@@ -35,9 +35,30 @@ done
 # test hands the shared project dir through FAKE_SHARED instead.
 SHARED="${FAKE_SHARED:-$ROOT}"
 
+# The butler is not a node and is identified by its own id. It steers only
+# through `fractal butler-tool`, exactly as the real butler agent does.
+if [ "$NODE" = "butler" ]; then
+  bt() { "$FRACTAL_BIN" -p "$ROOT" butler-tool "$1" >/dev/null; }
+  case "${BUTLER_MODE:-none}" in
+    none)
+      bt '{"tool":"plan","action":"none","rationale":"the tree already satisfies this request"}'
+      ;;
+    reopen)
+      bt '{"tool":"reopen","parent":"root","children":["root-01"],"reason":"the wiring is wrong"}'
+      bt '{"tool":"plan","action":"reopen","rationale":"only root-01 must change","nodes":["root-01"]}'
+      ;;
+    add)
+      bt '{"tool":"split","parent":"root","subtasks":[{"id":"extra","goal":"add a new capability","acceptance_criteria":["it works"]}]}'
+      bt '{"tool":"plan","action":"split","rationale":"new work no node owns","nodes":["root-02"]}'
+      ;;
+  esac
+  echo "butler: handled ${BUTLER_MODE:-none}"
+  exit 0
+fi
+
 complete() {
   mkdir -p "$ROOT/src"
-  echo "delivered by ${NODE:-critic}" > "$ROOT/src/${NODE:-out}.txt"
+  echo "delivered by ${NODE:-critic} $RANDOM" > "$ROOT/src/${NODE:-out}.txt"
   echo "{\"verb\":\"complete\",\"deliverable\":\"done\",\"summary\":\"did the task\"}"
 }
 
@@ -1568,5 +1589,102 @@ fn escalation_resolves_while_an_independent_sibling_runs_concurrently() {
     assert!(
         decisions.contains("escalated"),
         "the escalation was not recorded on the escalating child:\n{decisions}"
+    );
+}
+
+/// The butler is the one agent the user talks to. When it judges a steer already
+/// satisfied, it must change nothing at all and still record why.
+#[test]
+fn butler_judges_an_already_satisfied_steer_as_no_rework() {
+    let p = Project::new("butlernone", "happy");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert_eq!(code, Some(0), "seed run failed; stderr:\n{err}");
+    let before = p.status();
+
+    let (acode, _aout, aerr) = p.run_env(
+        &["ask", "make the result a little better"],
+        Duration::from_secs(30),
+        &[("BUTLER_MODE", "none")],
+    );
+    assert_eq!(acode, Some(0), "ask failed; stderr:\n{aerr}");
+    assert_eq!(
+        before,
+        p.status(),
+        "a steer the butler judged already satisfied must not touch any node"
+    );
+
+    let log = fs::read_to_string(p.dir.join(".fractal/butler/log.jsonl")).unwrap_or_default();
+    assert!(
+        log.contains("\"action\":\"none\""),
+        "the plan was not recorded:\n{log}"
+    );
+    assert!(
+        log.contains("already satisfies"),
+        "the rationale was not recorded:\n{log}"
+    );
+}
+
+/// A correction reopens only the nodes that must change (and their subtrees);
+/// the rest of the completed tree is left as it is. Resuming then re-runs only
+/// those nodes and re-aggregates.
+#[test]
+fn butler_reopens_only_the_named_child_then_resumes() {
+    let p = Project::new("butlerreopen", "happy");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert_eq!(code, Some(0), "seed run failed; stderr:\n{err}");
+
+    let (acode, _aout, aerr) = p.run_env(
+        &["ask", "root-01 is wired wrong, fix it"],
+        Duration::from_secs(30),
+        &[("BUTLER_MODE", "reopen")],
+    );
+    assert_eq!(acode, Some(0), "ask failed; stderr:\n{aerr}");
+    let status = p.status();
+    assert!(
+        status.contains("root-01  [pending]"),
+        "the named child was not reopened:\n{status}"
+    );
+    assert!(
+        p.dir.join("src/root-01.txt").exists(),
+        "reopening must not delete the child's committed work"
+    );
+
+    let (rcode, _rout, rerr) = p.run(&["run"], Duration::from_secs(60));
+    assert_eq!(rcode, Some(0), "resume failed; stderr:\n{rerr}");
+    let done = p.status();
+    assert!(
+        done.contains("[complete]") && !done.contains("[failed]"),
+        "the tree did not re-complete after the reopen:\n{done}"
+    );
+}
+
+/// A steer for genuinely new work adds exactly the node that owns it, leaving
+/// every existing completed node untouched.
+#[test]
+fn butler_adds_a_node_for_genuinely_new_work() {
+    let p = Project::new("butleradd", "happy");
+    let (code, _out, err) = p.run(&["init", "build a toy"], Duration::from_secs(60));
+    assert_eq!(code, Some(0), "seed run failed; stderr:\n{err}");
+
+    let (acode, _aout, aerr) = p.run_env(
+        &["ask", "also handle the edge case nobody built"],
+        Duration::from_secs(30),
+        &[("BUTLER_MODE", "add")],
+    );
+    assert_eq!(acode, Some(0), "ask failed; stderr:\n{aerr}");
+    let status = p.status();
+    assert!(
+        status.contains("root-02  [pending]"),
+        "the new node was not added:\n{status}"
+    );
+    assert!(
+        status.contains("root-01  [complete]"),
+        "existing completed work was replayed:\n{status}"
+    );
+    let contract = fs::read_to_string(p.dir.join("tree/root/children/root-02/contract.md"))
+        .unwrap_or_default();
+    assert!(
+        contract.contains("add a new capability"),
+        "the new node's contract is missing:\n{contract}"
     );
 }

@@ -1,3 +1,4 @@
+mod butler;
 mod dashboard;
 mod git;
 mod runner;
@@ -131,6 +132,29 @@ enum Commands {
         #[arg(long = "allow-remote-mutations")]
         allow_remote_mutations: bool,
     },
+    /// Talk to the butler, the one agent that steers the tree. One-shot when a
+    /// message is given; an interactive session otherwise.
+    Butler {
+        /// What you want changed or asked. Omit for an interactive session.
+        message: Vec<String>,
+        /// Resume the run after the butler applies its correction
+        #[arg(long)]
+        run: bool,
+    },
+    /// One-shot request to the butler (same as `fractal butler <message>`)
+    Ask {
+        /// What you want changed or asked
+        message: Vec<String>,
+        /// Resume the run after the butler applies its correction
+        #[arg(long)]
+        run: bool,
+    },
+    /// Internal: invoke one butler tool with a JSON request. Used by the butler
+    /// agent, and usable directly from the CLI.
+    ButlerTool {
+        /// JSON request, e.g. '{"tool":"tree"}'
+        request: String,
+    },
 }
 fn install_panic_hook() {
     let original = std::panic::take_hook();
@@ -163,7 +187,7 @@ fn main() {
         && !cli.no_tui
         && std::io::stdin().is_terminal()
         && std::io::stdout().is_terminal();
-    let model_override = cli.model;
+    let model_override = cli.model.clone();
 
     // The dashboard is auto-served for the duration of a run so the user is
     // handed a real URL. CI and headless callers opt out with `--no-dashboard`
@@ -533,6 +557,83 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Commands::Butler { message, run } | Commands::Ask { message, run } => {
+            let s = store::Store::new(&project);
+            if let Err(e) = s.require_initialised() {
+                eprintln!("fractal: {e}");
+                std::process::exit(2);
+            }
+            if let Err(e) = git::ensure_repo(&project) {
+                eprintln!("fractal: could not prepare git repository: {e}");
+                std::process::exit(2);
+            }
+            let model = pick_model(model_override.as_deref(), interactive);
+            let message = message.join(" ");
+            let message = message.trim().to_string();
+            if message.is_empty() {
+                if interactive {
+                    butler_session(&project, &s, &model, run, auto_dashboard);
+                }
+                use std::io::Read;
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_to_string(&mut buf);
+                let buf = buf.trim().to_string();
+                if buf.is_empty() {
+                    eprintln!("fractal: the butler needs a request: fractal ask \"<message>\"");
+                    std::process::exit(2);
+                }
+                if let Err(e) = run_butler_once(&s, &buf, &model) {
+                    eprintln!("fractal: butler: {e}");
+                    std::process::exit(1);
+                }
+                if run {
+                    resume_after_butler(&project, &s, &model, interactive, auto_dashboard);
+                }
+            } else {
+                if let Err(e) = run_butler_once(&s, &message, &model) {
+                    eprintln!("fractal: butler: {e}");
+                    std::process::exit(1);
+                }
+                if run {
+                    resume_after_butler(&project, &s, &model, interactive, auto_dashboard);
+                }
+            }
+        }
+        Commands::ButlerTool { request } => {
+            let s = store::Store::new(&project);
+            if let Err(e) = s.require_initialised() {
+                eprintln!("fractal: {e}");
+                std::process::exit(2);
+            }
+            let request: serde_json::Value = match serde_json::from_str(&request) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("fractal: invalid butler request JSON: {e}");
+                    std::process::exit(2);
+                }
+            };
+            let model = model_override
+                .clone()
+                .filter(|m| !m.is_empty())
+                .or_else(|| {
+                    std::env::var("FRACTAL_MODEL")
+                        .ok()
+                        .filter(|m| !m.is_empty())
+                })
+                .unwrap_or_else(|| "default".to_string());
+            match butler::tool(&s, &request, &model) {
+                Ok(value) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&value).unwrap_or_default()
+                    )
+                }
+                Err(e) => {
+                    eprintln!("fractal: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
 
@@ -862,6 +963,81 @@ fn announce_dashboard(project: &Path, auto_dashboard: bool) {
         Ok(url) => println!("{}", dashboard::progress_line(&url)),
         Err(e) => println!("{fallback} ({e})"),
     }
+}
+
+/// One butler request: the agent inspects the tree through its tools, applies
+/// the smallest correct correction, and records a plan. Surface the plan, the
+/// nodes it touched, and the resulting status changes.
+fn run_butler_once(store: &store::Store, message: &str, model: &str) -> Result<(), String> {
+    let record = butler::run(store, message, model)?;
+    let plan = &record["plan"];
+    println!("\nbutler: {}", butler::describe_action(plan));
+    if let Some(nodes) = plan.get("nodes").and_then(|v| v.as_array()) {
+        let ids: Vec<&str> = nodes.iter().filter_map(|v| v.as_str()).collect();
+        if !ids.is_empty() {
+            println!("  nodes: {}", ids.join(", "));
+        }
+    }
+    if let Some(changes) = record.get("tree_changes").and_then(|v| v.as_array()) {
+        for c in changes {
+            println!(
+                "  {}: {} -> {}",
+                c["id"].as_str().unwrap_or(""),
+                c["from"].as_str().unwrap_or(""),
+                c["to"].as_str().unwrap_or("")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Interactive butler session: a request per line until EOF or `exit`.
+fn butler_session(
+    project: &PathBuf,
+    store: &store::Store,
+    model: &str,
+    run: bool,
+    auto_dashboard: bool,
+) -> ! {
+    use std::io::{BufRead, Write};
+    println!("butler session — type a request, or 'exit' to leave.");
+    let stdin = std::io::stdin();
+    loop {
+        print!("butler> ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let message = line.trim();
+        if message.is_empty() {
+            continue;
+        }
+        if message == "exit" || message == "quit" {
+            break;
+        }
+        if let Err(e) = run_butler_once(store, message, model) {
+            eprintln!("fractal: butler: {e}");
+        }
+        if run {
+            resume_after_butler(project, store, model, false, auto_dashboard);
+        }
+    }
+    std::process::exit(0)
+}
+
+/// Resume the scheduler over the tree the butler just steered. Only nodes the
+/// butler reopened or added are runnable, so this never replays valid work.
+fn resume_after_butler(
+    project: &PathBuf,
+    store: &store::Store,
+    model: &str,
+    interactive: bool,
+    auto_dashboard: bool,
+) {
+    let goal = store.get("root").map(|n| n.goal).unwrap_or_default();
+    run_project(project, &goal, Some(model), interactive, auto_dashboard);
 }
 
 fn run_project(
