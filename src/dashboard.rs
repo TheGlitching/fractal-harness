@@ -390,12 +390,18 @@ fn route(
                 allow_remote_mutations,
                 content_type,
                 body,
-                move |turn_id, message, model| {
+                move |turn_id, message, node, model| {
                     // A butler session can take minutes; run it off the request
                     // thread and let the page poll the durable conversation.
                     std::thread::spawn(move || {
                         let store = Store::new(&project);
-                        let _ = crate::butler::run_turn(&store, &turn_id, &message, &model);
+                        let _ = crate::butler::run_turn(
+                            &store,
+                            &turn_id,
+                            &message,
+                            node.as_deref(),
+                            &model,
+                        );
                     });
                 },
             )
@@ -431,7 +437,7 @@ fn butler_post<F>(
     start: F,
 ) -> Outcome
 where
-    F: FnOnce(String, String, String),
+    F: FnOnce(String, String, Option<String>, String),
 {
     if !is_local && !allow_remote_mutations {
         return error_outcome(
@@ -459,9 +465,22 @@ where
     if message.is_empty() {
         return error_outcome(400, "the butler needs a 'message'".into());
     }
-    match crate::butler::begin_turn(store, &message) {
+    // The graph selection rides along as context. An unknown id is a client
+    // error, not a failed session: reject it before claiming a turn.
+    let node = value
+        .get("node")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(id) = &node {
+        if store.get(id).is_err() {
+            return error_outcome(400, format!("selected node '{id}' does not exist"));
+        }
+    }
+    match crate::butler::begin_turn(store, &message, node.as_deref()) {
         Ok(turn_id) => {
-            start(turn_id.clone(), message, model.to_string());
+            start(turn_id.clone(), message, node, model.to_string());
             json_outcome(202, json!({"ok": true, "turn": turn_id}))
         }
         Err(e) => error_outcome(409, e.to_string()),
@@ -857,7 +876,7 @@ mod tests {
         let started = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = started.clone();
         let body =
-            json!({"message": "the tracker should use real data, not simulated"}).to_string();
+            json!({"message": "the tracker should use real data, not simulated", "node": "root-01"}).to_string();
         let outcome = butler_post(
             &store,
             "default",
@@ -865,8 +884,8 @@ mod tests {
             false,
             "application/json",
             body.as_bytes(),
-            move |turn_id, message, model| {
-                sink.lock().unwrap().push((turn_id, message, model));
+            move |turn_id, message, node, model| {
+                sink.lock().unwrap().push((turn_id, message, node, model));
             },
         );
         assert_eq!(
@@ -882,7 +901,12 @@ mod tests {
             calls[0].1,
             "the tracker should use real data, not simulated"
         );
-        assert_eq!(calls[0].2, "default");
+        assert_eq!(
+            calls[0].2.as_deref(),
+            Some("root-01"),
+            "the graph selection must reach the runner"
+        );
+        assert_eq!(calls[0].3, "default");
 
         let turns = crate::butler::read_conversation(&store);
         assert_eq!(turns.len(), 1);
@@ -896,7 +920,7 @@ mod tests {
     #[test]
     fn butler_post_refuses_while_a_request_is_already_running() {
         let (store, dir) = tree("butler_busy");
-        crate::butler::begin_turn(&store, "the first request").unwrap();
+        crate::butler::begin_turn(&store, "the first request", None).unwrap();
         let body = json!({"message": "a second request"}).to_string();
         let outcome = butler_post(
             &store,
@@ -905,7 +929,7 @@ mod tests {
             false,
             "application/json",
             body.as_bytes(),
-            |_, _, _| panic!("a second request must not start a run"),
+            |_, _, _, _| panic!("a second request must not start a run"),
         );
         assert_eq!(outcome.status, 409, "a parallel run must be refused");
         let _ = std::fs::remove_dir_all(&dir);
@@ -923,7 +947,7 @@ mod tests {
             false,
             "application/json",
             body.as_bytes(),
-            |_, _, _| {},
+            |_, _, _, _| {},
         );
         assert_eq!(remote.status, 403, "a remote mutation must be refused");
 
@@ -934,7 +958,7 @@ mod tests {
             false,
             "text/plain",
             body.as_bytes(),
-            |_, _, _| {},
+            |_, _, _, _| {},
         );
         assert_eq!(bad_type.status, 415);
 
@@ -945,9 +969,22 @@ mod tests {
             false,
             "application/json",
             b"{}",
-            |_, _, _| {},
+            |_, _, _, _| {},
         );
         assert_eq!(empty.status, 400, "an empty message is not a request");
+
+        let bad_node = butler_post(
+            &store,
+            "default",
+            true,
+            false,
+            "application/json",
+            json!({"message": "redo this", "node": "root-99"})
+                .to_string()
+                .as_bytes(),
+            |_, _, _, _| panic!("an unknown selection must not start a run"),
+        );
+        assert_eq!(bad_node.status, 400, "an unknown selected node is refused");
 
         assert!(
             crate::butler::read_conversation(&store).is_empty(),

@@ -3,817 +3,435 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>fractal dashboard</title>
+<title>fractal — the run</title>
+<link rel="icon" href="data:," />
 <style>
   /* ------------------------------------------------------------------
-     fractal dashboard — La Fabrique à Sites, GREEN theme (template-v2).
-     Dark green ground with a fixed visible 12-column grid; 2px borders;
-     bright green accent; serif display for headings, uppercase mono for
-     labels, ids and body. Every state is written as a word: colour is
-     never the only carrier.
+     fractal dashboard — a from-scratch surface over `fractal serve`.
+
+     Three concerns, ranked:
+       1. The graph: the hero. It is the design and navigation of the run.
+          Round and radial, real zoom and pan, hover focus, click selects.
+       2. The butler: the only steering surface. Every change is asked for
+          in words; there are no action buttons anywhere else.
+       3. The node detail: read-only. A description and the live events of
+          the selected step. No actions, no editing.
+
+     Visual language is the pinned La Fabrique à Sites green theme:
+     near-black green ground, a fixed visible 12-column grid, bright green
+     accent, serif display headings, uppercase monospace labels and ids,
+     2px rules, bottom-up button fill. Offline: system stacks only.
      ------------------------------------------------------------------ */
   :root {
-    --bg: oklch(14% 0.012 145);
-    --bg-2: oklch(16% 0.013 145);
-    --panel: oklch(18% 0.014 145);
-    --panel-2: oklch(21% 0.015 145);
-    --panel-3: oklch(25% 0.016 145);
-    --fg: oklch(95% 0.03 130);
-    --text: var(--fg);
-    --muted: oklch(70% 0.04 130);
-    --faint: oklch(55% 0.035 130);
-    --border: oklch(95% 0.03 130);
-    --line: var(--border);
-    --line-soft: color-mix(in oklab, var(--fg) 20%, transparent);
-    --grid: color-mix(in oklab, var(--fg) 12%, transparent);
-    --rust: oklch(86% 0.24 132);
-    --rust-2: oklch(92% 0.2 132);
-    --rust-soft: color-mix(in oklab, var(--accent) 16%, transparent);
-    --cyan: oklch(80% 0.12 200);
-    --cyan-soft: color-mix(in oklab, var(--cyan) 16%, transparent);
-    --complete: oklch(80% 0.2 140);
-    --running: oklch(84% 0.16 85);
-    --ready: oklch(80% 0.12 200);
-    --failed: oklch(70% 0.18 25);
-    --waiting: oklch(78% 0.1 300);
-    --pending: oklch(62% 0.03 130);
-    --suspended: oklch(78% 0.1 330);
-    --split: oklch(84% 0.16 85);
-    --accent: var(--rust);
+    --bg:         oklch(14% 0.012 145);
+    --bg-2:       oklch(16.5% 0.013 145);
+    --panel:      oklch(18% 0.014 145);
+    --fg:         oklch(95% 0.03 130);
+    --muted:      oklch(75% 0.045 132);
+    --faint:      oklch(64% 0.04 132);
+    --accent:     oklch(86% 0.24 132);
     --accent-ink: oklch(15% 0.03 132);
+    --border:     oklch(95% 0.03 130);
+    --line-soft:  color-mix(in oklab, var(--fg) 22%, transparent);
+    --grid:       color-mix(in oklab, var(--fg) 11%, transparent);
+    --done:       oklch(80% 0.2 140);
+    --run:        oklch(85% 0.17 88);
+    --ready:      oklch(80% 0.13 205);
+    --failed:     oklch(72% 0.19 27);
+    --blocked:    oklch(78% 0.11 300);
+    --pending:    oklch(66% 0.035 132);
     --bw: 2px;
-    --radius: 0px;
-    --shadow: 0 18px 44px -30px rgba(0,0,0,.9);
     --mono: ui-monospace, "JetBrains Mono", SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-    --sans: var(--mono);
     --serif: "Times New Roman", "Iowan Old Style", Georgia, serif;
-    --ease: cubic-bezier(.2,.7,.15,1);
-    --ease-out: cubic-bezier(0.23,1,0.32,1);
-    --ease-in-out: cubic-bezier(0.77,0,0.175,1);
+    --ease: cubic-bezier(.2, .7, .15, 1);
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --s1: 8px; --s2: 16px; --s3: 24px; --s4: 40px;
+    --gap: clamp(14px, 3vw, 40px);
   }
   * { box-sizing: border-box; }
-  html, body { height: 100%; }
+  html, body { min-height: 100%; }
+  html {
+    caret-color: var(--accent);
+    scrollbar-color: var(--line-soft) var(--bg);
+    scrollbar-width: thin;
+    -webkit-text-size-adjust: 100%;
+  }
   body {
     margin: 0;
     background: var(--bg);
-    color: var(--text);
+    color: var(--fg);
     font-family: var(--mono);
     font-size: 15px;
-    line-height: 1.5;
+    line-height: 1.55;
     overflow-x: hidden;
-    -webkit-text-size-adjust: 100%;
   }
-  /* Fixed visible 12-column grid, low opacity, per the design system. */
   body::before {
     content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
     background-image: linear-gradient(90deg, var(--grid) 1px, transparent 1px);
     background-size: calc(100% / 12) 100%;
   }
-  a { color: var(--accent); text-decoration: none; }
+  h1, h2, h3 { font-family: var(--serif); font-weight: 400; letter-spacing: -.015em; margin: 0; line-height: 1.04; }
+  p { margin: 0; }
+  a { color: var(--accent); text-decoration: none; text-underline-offset: 3px; }
   a:hover { text-decoration: underline; }
-  code, pre, .mono { font-family: var(--mono); }
-  h1, h2, h3, h4 { font-family: var(--serif); font-weight: 400; letter-spacing: -.01em; }
-  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
   ::selection { background: var(--accent); color: var(--accent-ink); }
-
-  /* ---------- app bar ---------- */
-  .appbar {
-    position: sticky; top: 0; z-index: 20;
-    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-    padding: 10px 18px;
-    background: var(--bg);
-    border-bottom: var(--bw) solid var(--border);
-  }
-  .brand {
-    display: inline-flex; align-items: baseline; gap: 8px;
-    font-family: var(--serif); font-weight: 400; letter-spacing: -.02em; font-size: 20px;
-  }
-  .brand .spark { color: var(--accent); font-size: 13px; }
-  .project {
-    color: var(--muted); font-family: var(--mono); font-size: 12px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    max-width: 46vw; min-width: 0;
-  }
-  .appbar .spacer { flex: 1; }
-  .live {
-    display: inline-flex; align-items: center; gap: 7px;
-    font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
-    color: var(--muted); white-space: nowrap;
-    font-family: var(--mono);
-  }
-  .live .pulse {
-    width: 8px; height: 8px;
-    background: var(--complete);
-  }
-  .live.busy .pulse { background: var(--running); animation: pulse 1.4s infinite; }
-  .live.off .pulse { background: var(--failed); animation: none; }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: .45; }
-  }
-
-  .wrap { max-width: 1400px; margin: 0 auto; padding: 18px; position: relative; z-index: 1; }
-
-  /* ---------- overview ---------- */
-  .overview {
-    position: relative; overflow: hidden;
-    background: linear-gradient(180deg, var(--panel), var(--bg-2));
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    padding: 18px 20px;
-    margin-bottom: 18px;
-  }
-  .overview-top { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
-  .overview-goal { flex: 1 1 340px; min-width: 0; }
-  .eyebrow {
-    text-transform: uppercase; letter-spacing: .14em; font-size: 10.5px;
-    color: var(--faint); font-weight: 700; margin-bottom: 6px;
-  }
-  .goal-title {
-    font-size: clamp(18px, 2.4vw, 25px); line-height: 1.25; font-weight: 650;
-    margin: 0; overflow-wrap: anywhere;
-    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
-  }
-  .goal-sub { margin-top: 8px; color: var(--muted); font-size: 12.5px; font-family: var(--mono); }
-
-  .stats { display: flex; flex-wrap: wrap; gap: 8px; }
-  .stat {
-    min-width: 76px; flex: 1 1 auto;
-    background: var(--panel-2); border: 1px solid var(--line-soft);
-    border-radius: 10px; padding: 8px 12px;
-  }
-  .stat .n { font-size: 22px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; font-family: var(--mono); }
-  .stat .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
-  .stat.is-complete .n { color: var(--complete); }
-  .stat.is-running .n { color: var(--running); }
-  .stat.is-failed .n { color: var(--failed); }
-  .stat.is-pending .n { color: var(--pending); }
-  .stat.is-refused .n { color: var(--failed); }
-  .stat.is-split .n { color: var(--split); }
-
-  .progress { margin-top: 16px; }
-  .progress-head { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 6px; gap: 10px; flex-wrap: wrap; }
-  .bar { height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; border: 1px solid var(--line-soft); }
-  .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--rust-2)); width: 0; transition: width .5s var(--ease-out); }
-
-  .nowrunning {
-    margin-top: 16px; padding: 12px 14px;
-    background: var(--rust-soft);
-    border: 1px solid rgba(217,138,78,.3);
-    border-radius: 10px;
-    display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
-  }
-  .nowrunning.idle { background: var(--panel-2); border-color: var(--line-soft); }
-  .nowrunning .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; color: var(--rust-2); font-weight: 700; }
-  .nowrunning.idle .label { color: var(--faint); }
-  .nowrunning .who { font-weight: 600; overflow-wrap: anywhere; }
-  .nowrunning .act {
-    font-family: var(--mono); font-size: 12.5px; color: var(--muted);
-    overflow-wrap: anywhere; min-width: 0; flex: 1 1 260px;
-  }
-
-  /* ---------- panels / layout ---------- */
-  .graph-panel { margin-bottom: 18px; }
-  .graph-panel > * { min-width: 0; }
-  .panel {
-    background: var(--panel); border: 1px solid var(--line);
-    border-radius: var(--radius); box-shadow: var(--shadow);
-  }
-  .panel-head {
-    display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    padding: 12px 14px; border-bottom: 1px solid var(--line-soft);
-    flex-wrap: wrap;
-  }
-  .panel-head h2 {
-    margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .13em;
-    color: var(--muted); font-weight: 700;
-  }
-  .muted { color: var(--muted); }
-  .gtools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .gtools label.gtoggle {
-    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
-    color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap;
-  }
-  .gtools label.gtoggle:hover { color: var(--text); }
-  .gtools input[type=checkbox] { accent-color: var(--rust); width: 14px; height: 14px; }
-
-  .viewtoggle { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  .viewtoggle button, .zoomctl button {
-    background: transparent; color: var(--muted); border: 0; padding: 4px 11px;
-    font: inherit; font-size: 12px; cursor: pointer; line-height: 1.4;
-  }
-  .viewtoggle button.active { background: var(--rust); color: var(--accent-ink); font-weight: 700; }
-  .zoomctl { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  .zoomctl button { padding: 4px 9px; font-family: var(--mono); }
-  .zoomctl button:hover { color: var(--rust); }
-  .zoomctl .sep { width: 1px; background: var(--line); }
-
-  .legend {
-    display: flex; flex-wrap: wrap; gap: 6px 16px;
-    padding: 9px 14px; border-bottom: 1px solid var(--line-soft);
-    font-size: 11.5px; color: var(--muted);
-  }
-  .legend .item { display: inline-flex; align-items: center; gap: 7px; }
-  .legend .item.hint { color: var(--faint); }
-  .legend .swatch { width: 22px; height: 0; border-top: 2px solid var(--line); }
-  .legend .swatch.parent { border-color: var(--line); }
-  .legend .swatch.dep { border-color: var(--cyan); border-top-style: dashed; }
-  .legend .swatch.active { border-color: var(--rust); }
-  .legend .swatch.complete { border-color: var(--complete); }
-  .legend .swatch.failed { border-color: var(--failed); }
-  .legend .swatch.pending { border-color: var(--pending); border-top-style: dashed; opacity: .6; }
-
-  .nextup {
-    display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
-    padding: 9px 14px; border-bottom: 1px solid var(--line-soft); font-size: 12.5px;
-  }
-  .nextup .label {
-    text-transform: uppercase; letter-spacing: .1em; font-size: 10.5px;
-    font-weight: 700; color: var(--rust-2); white-space: nowrap;
-  }
-  .nextup.idle .label { color: var(--faint); }
-  .nextup .who { color: var(--text); overflow-wrap: anywhere; }
-  .nextup .who .sep { color: var(--faint); }
-  .nextup .note { color: var(--muted); }
-  .nextup .count { color: var(--faint); font-variant-numeric: tabular-nums; }
-
-  /* ---------- graph ---------- */
-  .graph-scroll { overflow: auto; max-height: calc(100vh - 250px); overscroll-behavior: contain; }
-  .graph-scroll.graph-view { overflow: hidden; height: clamp(380px, 64vh, 780px); max-height: none; }
-  .graph { position: relative; width: 100%; min-height: 220px; background: transparent; }
-  .graph-scroll.graph-view .graph { height: 100%; }
-  .graph svg.graph-svg { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
-  .graph svg.graph-svg.panning { cursor: grabbing; }
-
-  .leader { stroke: color-mix(in oklab, var(--fg) 45%, transparent); stroke-width: 1; }
-  .gnode.hide-label .node-label, .gnode.hide-label .leader { display: none; }
-
-  .edge { fill: none; stroke-linecap: round; }
-  .edge-parent { stroke: var(--line); stroke-width: 1.15; }
-  .edge-parent.edge-pending { stroke: var(--pending); opacity: .5; stroke-dasharray: 4 5; }
-  .edge-parent.edge-complete { stroke: rgba(111,191,143,.55); }
-  .edge-parent.edge-active { stroke: var(--running); stroke-width: 1.7; stroke-dasharray: 6 7; animation: dashflow 1.1s linear infinite; }
-  .edge-parent.edge-failed { stroke: var(--failed); stroke-width: 1.7; }
-  .edge-parent.onpath {
-    stroke: var(--accent); stroke-width: 2.3; stroke-dasharray: none;
-  }
-  .edge-dep { stroke: var(--cyan); stroke-width: 1.15; stroke-dasharray: 3 5; opacity: 0; transition: opacity .18s ease; }
-  .edge-dep.show { opacity: .85; animation: dashflow 1.8s linear infinite; }
-  .edge-dep.edge-active { stroke: var(--running); stroke-dasharray: 5 5; animation: dashflow 1s linear infinite; }
-  .edge-dep.edge-active.show { opacity: 1; }
-  .edge-dep.edge-failed { stroke: var(--failed); }
-  .edge-dep.edge-complete { stroke: var(--complete); }
-  .arrow-dep { fill: var(--cyan); }
-  @keyframes dashflow { to { stroke-dashoffset: -26; } }
-
-  .gnode { cursor: pointer; }
-  .gnode .node-dot {
-    fill: var(--panel-3); stroke: var(--line); stroke-width: 1.3;
-    transition: stroke .18s ease, stroke-width .18s ease;
-  }
-  .gnode:hover .node-dot { stroke: var(--accent); }
-  .gnode:focus-visible { outline: none; }
-  .gnode .node-glyph { fill: var(--muted); font-family: var(--mono); pointer-events: none; }
-  .gnode.selected .node-dot {
-    stroke: var(--accent); stroke-width: 2.6;
-    filter: drop-shadow(0 2px 4px rgba(0,0,0,.6));
-  }
-  .gnode.selected .node-label .nl-id { fill: var(--rust-2); }
-
-  /* Status is carried by stroke plus the status word on every label. */
-  .gnode.complete .node-dot { stroke: var(--complete); }
-  .gnode.complete .node-glyph { fill: var(--complete); }
-  .gnode.running .node-dot { stroke: var(--running); stroke-width: 2; }
-  .gnode.running .node-glyph { fill: var(--running); }
-  .gnode.running .node-dot, .gnode.running .node-glyph { animation: nodepulse 1.7s ease-in-out infinite; }
-  .gnode.ready .node-dot { stroke: var(--ready); }
-  .gnode.ready .node-glyph { fill: var(--ready); }
-  .gnode.waiting .node-dot { stroke: var(--waiting); }
-  .gnode.waiting .node-glyph { fill: var(--waiting); }
-  .gnode.failed .node-dot { stroke: var(--failed); stroke-width: 2; }
-  .gnode.failed .node-glyph { fill: var(--failed); }
-  .gnode.suspended .node-dot { stroke: var(--suspended); }
-  .gnode.split .node-dot { stroke: var(--split); }
-  @keyframes nodepulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: .5; }
-  }
-  .node-label { font-family: var(--mono); pointer-events: none; }
-  .node-label .nl-id { fill: var(--text); letter-spacing: -.02em; }
-  .node-label .nl-goal { fill: var(--muted); }
-  .node-label .nl-st { font-size: .82em; letter-spacing: .02em; }
-  .node-label .st-complete { fill: var(--complete); }
-  .node-label .st-running { fill: var(--running); }
-  .node-label .st-ready { fill: var(--ready); }
-  .node-label .st-waiting { fill: var(--waiting); }
-  .node-label .st-failed { fill: var(--failed); }
-  .node-label .st-suspended { fill: var(--suspended); }
-  .node-label .st-split { fill: var(--split); }
-  .node-label .st-pending { fill: var(--pending); }
-
-  /* ---------- node tooltip ---------- */
-  .gtt {
-    position: fixed; z-index: 60; max-width: min(86vw, 330px);
-    pointer-events: none; opacity: 0; transform: translateY(4px);
-    transition: opacity .12s ease, transform .12s ease;
-    background: rgba(10,12,16,.97);
-    border: 1px solid var(--line); border-radius: 10px;
-    padding: 10px 12px;
-    box-shadow: 0 16px 46px -16px rgba(0,0,0,.9);
-    font-size: 12.5px; color: var(--text);
-  }
-  .gtt.show { opacity: 1; transform: none; }
-  .gtt-id { font-size: 11px; color: var(--rust-2); overflow-wrap: anywhere; }
-  .gtt-goal { margin-top: 3px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
-  .gtt-row { margin-top: 7px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .gtt-metric { color: var(--faint); font-family: var(--mono); font-size: 11px; }
-  .gtt-metrics {
-    margin-top: 7px; display: flex; gap: 12px; flex-wrap: wrap;
-    font-size: 11px; color: var(--muted); border-top: 1px solid var(--line-soft); padding-top: 7px;
-  }
-  .gtt-metrics b { color: var(--text); font-family: var(--mono); }
-  .gtt-act {
-    margin-top: 7px; font-family: var(--mono); font-size: 11px; color: var(--muted);
-    border-top: 1px solid var(--line-soft); padding-top: 7px; overflow-wrap: anywhere;
-  }
-
-  /* ---------- rows view ---------- */
-  #tree ul { list-style: none; margin: 0; padding: 0; }
-  #tree li { position: relative; }
-  #tree li > ul { margin-left: 14px; padding-left: 12px; border-left: 1px solid var(--line-soft); }
-  .row {
-    width: 100%; text-align: left; cursor: pointer;
-    display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center;
-    gap: 8px 10px;
-    padding: 8px 10px; margin: 2px 0;
-    background: transparent; border: 1px solid transparent; border-radius: 10px;
-    color: var(--text); font: inherit;
-  }
-  .row:hover { background: var(--panel-2); }
-  .row:focus-visible { outline: 2px solid var(--rust); outline-offset: 1px; }
-  .row.selected { background: var(--rust-soft); border-color: rgba(217,138,78,.45); }
-  .row .doto { width: 9px; height: 9px; border-radius: 50%; flex: none; }
-  .row.running .doto { animation: pulse 1.4s infinite; }
-  .row-main { min-width: 0; }
-  .row-title {
-    font-size: 14px; font-weight: 550; line-height: 1.3;
-    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-    overflow-wrap: anywhere;
-  }
-  .row-activity {
-    margin-top: 3px; font-family: var(--mono); font-size: 11.5px; color: var(--muted);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .row-activity:empty { display: none; }
-  .row-tag {
-    font-family: var(--mono); font-size: 11px; color: var(--faint);
-    background: var(--bg-2); border: 1px solid var(--line-soft);
-    border-radius: 999px; padding: 1px 8px; white-space: nowrap;
-  }
-
-  /* ---------- status chips ---------- */
-  .chip {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em;
-    padding: 2px 9px 2px 7px; border-radius: 999px; white-space: nowrap;
-    border: 1px solid currentColor; color: var(--pending);
-  }
-  .chip .doto { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: none; }
-  .chip.complete { color: var(--complete); }
-  .chip.running { color: var(--running); }
-  .chip.running .doto { animation: pulse 1.4s infinite; }
-  .chip.split { color: var(--split); }
-  .chip.failed { color: var(--failed); }
-  .chip.suspended { color: var(--suspended); }
-  .chip.pending { color: var(--pending); }
-  .chip.ready { color: var(--ready); }
-  .chip.waiting { color: var(--waiting); }
-
-  .badge {
-    display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
-    color: var(--muted); border: 1px solid var(--line); border-radius: 999px;
-    padding: 1px 7px; margin-left: 6px;
-  }
-  .badge.warn { color: var(--running); border-color: rgba(224,163,64,.4); }
-  .badge.bad { color: var(--failed); border-color: rgba(224,113,111,.4); }
-
-  /* ---------- detail ---------- */
-  .detail { min-width: 0; }
-  .detail-head { padding: 16px 18px; border-bottom: 1px solid var(--line-soft); }
-  .detail-head h1 { margin: 10px 0 6px; font-size: clamp(17px, 2vw, 22px); line-height: 1.3; overflow-wrap: anywhere; }
-  .meta { color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
-  .meta .mono { font-size: 12px; overflow-wrap: anywhere; }
-  .detail-body { padding: 4px 18px 22px; }
-  .section { padding: 16px 0; border-bottom: 1px solid var(--line-soft); }
-  .section:last-child { border-bottom: 0; }
-  .section h3 {
-    margin: 0 0 10px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .12em;
-    color: var(--rust); font-weight: 700;
-  }
-  .section h4 { margin: 14px 0 6px; font-size: 12px; color: var(--muted); font-weight: 600; }
-  .section h4:first-child { margin-top: 0; }
-  ul.clean { margin: 0 0 8px; padding-left: 18px; }
-  ul.clean li { margin: 3px 0; overflow-wrap: anywhere; }
-  .empty { color: var(--faint); font-style: italic; font-size: 13px; }
-  pre.box {
-    margin: 6px 0 0; padding: 12px; background: var(--bg-2);
-    border: 1px solid var(--line-soft); border-radius: 10px;
-    overflow: auto; max-height: 380px; font-size: 12.5px; line-height: 1.5;
-    white-space: pre-wrap; overflow-wrap: anywhere;
-  }
-  .cmd { font-family: var(--mono); font-size: 12.5px; background: var(--bg-2); border: 1px solid var(--line-soft); border-radius: 6px; padding: 1px 6px; }
-
-  pre.diff-box {
-    margin: 6px 0 0; padding: 6px 0; background: var(--bg-2);
-    border: 1px solid var(--line-soft); border-radius: 10px;
-    overflow: auto; max-height: 460px; font-size: 12.5px; line-height: 1.45;
-    white-space: pre;
-  }
-  .diffline { display: block; width: max-content; min-width: 100%; padding: 0 12px; }
-  .diffline.add { background: rgba(111,191,143,.13); color: #a9ecc3; }
-  .diffline.del { background: rgba(224,113,111,.13); color: #ffb7b7; }
-  .diffline.hunk { background: var(--rust-soft); color: var(--rust-2); }
-  .diffline.file { color: var(--text); font-weight: 650; margin-top: 8px; }
-  .diffline.meta { color: var(--faint); }
-  .diffline.commit { color: var(--muted); }
-  .diffline.head { color: var(--rust); }
-  .diffline.ctx { color: var(--muted); }
-
-  .events { display: flex; flex-direction: column; gap: 2px; }
-  .event {
-    display: grid; grid-template-columns: auto auto minmax(0,1fr); gap: 10px;
-    align-items: baseline; padding: 5px 8px; border-radius: 8px; font-size: 12.5px;
-  }
-  .event:nth-child(odd) { background: var(--bg-2); }
-  .event .t { font-family: var(--mono); font-size: 11px; color: var(--faint); white-space: nowrap; }
-  .event .name {
-    font-family: var(--mono); font-size: 11px; color: var(--rust);
-    text-transform: none; white-space: nowrap;
-  }
-  .event.err .name { color: var(--failed); }
-  .event .msg { color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
-  .event.err .msg { color: #ffb4b4; }
-
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
-  th { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
-  td.num { font-variant-numeric: tabular-nums; color: var(--muted); text-align: right; }
-
-  details.disclosure { margin: 8px 0 0; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--bg-2); }
-  details.disclosure > summary {
-    cursor: pointer; padding: 9px 12px; font-size: 12.5px; color: var(--muted);
-    list-style: none; user-select: none;
-  }
-  details.disclosure > summary::-webkit-details-marker { display: none; }
-  details.disclosure > summary::before { content: "▸ "; color: var(--rust); }
-  details.disclosure[open] > summary::before { content: "▾ "; }
-  details.disclosure .inner { padding: 0 12px 12px; }
-
-  /* ---------- conversation with the butler ---------- */
-  .workspace {
-    display: grid; grid-template-columns: minmax(0, 1fr) minmax(330px, 400px);
-    gap: 18px; align-items: start; min-width: 0;
-  }
-  .col-main { min-width: 0; }
-  .col-side { position: sticky; top: 66px; min-width: 0; }
-
-  .chat-panel { display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
-  .chat-status { font-family: var(--mono); font-size: 11px; color: var(--running); }
-  .chat-status:empty { display: none; }
-  .chat-log {
-    display: flex; flex-direction: column; gap: 14px;
-    padding: 14px; overflow-y: auto;
-    max-height: calc(100vh - 210px);
-    overscroll-behavior: contain;
-  }
-  .chat-turn { display: flex; flex-direction: column; gap: 9px; }
-  .msg {
-    border-radius: 11px; padding: 9px 12px; font-size: 13.5px;
-    line-height: 1.5; overflow-wrap: anywhere; min-width: 0;
-  }
-  .msg.user {
-    align-self: flex-end; max-width: 92%;
-    background: var(--rust-soft); border: 1px solid rgba(217,138,78,.32);
-    white-space: pre-wrap;
-  }
-  .msg.butler { background: var(--panel-2); border: 1px solid var(--line-soft); }
-  .msg.butler.err { border-color: rgba(224,113,111,.5); color: #ffb4b4; }
-  .msg.butler.working { color: var(--muted); display: flex; align-items: center; gap: 9px; }
-  .wdots { display: inline-flex; gap: 3px; flex: none; }
-  .wdots i {
-    width: 5px; height: 5px; border-radius: 50%; background: var(--running);
-    animation: wdot 1.2s ease-in-out infinite;
-  }
-  .wdots i:nth-child(2) { animation-delay: .18s; }
-  .wdots i:nth-child(3) { animation-delay: .36s; }
-  @keyframes wdot { 0%, 100% { opacity: .28; } 50% { opacity: 1; } }
-
-  .plan-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .plan-action {
-    display: inline-block; font-size: 10.5px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: .06em; padding: 2px 9px; border-radius: 999px;
-    border: 1px solid currentColor; color: var(--rust-2);
-  }
-  .plan-action.none { color: var(--complete); }
-  .plan-action.reopen, .plan-action.retry { color: var(--running); }
-  .plan-action.split { color: var(--cyan); }
-  .plan-nodes { font-size: 11.5px; color: var(--muted); }
-  .plan-why { margin-top: 8px; color: var(--text); font-size: 13px; }
-  .changes {
-    margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line-soft);
-    display: flex; flex-direction: column; gap: 3px;
-  }
-  .changes-title {
-    font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em;
-    color: var(--faint); font-weight: 700;
-  }
-  .change { font-size: 12px; color: var(--muted); }
-  details.disclosure.reply { margin-top: 9px; }
-  details.disclosure.reply .box { max-height: 260px; }
-
-  .chat-form {
-    display: flex; gap: 8px; align-items: flex-end;
-    padding: 12px 14px; border-top: 1px solid var(--line-soft);
-  }
-  .chat-form textarea {
-    min-height: 44px; max-height: 160px; resize: vertical; flex: 1 1 auto; min-width: 0;
-  }
-  .chat-form .btn { flex: none; }
-
-  /* Keep the technical language of the graph: hairline surfaces, mono ids. */
-  form { display: flex; flex-direction: column; gap: 8px; }
-  label { font-size: 12px; color: var(--muted); }
-  input[type=text], textarea, select {
-    width: 100%; background: var(--bg); color: var(--text);
-    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
-    font: inherit; font-size: 13.5px;
-  }
-  input:focus, textarea:focus, select:focus { outline: 2px solid var(--rust); outline-offset: 0; border-color: transparent; }
-  textarea { min-height: 68px; resize: vertical; }
-  .btn {
-    align-self: flex-start; cursor: pointer; border: 0; border-radius: 8px;
-    padding: 8px 14px; font: inherit; font-weight: 650; font-size: 13px;
-    background: var(--rust); color: var(--accent-ink);
-    transition: filter .12s ease, transform .06s ease;
-  }
-  .btn:hover { filter: brightness(1.08); }
-  .btn:active { transform: translateY(1px); }
-  .btn:disabled { opacity: .5; cursor: default; }
-  .btn.warn { background: var(--running); }
-  .btn.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
-
-  /* ---------- toast / states ---------- */
-  .toast {
-    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
-    z-index: 70; max-width: min(92vw, 620px);
-    padding: 11px 16px; border-radius: 10px;
-    background: var(--panel-2); border: 1px solid var(--line);
-    box-shadow: var(--shadow); font-size: 13.5px;
-    display: none;
-  }
-  .toast.show { display: block; }
-  .toast.err { border-color: rgba(224,113,111,.5); color: #ffb4b4; }
-  .toast.ok { border-color: rgba(111,191,143,.5); }
-
-  .state-note {
-    margin: 8px; padding: 14px; border-radius: 10px; text-align: center;
-    color: var(--muted); font-size: 13.5px; border: 1px dashed var(--line);
-  }
-  .state-note.err { color: #ffb4b4; border-color: rgba(224,113,111,.4); }
-  .skeleton { border-radius: 8px; background: linear-gradient(90deg, var(--panel-2), var(--line-soft), var(--panel-2)); background-size: 200% 100%; animation: shimmer 1.4s infinite; }
-  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-
-  /* ---------- responsive ---------- */
-  @media (max-width: 1000px) {
-    .workspace { grid-template-columns: minmax(0, 1fr); }
-    .col-side { position: static; order: -1; }
-    .chat-log { max-height: 44vh; }
-  }
-  @media (max-width: 900px) {
-    .wrap { padding: 12px; }
-    .project { max-width: 100%; }
-    .overview { padding: 15px; }
-    .stats { width: 100%; }
-    .stat { min-width: calc(50% - 4px); }
-    .graph-scroll.graph-view { height: clamp(300px, 48vh, 560px); }
-  }
-  @media (max-width: 430px) {
-    body { font-size: 14px; }
-    .stat { min-width: calc(50% - 4px); padding: 7px 9px; }
-    .stat .n { font-size: 19px; }
-    .appbar { padding: 9px 12px; gap: 8px; }
-    .detail-head, .detail-body { padding-left: 13px; padding-right: 13px; }
-    .panel-head { gap: 8px; }
-  }
-  /* ==================================================================
-     La Fabrique (green) theme layer — applied to the whole page.
-     Serif display headings; uppercase letterspaced mono labels, ids and
-     body; 2px borders; square corners; bordered buttons whose fill
-     scales up from the bottom on hover with a colour invert.
-     ================================================================== */
-  .panel, .overview, .stat, .state-note, .chat-panel, .box, .diff-box,
-  .disclosure, .toast, .gtt { border-radius: 0; }
-  .panel, .overview { border: var(--bw) solid var(--border); }
-  .panel-head { border-bottom: var(--bw) solid var(--border); }
-  .goal-title { font-family: var(--serif); font-weight: 400; letter-spacing: -.01em; }
-
-  .panel-head h2, .section h3, .eyebrow, .stat .k, .nextup .label, .label,
-  .chat-status, .legend, .live, .gtoggle, .viewtoggle button, .zoomctl button {
-    font-family: var(--mono); text-transform: uppercase; letter-spacing: .14em;
-  }
-  .panel-head h2, .section h3 { color: var(--muted); }
-  .section h3 { color: var(--accent); }
-  .stat { border: var(--bw) solid var(--border); background: var(--panel-2); }
-  .stat .n { font-family: var(--serif); font-weight: 400; }
-  .legend { border-bottom: var(--bw) solid var(--border); color: var(--muted); }
-  .chip { border-radius: 0; border-width: 1px; letter-spacing: .1em; }
-  .bar { border-radius: 0; border: 1px solid var(--line-soft); height: 10px; }
-  .bar > span { border-radius: 0; background: var(--accent); box-shadow: none; }
-
-  /* Buttons: 2px border, uppercase mono, bottom-up fill + invert. */
-  .btn {
-    position: relative; display: inline-flex; align-items: center; justify-content: center;
-    gap: .5em; padding: .8em 1.35em; min-height: 42px;
-    border: var(--bw) solid var(--border); border-radius: 0;
-    background: transparent; color: var(--fg); font-family: var(--mono);
-    font-size: .72rem; font-weight: 500; letter-spacing: .14em; text-transform: uppercase;
-    overflow: hidden; isolation: isolate;
-    transition: color .2s var(--ease), transform .2s var(--ease);
-  }
-  .btn::after {
-    content: ""; position: absolute; inset: 0; z-index: -1;
-    background: var(--accent); transform: scaleY(0); transform-origin: bottom;
-    transition: transform .3s var(--ease);
-  }
-  .btn:active { transform: translateY(2px); }
-  .btn:disabled { opacity: .45; cursor: default; }
-  .btn.warn { border-color: var(--running); }
-  .btn.ghost { border-color: var(--border); }
-  @media (hover: hover) and (pointer: fine) {
-    .btn:hover { color: var(--accent-ink); }
-    .btn:hover::after { transform: scaleY(1); }
-    .btn:focus-visible { color: var(--accent-ink); }
-    .btn:focus-visible::after { transform: scaleY(1); }
-  }
-
-  input[type=text], textarea, select {
-    border: var(--bw) solid var(--border); border-radius: 0; background: var(--bg);
-    font-family: var(--mono);
-  }
-  .chat-form textarea { border-color: color-mix(in oklab, var(--fg) 40%, transparent); }
-  .chat-form textarea:focus { border-color: var(--accent); }
-
-  .msg { border-width: var(--bw); border-radius: 0; }
-  .msg.user { background: color-mix(in oklab, var(--accent) 14%, transparent); border-color: var(--accent); }
-  .msg.butler { background: var(--panel-2); }
-  .plan-action { border-radius: 0; border-width: var(--bw); }
-  .wdots i { background: var(--accent); }
-
-  .gtt { border: var(--bw) solid var(--border); background: var(--bg); }
-  .gtt-id { color: var(--accent); }
-  /* Origin-aware tooltip: anchored to the pointer, instant after the first. */
-  .gtt { transition: opacity .18s var(--ease), transform .18s var(--ease); }
-  .gtt.instant { transition: none; }
-
-  .row, .gnode { transition: background-color .2s var(--ease), border-color .2s var(--ease); }
-  .row.selected { background: color-mix(in oklab, var(--accent) 14%, transparent); border-color: var(--accent); }
-
-  @media (hover: hover) and (pointer: fine) {
-    .row:hover { background: var(--panel-2); }
-  }
-
-  /* Browser surfaces that ship with no design system: selection (above),
-     caret, scrollbars, placeholder, underline offset, tabular numerals. */
-  html {
-    caret-color: var(--accent);
-    scrollbar-color: var(--line-soft) var(--bg);
-    scrollbar-width: thin;
-  }
   ::-webkit-scrollbar { width: 11px; height: 11px; }
   ::-webkit-scrollbar-track { background: var(--bg); }
   ::-webkit-scrollbar-thumb { background: var(--line-soft); border: 2px solid var(--bg); }
   ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
   ::placeholder { color: var(--muted); opacity: 1; }
-  a { text-underline-offset: 3px; }
-  .mono, .stat .n, .num, .event .t, .node-label, .row-tag, .change,
-  .plan-nodes, .goal-sub, .project, .gtt-metric, .gtt-metrics, .clock {
-    font-variant-numeric: tabular-nums;
-  }
+  :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .num, time { font-variant-numeric: tabular-nums; }
 
-  /* Reduced motion: keep opacity and colour, drop movement. */
+  /* ---------- top bar ---------- */
+  .bar {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; gap: var(--s2);
+    padding: 12px var(--gap);
+    background: var(--bg);
+    border-bottom: var(--bw) solid var(--border);
+  }
+  .brand { display: inline-flex; align-items: baseline; gap: 8px; font-family: var(--serif); font-size: 21px; letter-spacing: -.02em; white-space: nowrap; }
+  .brand .spark { color: var(--accent); font-size: 13px; }
+  .bar .spacer { flex: 1; }
+  .bar-run { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12.5px; }
+  .bar-run b { color: var(--fg); font-weight: 400; }
+  .live { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+  .live .dot { width: 8px; height: 8px; background: var(--done); flex: none; }
+  .live.busy .dot { background: var(--run); animation: pulse 1.4s ease-in-out infinite; }
+  .live.off .dot { background: var(--failed); animation: none; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+  /* ---------- layout ---------- */
+  .wrap { position: relative; z-index: 1; width: min(100% - 2 * var(--gap), 1280px); margin-inline: auto; }
+  section { padding: clamp(28px, 4vw, 52px) 0; border-bottom: var(--bw) solid var(--border); }
+  section:last-of-type { border-bottom: 0; }
+  .sec-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; margin-bottom: var(--s3); }
+  .sec-head .titles { min-width: 0; }
+  .sec-head h2 { font-size: clamp(22px, 3vw, 34px); }
+  .sec-head .lead { color: var(--muted); font-size: 13.5px; max-width: 68ch; margin-top: 8px; }
+  .sec-head .lead b { color: var(--fg); font-weight: 400; }
+
+  /* ---------- hero: the run and its graph ---------- */
+  .hero h1 { font-size: clamp(23px, 3.1vw, 40px); max-width: 34ch; overflow-wrap: anywhere; }
+  .hero .now { margin-top: 14px; color: var(--muted); font-size: 14px; display: flex; gap: 9px; align-items: baseline; flex-wrap: wrap; }
+  .hero .now .what { color: var(--fg); }
+  .hero .now .pulse-dot { width: 8px; height: 8px; flex: none; background: var(--run); animation: pulse 1.4s ease-in-out infinite; align-self: center; }
+  .hero .counts { margin-top: 6px; color: var(--faint); font-size: 12.5px; }
+  .progress { height: 3px; background: color-mix(in oklab, var(--fg) 12%, transparent); margin-top: var(--s3); }
+  .progress > span { display: block; height: 100%; background: var(--accent); width: 0; transition: width .6s var(--ease-out); }
+
+  .graph-frame {
+    position: relative; margin-top: var(--s3);
+    height: clamp(400px, 56vh, 600px);
+    border: var(--bw) solid var(--border);
+    background: var(--bg-2);
+    overflow: hidden; touch-action: none;
+  }
+  .graph, .graph svg.graph-svg { display: block; width: 100%; height: 100%; }
+  .graph svg.graph-svg { cursor: grab; }
+  .graph svg.graph-svg.panning { cursor: grabbing; }
+  .graph-empty { display: grid; place-items: center; height: 100%; color: var(--faint); font-size: 13.5px; }
+
+  /* ---------- graph fallback / edges ---------- */
+  .edge { fill: none; }
+  .edge-parent { stroke: color-mix(in oklab, var(--fg) 24%, transparent); stroke-width: 1.3; transition: stroke .2s var(--ease), stroke-width .2s var(--ease), opacity .2s var(--ease); }
+  .edge-parent.onpath { stroke: var(--accent); stroke-width: 2.2; }
+  .edge-parent.edge-running { stroke: var(--run); stroke-dasharray: 3 4; }
+  .edge-parent.edge-complete { stroke: color-mix(in oklab, var(--done) 50%, transparent); }
+  .edge-parent.edge-failed { stroke: var(--failed); }
+  .edge-dep { stroke: var(--ready); stroke-width: 1.5; stroke-dasharray: 4 4; opacity: .0; transition: opacity .22s var(--ease-out); }
+  .edge-dep.show { opacity: 1; }
+  .edge-dep.edge-failed { stroke: var(--failed); }
+  .arrow-dep { fill: var(--ready); }
+  .svg-focus .gnode, .svg-focus .edge-parent { transition: opacity .22s var(--ease-out); }
+  .svg-focus .gnode.dim { opacity: .28; }
+  .svg-focus .edge-parent.dim { opacity: .16; }
+
+  /* ---------- nodes: shape + glyph + word, so greyscale survives ---------- */
+  .gnode { cursor: pointer; outline: none; }
+  .gnode .shape { stroke: var(--pending); stroke-width: 1.6; fill: var(--bg-2); transition: transform .18s var(--ease-out), stroke .18s var(--ease), fill .18s var(--ease); transform-box: fill-box; transform-origin: center; }
+  .gnode .glyph { font-family: var(--mono); fill: var(--pending); pointer-events: none; }
+  .gnode .hit { fill: transparent; }
+  .gnode .halo { stroke: transparent; }
+  .gnode.hover .shape, .gnode:focus-visible .shape { transform: scale(1.18); }
+  .gnode.hover .halo, .gnode:focus-visible .halo, .gnode.selected .halo { stroke: var(--accent); stroke-width: 2; }
+  .gnode:focus-visible .halo { stroke-width: 3; }
+  .gnode.complete .shape { fill: var(--done); stroke: var(--done); }
+  .gnode.complete .glyph { fill: var(--bg); }
+  .gnode.running .shape { fill: var(--bg-2); stroke: var(--run); stroke-width: 2.6; }
+  .gnode.running .glyph { fill: var(--run); }
+  .gnode.ready .shape { fill: var(--bg-2); stroke: var(--ready); stroke-width: 2; }
+  .gnode.ready .glyph { fill: var(--ready); }
+  .gnode.waiting .shape { fill: transparent; stroke: var(--pending); stroke-dasharray: 4 4; }
+  .gnode.waiting .glyph, .gnode.pending .glyph { fill: var(--pending); }
+  .gnode.pending .shape { fill: transparent; stroke: color-mix(in oklab, var(--pending) 70%, transparent); stroke-dasharray: 1.5 4; }
+  .gnode.failed .shape { fill: var(--bg-2); stroke: var(--failed); stroke-width: 2.6; }
+  .gnode.failed .glyph { fill: var(--failed); }
+  .gnode.suspended .shape { fill: var(--bg-2); stroke: var(--blocked); stroke-width: 2; stroke-dasharray: 3 3; }
+  .gnode.suspended .glyph { fill: var(--blocked); }
+  .gnode.split .shape { fill: var(--bg-2); stroke: var(--muted); stroke-dasharray: 2 3; }
+  .gnode.split .glyph { fill: var(--muted); }
+  .gnode .ring { fill: none; stroke: var(--run); stroke-width: 1.3; stroke-dasharray: 3 5; transform-box: fill-box; transform-origin: center; animation: spin 7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .node-label { font-family: var(--mono); pointer-events: none; opacity: 0; transition: opacity .2s var(--ease-out); }
+  .gnode.labelled .node-label, .gnode.hover .node-label, .gnode.selected .node-label, .gnode:focus-visible .node-label { opacity: 1; }
+  .node-label .nl-goal { fill: var(--fg); }
+  .node-label .nl-state { font-size: .9em; letter-spacing: .05em; }
+  .st-complete { fill: var(--done); } .st-running { fill: var(--run); } .st-ready { fill: var(--ready); }
+  .st-waiting { fill: var(--pending); } .st-pending { fill: var(--pending); } .st-failed { fill: var(--failed); }
+  .st-suspended { fill: var(--blocked); } .st-split { fill: var(--muted); }
+  .gnode.enter { animation: nodeIn .3s var(--ease-out) both; animation-delay: calc(var(--i, 0) * 36ms); }
+  @keyframes nodeIn { from { opacity: 0; } to { opacity: 1; } }
+
+  .graph-foot { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; margin-top: 12px; }
+  .key { display: flex; gap: 14px; flex-wrap: wrap; color: var(--faint); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  .key span { display: inline-flex; align-items: center; gap: 6px; }
+  .key i { font-style: normal; font-family: var(--mono); }
+  .hint { color: var(--faint); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+  .hint b { color: var(--muted); font-weight: 400; }
+
+  /* ---------- butler chat ---------- */
+  .butler .chat-log {
+    display: flex; flex-direction: column; gap: var(--s2);
+    min-height: 120px; max-height: clamp(240px, 40vh, 460px);
+    overflow-y: auto; overscroll-behavior: contain;
+    padding-right: 6px;
+  }
+  .chat-empty { display: flex; flex-direction: column; gap: 14px; align-items: flex-start; }
+  .chat-empty p { color: var(--muted); font-size: 14px; max-width: 62ch; }
+  .examples { display: flex; flex-wrap: wrap; gap: 8px; }
+  .example {
+    font: inherit; font-size: 12.5px; color: var(--fg); cursor: pointer;
+    background: transparent; border: 1px solid var(--line-soft); padding: 7px 12px;
+    transition: border-color .18s var(--ease), color .18s var(--ease), background-color .18s var(--ease);
+  }
+  @media (hover: hover) and (pointer: fine) { .example:hover { border-color: var(--accent); color: var(--accent); } }
+  .turn { display: flex; flex-direction: column; gap: 10px; }
+  .msg { border: var(--bw) solid var(--line-soft); padding: 12px 14px; font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; max-width: min(88%, 640px); background: color-mix(in oklab, var(--accent) 13%, transparent); border-color: var(--accent); white-space: pre-wrap; }
+  .msg.butler { background: var(--bg-2); }
+  .msg.butler.err { border-color: var(--failed); }
+  .msg.butler.err b { color: var(--failed); }
+  .msg.butler.working { color: var(--muted); display: flex; align-items: center; gap: 10px; }
+  .wdots { display: inline-flex; gap: 4px; flex: none; }
+  .wdots i { width: 6px; height: 6px; background: var(--run); animation: wdot 1.2s ease-in-out infinite; }
+  .wdots i:nth-child(2) { animation-delay: .16s; }
+  .wdots i:nth-child(3) { animation-delay: .32s; }
+  @keyframes wdot { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+  .plan-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+  .plan-action { font-family: var(--mono); font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; padding: 3px 9px; border: 1px solid currentColor; color: var(--accent); }
+  .plan-action.none { color: var(--done); }
+  .plan-action.reopen, .plan-action.retry { color: var(--run); }
+  .plan-action.split { color: var(--ready); }
+  .plan-nodes { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .plan-why { color: var(--fg); font-size: 14px; }
+  .changes { margin-top: 10px; border-top: 1px solid var(--line-soft); padding-top: 9px; display: flex; flex-direction: column; gap: 4px; }
+  .changes .changes-title { font-family: var(--mono); font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--faint); }
+  .change { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  details.reply { margin-top: 10px; }
+  details.reply > summary { cursor: pointer; font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); list-style: none; }
+  details.reply > summary::-webkit-details-marker { display: none; }
+  details.reply > summary::before { content: "+ "; color: var(--accent); }
+  details.reply[open] > summary::before { content: "− "; }
+  details.reply pre { margin: 8px 0 0; padding: 12px; background: var(--bg); border: 1px solid var(--line-soft); overflow: auto; max-height: 320px; font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+  .chat-form { margin-top: var(--s2); display: flex; gap: 10px; align-items: flex-end; }
+  .chat-form textarea {
+    flex: 1 1 auto; min-width: 0; min-height: 58px; max-height: 180px; resize: vertical;
+    background: var(--bg); color: var(--fg); border: var(--bw) solid var(--line-soft);
+    padding: 13px 15px; font: inherit; font-size: 15px; line-height: 1.45;
+  }
+  .chat-form textarea:focus { outline: none; border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .chat-context { margin-top: 10px; font-size: 12.5px; color: var(--muted); display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .chat-context .ctx { color: var(--fg); }
+  .chat-context button { font: inherit; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; }
+  @media (hover: hover) and (pointer: fine) { .chat-context button:hover { text-decoration: underline; } }
+
+  /* ---------- buttons ---------- */
+  .btn {
+    position: relative; display: inline-flex; align-items: center; justify-content: center; gap: .5em;
+    padding: .8em 1.35em; min-height: 46px; cursor: pointer; overflow: hidden; isolation: isolate;
+    border: var(--bw) solid var(--border); background: transparent; color: var(--fg);
+    font-family: var(--mono); font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
+    transition: color .2s var(--ease), transform .2s var(--ease);
+  }
+  .btn::after { content: ""; position: absolute; inset: 0; z-index: -1; background: var(--accent); transform: scaleY(0); transform-origin: bottom; transition: transform .28s var(--ease); }
+  .btn:active { transform: translateY(2px); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn:disabled::after { transform: scaleY(0); }
+  @media (hover: hover) and (pointer: fine) {
+    .btn:hover:not(:disabled) { color: var(--accent-ink); }
+    .btn:hover:not(:disabled)::after { transform: scaleY(1); }
+  }
+  .btn:focus-visible { color: var(--accent-ink); }
+  .btn:focus-visible::after { transform: scaleY(1); }
+
+  /* ---------- node detail (read-only) ---------- */
+  .detail-empty { color: var(--faint); font-style: italic; font-size: 13.5px; }
+  .detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; }
+  .detail-head h2 { font-size: clamp(20px, 2.6vw, 30px); max-width: 44ch; overflow-wrap: anywhere; }
+  .detail-head .meta { margin-top: 8px; color: var(--faint); font-size: 12px; overflow-wrap: anywhere; }
+  .detail-head .meta b { color: var(--muted); font-weight: 400; }
+  .detail-grid { margin-top: var(--s3); display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s3); }
+  .detail-block h4 { font-family: var(--mono); font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; font-weight: 400; }
+  .detail-block .prose { color: var(--fg); font-size: 14px; line-height: 1.6; max-width: 72ch; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .detail-act { color: var(--muted); font-size: 13.5px; border: var(--bw) solid var(--line-soft); background: var(--bg-2); padding: 11px 13px; overflow-wrap: anywhere; }
+  .detail-act.live { border-color: var(--run); }
+  ul.clean { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  ul.clean li { font-size: 13.5px; max-width: 72ch; overflow-wrap: anywhere; }
+  ul.clean li::before { content: "— "; color: var(--faint); }
+  .events { display: flex; flex-direction: column; gap: 4px; max-height: 300px; overflow: auto; }
+  .event { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 12px; font-size: 12.5px; }
+  .event time { font-family: var(--mono); font-size: 11px; color: var(--faint); white-space: nowrap; }
+  .event .name { font-family: var(--mono); font-size: 11px; color: var(--accent); white-space: nowrap; }
+  .event .msg { color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
+  .event.err .name, .event.err .msg { color: var(--failed); }
+  details.code { margin-top: var(--s2); }
+  details.code > summary { cursor: pointer; font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); list-style: none; }
+  details.code > summary::-webkit-details-marker { display: none; }
+  details.code > summary::before { content: "+ "; color: var(--accent); }
+  details.code[open] > summary::before { content: "− "; }
+  pre.diff-box { margin: 10px 0 0; padding: 6px 0; background: var(--bg); border: 1px solid var(--line-soft); overflow: auto; max-height: 440px; font-size: 12.5px; line-height: 1.5; white-space: pre; }
+  .diffline { display: block; width: max-content; min-width: 100%; padding: 0 12px; color: var(--muted); }
+  .diffline.add { background: color-mix(in oklab, var(--done) 13%, transparent); color: var(--done); }
+  .diffline.del { background: color-mix(in oklab, var(--failed) 13%, transparent); color: var(--failed); }
+  .diffline.hunk { background: color-mix(in oklab, var(--accent) 13%, transparent); color: var(--accent); }
+  .diffline.file { color: var(--fg); font-weight: 600; }
+  .diffline.meta { color: var(--faint); }
+  .diffline.head { color: var(--accent); }
+
+  /* ---------- status chip ---------- */
+  .chip { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; border: 1px solid currentColor; padding: 3px 9px; font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--pending); }
+  .chip .dot { width: 7px; height: 7px; background: currentColor; }
+  .chip.complete { color: var(--done); }
+  .chip.running { color: var(--run); }
+  .chip.running .dot { animation: pulse 1.4s infinite; }
+  .chip.ready { color: var(--ready); }
+  .chip.failed { color: var(--failed); }
+  .chip.suspended { color: var(--blocked); }
+  .chip.split { color: var(--muted); }
+  .chip.waiting, .chip.pending { color: var(--pending); }
+
+  /* ---------- tooltip ---------- */
+  .tooltip {
+    position: fixed; z-index: 60; pointer-events: none; max-width: min(86vw, 340px);
+    background: var(--bg); border: var(--bw) solid var(--border); padding: 12px 14px;
+    opacity: 0; transform: translateY(5px) scale(.98);
+    transition: opacity .14s var(--ease-out), transform .14s var(--ease-out);
+  }
+  .tooltip.show { opacity: 1; transform: none; }
+  .tooltip.instant { transition: none; }
+  .tooltip .tt-id { font-family: var(--mono); font-size: 11px; color: var(--accent); margin-bottom: 4px; overflow-wrap: anywhere; }
+  .tooltip .tt-goal { font-size: 14px; line-height: 1.35; overflow-wrap: anywhere; }
+  .tooltip .tt-row { margin-top: 9px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .tooltip .tt-meta { margin-top: 9px; border-top: 1px solid var(--line-soft); padding-top: 8px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .tooltip .tt-meta b { color: var(--fg); font-weight: 400; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 14px); z-index: 70;
+    max-width: min(92vw, 620px); padding: 12px 16px; background: var(--panel);
+    border: var(--bw) solid var(--border); font-size: 13.5px; opacity: 0; pointer-events: none;
+    transition: opacity .2s var(--ease-out), transform .2s var(--ease-out);
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.err { border-color: var(--failed); color: var(--failed); }
+  .empty { color: var(--faint); font-style: italic; font-size: 13.5px; }
+
+  @media (min-width: 1040px) {
+    /* Laptop and up: the graph owns the main column, the butler rides a
+       sticky rail so every change is one keystroke away at any scroll. */
+    .wrap { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 440px); column-gap: var(--s3); }
+    section { border-bottom: 0; }
+    .hero { grid-column: 1; grid-row: 1; border-bottom: var(--bw) solid var(--border); }
+    .detail { grid-column: 1; grid-row: 2; }
+    .rail { grid-column: 2; grid-row: 1 / span 2; border-left: var(--bw) solid var(--border); padding-left: var(--s3); }
+    .butler {
+      position: sticky; top: 76px; align-self: start;
+      max-height: calc(100vh - 100px);
+      display: flex; flex-direction: column;
+    }
+    .butler .chat-log { flex: 1 1 auto; max-height: none; }
+    .butler .sec-head { margin-bottom: var(--s2); }
+  }
+  @media (max-width: 720px) {
+    .bar-run { display: none; }
+    .graph-frame { height: 52vh; }
+  }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation: none !important;
       transition-duration: .001ms !important;
-      transition-property: opacity, color, background-color, border-color !important;
+      transition-property: opacity, color, background-color, border-color, stroke !important;
     }
-    .btn:active, .btn::after { transform: none !important; }
+    .gnode.hover .shape, .gnode:focus-visible .shape, .btn:active, .btn::after { transform: none !important; }
   }
 </style>
 </head>
 <body>
-  <header class="appbar">
-    <span class="brand"><span class="spark">◆</span> fractal</span>
-    <span class="project" id="project" title=""></span>
+  <header class="bar">
+    <span class="brand"><span class="spark">◆</span>fractal</span>
+    <span class="bar-run" id="bar-run" aria-live="polite"></span>
     <span class="spacer"></span>
-    <span class="live off" id="live"><span class="pulse"></span><span id="liveText">connecting…</span></span>
+    <span class="live off" id="live"><span class="dot"></span><span id="liveText">connecting…</span></span>
   </header>
 
-  <div class="wrap">
-    <div class="workspace">
-      <div class="col-main">
-        <section class="overview" id="overview">
-          <div class="state-note">Loading run state…</div>
-        </section>
-        <section class="panel graph-panel">
-          <div class="panel-head">
-            <h2>Task graph</h2>
-            <div class="gtools">
-              <label class="gtoggle" title="Draw every depends_on edge. Off, only the hovered or selected node's dependencies are drawn, so the graph stays readable.">
-                <input type="checkbox" id="show-deps" /> All dependencies
-              </label>
-              <div class="zoomctl" role="group" aria-label="Zoom">
-                <button type="button" id="zoom-out" title="Zoom out" aria-label="Zoom out">−</button>
-                <span class="sep"></span>
-                <button type="button" id="zoom-fit" title="Fit to view" aria-label="Fit to view">⤢</button>
-                <span class="sep"></span>
-                <button type="button" id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
-              </div>
-              <div class="viewtoggle" role="group" aria-label="Tree view">
-                <button type="button" id="view-graph" class="active" aria-pressed="true">Graph</button>
-                <button type="button" id="view-rows" aria-pressed="false">Rows</button>
-              </div>
-            </div>
-            <span class="muted" id="treeCount"></span>
-          </div>
-          <div class="legend" id="legend">
-            <span class="item"><span class="swatch parent"></span>parent → child</span>
-            <span class="item"><span class="swatch dep"></span>depends on</span>
-            <span class="item"><span class="swatch active"></span>active path</span>
-            <span class="item"><span class="swatch complete"></span>done</span>
-            <span class="item"><span class="swatch failed"></span>failed</span>
-            <span class="item"><span class="swatch pending"></span>waiting</span>
-            <span class="item hint">hover a node for its dependencies</span>
-          </div>
-          <div class="nextup" id="nextup" aria-live="polite"></div>
-          <div class="graph-scroll" id="graph-scroll">
-            <div class="graph" id="tree"><div class="state-note">Waiting for nodes…</div></div>
-          </div>
-        </section>
-        <section class="panel detail" id="detail">
-          <div class="state-note">Select a node to see its contract, activity and diff.</div>
-        </section>
+  <main class="wrap">
+    <section class="hero" aria-labelledby="hero-title">
+      <h1 id="hero-title">Loading run…</h1>
+      <p class="now" id="hero-now" aria-live="polite"></p>
+      <p class="counts" id="hero-counts"></p>
+      <div class="progress" role="progressbar" aria-label="Run progress"><span id="progress-fill"></span></div>
+      <div class="graph-frame" id="graph-frame">
+        <div class="graph" id="tree"><div class="graph-empty">Waiting for the run…</div></div>
       </div>
-      <aside class="col-side">
-        <section class="panel chat-panel">
-          <div class="panel-head">
-            <h2>Conversation</h2>
-            <span class="chat-status" id="chat-status" aria-live="polite"></span>
-          </div>
-          <div class="chat-log" id="chat-log">
-            <div class="state-note">Ask the butler to change the plan in plain language — it decides the smallest correct change.</div>
-          </div>
-          <form class="chat-form" id="chat-form">
-            <textarea id="chat-input" placeholder="e.g. the tracker should use real data, not simulated" aria-label="Message the butler"></textarea>
-            <button class="btn" type="submit" id="chat-send">Send</button>
-          </form>
-        </section>
-      </aside>
-    </div>
-  </div>
+      <div class="graph-foot">
+        <div class="key" aria-hidden="true">
+          <span><i style="color:var(--done)">✓</i>done</span>
+          <span><i style="color:var(--run)">●</i>running</span>
+          <span><i style="color:var(--ready)">◇</i>ready</span>
+          <span><i style="color:var(--pending)">○</i>waiting</span>
+          <span><i style="color:var(--failed)">✕</i>failed</span>
+          <span><i style="color:var(--blocked)">⬡</i>blocked</span>
+        </div>
+        <div class="hint"><b>scroll</b> zoom · <b>drag</b> pan · <b>click</b> open</div>
+      </div>
+    </section>
 
-  <div class="gtt" id="gtt" role="tooltip" aria-hidden="true"></div>
+    <div class="rail">
+    <section class="sec butler" aria-labelledby="butler-title">
+      <div class="sec-head">
+        <div class="titles">
+          <h2 id="butler-title">Talk to the run</h2>
+          <p class="lead">Every change is asked for here. The butler reads the run, decides the smallest correct change, and makes it.</p>
+        </div>
+        <span class="chat-status" id="chat-status" role="status" aria-live="polite" style="font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--run)"></span>
+      </div>
+      <div class="chat-log" id="chat-log"></div>
+      <form class="chat-form" id="chat-form">
+        <textarea id="chat-input" rows="1" placeholder="e.g. the accompaniment should sound like one piano, not six voices" aria-label="Message the butler"></textarea>
+        <button class="btn" type="submit" id="chat-send">Send</button>
+      </form>
+      <div class="chat-context" id="chat-context" hidden></div>
+    </section>
+    </div>
+
+    <section class="sec detail" aria-labelledby="detail-title">
+      <div id="detail"><p class="detail-empty">Select a step in the graph to read what it is and what it is doing.</p></div>
+    </section>
+  </main>
+
+  <div class="tooltip" id="tooltip" role="tooltip" aria-hidden="true"></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 "use strict";
 
+/* ==================================================================
+   Small helpers.
+   ================================================================== */
 const el = (id) => document.getElementById(id);
-const STATUS_ORDER = ["complete", "running", "failed", "split", "suspended", "pending"];
-
-let state = null;
-let selected = null;
-let selectedSig = "";
-let detailBusy = false;
-let showDeps = false;
-/* The durable conversation with the butler, mirrored from GET /api/butler.
-   `chatSig` avoids rebuilding the log on every poll, and re-rendering never
-   touches the input element, so what the user is typing survives. */
-let conversation = [];
-let chatSig = "";
-let chatBusy = false;
-/* Graph interaction state: the node under the cursor, the built SVG and its
-   viewBox (so zoom/pan can adjust it), and a cache signature so the 2s poll
-   does not thrash a graph whose structure has not changed. */
-let hover = null;
-let graphAPI = null;
-let graphSig = "";
-let suppressClick = false;
-/* The first tooltip eases in; every one after it is instant, so scanning a
-   dense graph is not a queue of little animations. */
-let tooltipSeen = false;
-
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
     {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -831,71 +449,22 @@ function shortId(id) {
   const last = parts[parts.length - 1];
   return /^\d+$/.test(last) ? last : clip(id, 7);
 }
-function nodeName(n) {
-  return firstLine(n && n.goal) || (n && n.id === "root" ? "Project goal" : (n && n.id) || "node");
-}
-function statusLabel(s) {
-  return String(s || "pending").replace(/_/g, " ");
-}
-function chip(status, withDot) {
-  const s = status || "pending";
-  return `<span class="chip ${esc(s)}">${withDot === false ? "" : '<span class="doto"></span>'}${esc(statusLabel(s))}</span>`;
-}
-/* The chip that names run state (ready / running / waiting on <ids> / done /
-   failed). It is the primary readout; colour is a secondary cue. */
-function stateChip(n) {
-  const st = runState(n);
-  return `<span class="chip ${esc(st.key)}" title="${esc(st.label)}"><span class="doto"></span>${esc(st.label)}</span>`;
-}
+function nodeName(n) { return firstLine(n && n.goal) || (n && n.id === "root" ? "Your run" : (n && n.id) || "step"); }
 function when(iso) {
   if (!iso) return "";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return String(iso).slice(11, 19);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
-function fmtBytes(n) {
-  n = Number(n) || 0;
-  if (n < 1024) return n + " B";
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
-  return (n / 1024 / 1024).toFixed(1) + " MB";
+let toastTimer = null;
+function toast(msg, isErr) {
+  const box = el("toast");
+  box.textContent = msg;
+  box.className = "toast show " + (isErr ? "err" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { box.className = "toast"; }, 5000);
 }
 
-const byId = (id) => (state && state.nodes.find((n) => n.id === id)) || null;
-const childrenOf = (id) =>
-  (state ? state.nodes.filter((n) => (n.parent || null) === (id || null)) : []);
-
-/* Run state answers "can this run now?". It mirrors the scheduler's rule
-   (scheduler.rs `deps_satisfied`): a pending node is runnable once every
-   depends_on target is complete and not stale. Any other status keeps its
-   own name. Waiting names the exact ids still outstanding, so sequence and
-   parallelism are readable from the text alone. */
-function runState(n) {
-  if (!n) return { key: "pending", label: "unknown" };
-  if (n.status === "running") return { key: "running", label: "running" };
-  if (n.status === "complete") return { key: "complete", label: "done" };
-  if (n.status === "failed") return { key: "failed", label: "failed" };
-  if (n.status === "split") return { key: "split", label: "split" };
-  if (n.status === "suspended") return { key: "suspended", label: "suspended" };
-  const outstanding = (n.depends_on || []).filter((d) => {
-    const dep = byId(d);
-    return !dep || dep.status !== "complete" || dep.stale;
-  });
-  if (outstanding.length) {
-    return { key: "waiting", label: "waiting on " + outstanding.map(shortId).join(", "), outstanding };
-  }
-  return { key: "ready", label: "ready" };
-}
-function readyNodes() {
-  return state ? state.nodes.filter((n) => runState(n).key === "ready") : [];
-}
-function descendantsOf(id) {
-  const out = [];
-  const walk = (pid) => childrenOf(pid).forEach((c) => { out.push(c); walk(c.id); });
-  walk(id);
-  return out;
-}
-
-/* ---------- data ---------- */
 async function jget(url) {
   const r = await fetch(url, { headers: { Accept: "application/json" } });
   const data = await r.json().catch(() => ({}));
@@ -911,74 +480,599 @@ async function jpost(url, payload) {
   return r.json().catch(() => ({ ok: false, error: "HTTP " + r.status }));
 }
 
-let toastTimer = null;
-function toast(msg, isErr) {
-  const box = el("toast");
-  box.textContent = msg;
-  box.className = "toast show " + (isErr ? "err" : "ok");
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { box.className = "toast"; }, 5000);
+/* ==================================================================
+   State.
+   ================================================================== */
+let state = null;
+let selected = null;
+let selectedSig = "";
+let detailBusy = false;
+let hover = null;
+let expanded = new Set();
+let layoutKey = "";
+let paintKey = "";
+let renderedIds = new Set();
+let svg = null;
+let vb = null;
+let home = null;
+let hasMoved = false;
+let view = { x: 0, y: 0, k: 1 };
+let viewport = null;
+let suppressClick = false;
+let tooltipSeen = false;
+let conversation = [];
+let chatSig = "";
+let chatBusy = false;
+let selectedContext = null;
+
+const byId = (id) => (state && state.nodes.find((n) => n.id === id)) || null;
+const childrenOf = (id) => (state ? state.nodes.filter((n) => (n.parent || null) === (id || null)) : []);
+
+/* The scheduler rule (scheduler.rs deps_satisfied), written as words so the
+   sequence is readable without colour. */
+function runState(n) {
+  if (!n) return { key: "pending", label: "unknown" };
+  if (n.status === "running") return { key: "running", label: "running now" };
+  if (n.status === "complete") return { key: "complete", label: "done" };
+  if (n.status === "failed") return { key: "failed", label: "failed" };
+  if (n.status === "split") return { key: "split", label: "split into steps" };
+  if (n.status === "suspended") return { key: "suspended", label: "blocked" };
+  const outstanding = (n.depends_on || []).filter((d) => {
+    const dep = byId(d);
+    return !dep || dep.status !== "complete" || dep.stale;
+  });
+  if (outstanding.length) {
+    return { key: "waiting", label: "waiting on " + outstanding.map(shortId).join(", "), outstanding };
+  }
+  return { key: "ready", label: "ready to start" };
+}
+const STATE_WORD = { complete: "done", running: "running", ready: "ready", waiting: "waiting", failed: "failed", split: "split", suspended: "blocked", pending: "waiting" };
+const GLYPH = { complete: "✓", running: "●", ready: "◇", waiting: "", failed: "✕", split: "≡", suspended: "⬡", pending: "" };
+
+function stateChip(n) {
+  const st = runState(n);
+  return `<span class="chip ${esc(st.key)}"><span class="dot"></span>${esc(st.label)}</span>`;
 }
 
-/* ---------- conversation with the butler ----------
-   The button is the way you steer: a plain-language message goes to POST
-   /api/butler, which claims a turn and runs the butler agent off the request.
-   The transcript is durable (GET /api/butler), so a refresh shows the same
-   conversation, including a request that is still working. */
-const ACTION_WORD = {
-  none: "Kept — no change", reopen: "Reopened", split: "Added new nodes",
-  amend: "Amended", edit_contract: "Edited contract", retry: "Retried",
-  resolve: "Resolved",
-};
+/* ==================================================================
+   The run: hero heading, now line, progress, top bar.
+   ================================================================== */
+function renderRun() {
+  if (!state) return;
+  const c = state.counts || {};
+  const total = c.total || state.nodes.length;
+  const complete = c.complete || 0;
+  const running = state.nodes.filter((n) => n.status === "running");
+  const failed = c.failed || 0;
+  const waiting = state.nodes.filter((n) => runState(n).key === "waiting").length;
+  const ready = state.nodes.filter((n) => runState(n).key === "ready").length;
+
+  el("hero-title").textContent = clip(nodeName({ id: "root", goal: state.root_goal }), 96) || "This run";
+  el("progress-fill").style.width = (total ? Math.round((complete / total) * 100) : 0) + "%";
+
+  let now;
+  if (running.length) {
+    const lead = running[0];
+    now = `<span class="pulse-dot"></span><span>Working on <span class="what">${esc(clip(nodeName(lead), 70))}</span></span>` +
+      (lead.activity ? `<span>— ${esc(clip(firstLine(lead.activity), 80))}</span>` : "");
+  } else if (failed) {
+    now = `<span class="what">Stopped with a failure.</span><span>Select the failed step, then ask the butler to retry it.</span>`;
+  } else if (total && complete === total) {
+    now = `<span class="what">Every step is done.</span>`;
+  } else {
+    now = `<span class="what">Nothing is running right now.</span>` +
+      (ready ? `<span>${ready} step${ready === 1 ? "" : "s"} can start next.</span>` : "");
+  }
+  el("hero-now").innerHTML = now;
+
+  const bits = [`${complete} of ${total} done`];
+  if (running.length) bits.push(`${running.length} running`);
+  if (failed) bits.push(`${failed} failed`);
+  if (ready) bits.push(`${ready} ready`);
+  if (waiting) bits.push(`${waiting} waiting`);
+  el("hero-counts").textContent = bits.join(" · ");
+  el("bar-run").innerHTML = `<b>${esc(clip(state.root_goal || "this run", 64))}</b> · ${esc(bits.join(" · "))}`;
+}
+
+/* ==================================================================
+   The graph. Layout: each expanded subtree owns an angular wedge,
+   subdivided by leaf weight, every depth on its own ring. Only the root
+   is open at first, so the drawn labels stay legible; a node with hidden
+   children shows "+N" and opens when clicked.
+   ================================================================== */
+function visibleChildren(n) { return expanded.has(n.id) ? childrenOf(n.id) : []; }
+function visibleCount(root) {
+  let n = 0;
+  const walk = (x) => { n++; visibleChildren(x).forEach(walk); };
+  walk(root);
+  return n;
+}
+function layoutSignature() {
+  return JSON.stringify(state.nodes.map((n) => [n.id, n.parent, n.depends_on])) + "|" + [...expanded].sort().join(",");
+}
+function contentSignature() {
+  return JSON.stringify(state.nodes.map((n) => [n.id, n.status, n.goal, n.stale, n.tampered, n.activity]));
+}
+function openChain(id) {
+  let cur = byId(id);
+  while (cur) {
+    if (childrenOf(cur.id).length) expanded.add(cur.id);
+    cur = cur.parent ? byId(cur.parent) : null;
+  }
+}
+
+function renderGraph() {
+  const tree = el("tree");
+  const root = byId("root") || state.nodes.find((n) => !n.parent);
+  if (!root) { tree.innerHTML = '<div class="graph-empty">No root step.</div>'; return; }
+  if (expanded.size === 0) expanded.add(root.id);
+
+  const lk = layoutSignature();
+  if (lk === layoutKey && tree.querySelector("svg.graph-svg")) { paintGraph(); applyFocus(); return; }
+  layoutKey = lk;
+
+  // Never draw an exploded tree: cap the visible nodes.
+  while (visibleCount(root) > 72) {
+    let deepest = null;
+    for (const id of expanded) {
+      const n = byId(id);
+      if (n && n.id !== root.id && childrenOf(n.id).length) {
+        const d = n.depth || 0;
+        if (!deepest || d > deepest.d) deepest = { id, d };
+      }
+    }
+    if (!deepest) break;
+    expanded.delete(deepest.id);
+  }
+
+  // Leaf weight and depth over the visible tree.
+  const weight = {}, depth = {};
+  (function measure(n, d) {
+    depth[n.id] = d;
+    const kids = visibleChildren(n);
+    if (!kids.length) { weight[n.id] = 1; return 1; }
+    let w = 0; kids.forEach((k) => { w += measure(k, d + 1); });
+    weight[n.id] = w; return w;
+  })(root, 0);
+  let maxD = 0;
+  for (const id in depth) maxD = Math.max(maxD, depth[id]);
+
+  const ringR = [0];
+  for (let d = 1; d <= maxD; d++) ringR[d] = 158 * Math.pow(d, 0.92);
+
+  const pos = {};
+  (function place(n, a0, a1, d) {
+    const mid = (a0 + a1) / 2;
+    const r = ringR[d];
+    pos[n.id] = { x: Math.cos(mid) * r, y: Math.sin(mid) * r, angle: mid, depth: d, r };
+    const kids = visibleChildren(n);
+    const tot = weight[n.id] || 1;
+    let cur = a0;
+    kids.forEach((k) => {
+      const w = (a1 - a0) * (weight[k.id] / tot);
+      place(k, cur, cur + w, d + 1);
+      cur += w;
+    });
+  })(root, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2, 0);
+
+  const nodeR = (id) => (id === root.id ? 24 : 17);
+
+  // ---- labels, with collision avoidance ----
+  const labels = {};
+  const boxes = [];
+  const fs = 12.5;
+  const lineH = fs * 1.5;
+  const collide = (b) => boxes.some((o) => b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1]);
+  for (const id in pos) { const p = pos[id], rr = nodeR(id) + 3; boxes.push([p.x - rr, p.y - rr, p.x + rr, p.y + rr]); }
+  const byDepth = Object.keys(pos).sort((a, b) => pos[a].depth - pos[b].depth);
+  for (const id of byDepth) {
+    const p = pos[id], n = byId(id), st = runState(n);
+    const hidden = childrenOf(id).length - visibleChildren(n).length;
+    const more = hidden > 0 ? ` +${hidden}` : "";
+    const goalText = id === root.id ? "Your run" : clip(nodeName(n), 16);
+    const stateText = (STATE_WORD[st.key] || st.key) + more;
+    const wide = Math.max(goalText.length, stateText.length) * fs * 0.6 + 8;
+    const tall = lineH * 2;
+    const cand = [];
+    if (id === root.id) {
+      cand.push({ anchor: "middle", x: p.x, y0: p.y + nodeR(id) + 9 });
+    } else {
+      const ox = Math.cos(p.angle), oy = Math.sin(p.angle);
+      const off = nodeR(id) + 10;
+      if (Math.abs(ox) > 0.32) {
+        cand.push({ anchor: ox > 0 ? "start" : "end", x: p.x + Math.sign(ox) * off, y0: p.y - tall / 2 + oy * 6 });
+        cand.push({ anchor: ox > 0 ? "end" : "start", x: p.x - Math.sign(ox) * off, y0: p.y - tall / 2 + oy * 6 });
+      } else {
+        const down = oy > 0;
+        cand.push({ anchor: "middle", x: p.x, y0: p.y + (down ? off : -off - tall) });
+        cand.push({ anchor: "middle", x: p.x, y0: p.y + (down ? -off - tall : off) });
+      }
+    }
+    let placed = null;
+    for (const c of cand) {
+      const x0 = c.anchor === "start" ? c.x : c.anchor === "end" ? c.x - wide : c.x - wide / 2;
+      const b = [x0, c.y0, x0 + wide, c.y0 + tall];
+      if (!collide(b)) { placed = c; boxes.push(b); break; }
+    }
+    labels[id] = placed ? { ...placed, goalText, stateText, st, fs } : null;
+  }
+
+  // ---- bounds are measured from the rendered nodes after insertion, so a
+  //      label can never be clipped by the frame -----
+  const pad = 34;
+
+  // ---- edges ----
+  const edges = [];
+  for (const id in pos) {
+    const n = byId(id);
+    if (!n || !n.parent || !pos[n.parent]) continue;
+    const a = pos[n.parent], b = pos[id];
+    const mid = (a.r + b.r) / 2;
+    const c1x = Math.cos(a.angle) * mid, c1y = Math.sin(a.angle) * mid;
+    const c2x = Math.cos(b.angle) * mid, c2y = Math.sin(b.angle) * mid;
+    edges.push(`<path class="edge edge-parent" data-to="${esc(id)}" d="M${a.x.toFixed(1)},${a.y.toFixed(1)} C${c1x.toFixed(1)},${c1y.toFixed(1)} ${c2x.toFixed(1)},${c2y.toFixed(1)} ${b.x.toFixed(1)},${b.y.toFixed(1)}" />`);
+  }
+
+  // ---- nodes ----
+  const nextIds = new Set(Object.keys(pos));
+  let enterIndex = 0;
+  const nodesMarkup = Object.keys(pos).map((id) => {
+    const p = pos[id], n = byId(id), st = runState(n);
+    const r = nodeR(id);
+    const L = labels[id];
+    const shape = shapeFor(st.key, r);
+    const isNew = !renderedIds.has(id) && renderedIds.size > 0;
+    const label = L ? `<text class="node-label" text-anchor="${L.anchor}" font-size="${L.fs}">
+        <tspan class="nl-goal" x="${L.x.toFixed(1)}" y="${(L.y0 + L.fs).toFixed(1)}">${esc(L.goalText)}</tspan>
+        <tspan class="nl-state st-${esc(L.st.key)}" x="${L.x.toFixed(1)}" y="${(L.y0 + L.fs + lineH).toFixed(1)}">${esc(L.stateText)}</tspan>
+      </text>` : "";
+    return `<g class="gnode ${esc(st.key)}${L ? " labelled" : ""}${isNew ? " enter" : ""}${selected === id ? " selected" : ""}" data-id="${esc(id)}"
+      ${isNew ? `style="--i:${enterIndex++}"` : ""}
+      transform="translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})" role="button" tabindex="0"
+      aria-label="${esc(nodeName(n))} — ${esc(st.label)}">
+      <circle class="halo" r="${(r + 5).toFixed(1)}" />
+      ${shape}
+      <circle class="hit" r="${(r + 8).toFixed(1)}" />
+      ${label}
+    </g>`;
+  }).join("");
+  renderedIds = nextIds;
+
+  // Provisional viewBox from the node centres only; the real one is measured
+  // from the laid-out nodes and their labels right after insertion.
+  let pa = Infinity, pb = -Infinity, pc = Infinity, pd = -Infinity;
+  for (const id in pos) { const p = pos[id], r = nodeR(id) + 140; pa = Math.min(pa, p.x - r); pb = Math.max(pb, p.x + r); pc = Math.min(pc, p.y - r); pd = Math.max(pd, p.y + r); }
+  const provisional = { x: pa, y: pc, w: Math.max(1, pb - pa), h: Math.max(1, pd - pc) };
+
+  tree.innerHTML = `<svg class="graph-svg" viewBox="${provisional.x.toFixed(1)} ${provisional.y.toFixed(1)} ${provisional.w.toFixed(1)} ${provisional.h.toFixed(1)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Run graph">
+    <defs>
+      <marker id="arrowDep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" class="arrow-dep" />
+      </marker>
+    </defs>
+    <g class="viewport"><g class="edges">${edges.join("")}</g><g class="nodes">${nodesMarkup}</g></g>
+  </svg>`;
+  svg = tree.querySelector("svg.graph-svg");
+  viewport = svg.querySelector(".viewport");
+  home = measureHome(svg, pad);
+  vb = { ...home };
+  if (!hasMoved) view = { x: 0, y: 0, k: 1 };
+  applyVB();
+  applyView();
+  paintGraph();
+  bindNodes();
+  applyFocus();
+  applyVB();
+  tree.querySelectorAll(".gnode.enter").forEach((g) => setTimeout(() => g.classList.remove("enter"), 700));
+}
+
+/* The true bounds of the drawn graph, in user units, read back from the DOM so
+   every label is inside the frame by construction. */
+function measureHome(svg, pad) {
+  const inv = svg.getScreenCTM().inverse();
+  let a = Infinity, b = -Infinity, c = Infinity, d = -Infinity;
+  svg.querySelectorAll(".gnode").forEach((g) => {
+    const r = g.getBoundingClientRect();
+    [[r.left, r.top], [r.right, r.top], [r.left, r.bottom], [r.right, r.bottom]].forEach(([x, y]) => {
+      const p = svg.createSVGPoint(); p.x = x; p.y = y;
+      const u = p.matrixTransform(inv);
+      a = Math.min(a, u.x); b = Math.max(b, u.x); c = Math.min(c, u.y); d = Math.max(d, u.y);
+    });
+  });
+  if (!isFinite(a)) return { x: 0, y: 0, w: 1, h: 1 };
+  return { x: a - pad, y: c - pad, w: (b - a) + pad * 2, h: (d - c) + pad * 2 };
+}
+
+function applyVB() { if (svg && vb) svg.setAttribute("viewBox", `${vb.x.toFixed(1)} ${vb.y.toFixed(1)} ${vb.w.toFixed(1)} ${vb.h.toFixed(1)}`); }
+function applyView() { if (viewport) viewport.setAttribute("transform", `translate(${view.x.toFixed(2)} ${view.y.toFixed(2)}) scale(${view.k.toFixed(4)})`); }
+
+function shapeFor(key, r) {
+  const glyph = GLYPH[key] || "";
+  const text = glyph && r >= 9
+    ? `<text class="glyph" text-anchor="middle" dominant-baseline="central" font-size="${(r * (key === "complete" ? 1.15 : 0.95)).toFixed(1)}">${glyph}</text>`
+    : "";
+  const ring = key === "running" ? `<circle class="ring" r="${(r + 7).toFixed(1)}" />` : "";
+  if (key === "failed") {
+    const s = r * 1.28;
+    return `<polygon class="shape" points="0,${(-s).toFixed(1)} ${(s * 0.87).toFixed(1)},${(s * 0.5).toFixed(1)} ${(-s * 0.87).toFixed(1)},${(s * 0.5).toFixed(1)}" />${text}${ring}`;
+  }
+  if (key === "ready") {
+    const s = r * 1.16;
+    return `<polygon class="shape" points="0,${(-s).toFixed(1)} ${s.toFixed(1)},0 0,${s.toFixed(1)} ${(-s).toFixed(1)},0" />${text}${ring}`;
+  }
+  if (key === "suspended") {
+    const pts = [];
+    for (let i = 0; i < 6; i++) { const a = -Math.PI / 2 + i * Math.PI / 3; pts.push(`${(Math.cos(a) * r * 1.14).toFixed(1)},${(Math.sin(a) * r * 1.14).toFixed(1)}`); }
+    return `<polygon class="shape" points="${pts.join(" ")}" />${text}${ring}`;
+  }
+  return `<circle class="shape" r="${r.toFixed(1)}" />${text}${ring}`;
+}
+
+/* Update status colouring and state words without rebuilding the tree, so a
+   poll never flickers the graph or drops the hover. */
+function paintGraph() {
+  const tree = el("tree");
+  tree.querySelectorAll(".gnode").forEach((g) => {
+    const n = byId(g.dataset.id);
+    if (!n) return;
+    const st = runState(n);
+    const isNew = g.classList.contains("enter");
+    g.setAttribute("class", `gnode ${st.key}${g.classList.contains("labelled") ? " labelled" : ""}${isNew ? " enter" : ""}` +
+      `${selected === g.dataset.id ? " selected" : ""}${hover === g.dataset.id ? " hover" : ""}`);
+    const word = g.querySelector(".nl-state");
+    if (word) {
+      const hidden = childrenOf(g.dataset.id).length - visibleChildren(n).length;
+      word.textContent = (STATE_WORD[st.key] || st.key) + (hidden > 0 ? ` +${hidden}` : "");
+      word.setAttribute("class", `nl-state st-${st.key}`);
+    }
+  });
+  tree.querySelectorAll(".edge-parent").forEach((p) => {
+    const n = byId(p.dataset.to);
+    const st = n ? runState(n).key : "pending";
+    const cls = st === "running" ? "edge-running" : st === "complete" ? "edge-complete" : st === "failed" ? "edge-failed" : "";
+    p.setAttribute("class", "edge edge-parent " + cls);
+  });
+  applyFocus();
+  paintKey = contentSignature();
+}
+
+/* ==================================================================
+   Graph interaction: hover focus, click select, zoom, pan, pinch.
+   ================================================================== */
+function bindNodes() {
+  const tree = el("tree");
+  tree.querySelectorAll(".gnode").forEach((g) => {
+    g.addEventListener("click", () => {
+      if (suppressClick) { suppressClick = false; return; }
+      selectNode(g.dataset.id);
+    });
+    if (window.matchMedia("(hover: hover) and (pointer: fine)").matches) {
+      g.addEventListener("mouseenter", () => { hover = g.dataset.id; applyFocus(); showTooltip(g.dataset.id); });
+      g.addEventListener("mouseleave", () => { hover = null; applyFocus(); hideTooltip(); });
+      g.addEventListener("mousemove", (ev) => positionTooltip(ev.clientX, ev.clientY));
+    }
+    g.addEventListener("focus", () => {
+      hover = g.dataset.id; applyFocus();
+      const r = g.getBoundingClientRect();
+      showTooltip(g.dataset.id, { x: r.left + r.width / 2, y: r.bottom });
+    });
+    g.addEventListener("blur", () => { if (hover === g.dataset.id) { hover = null; applyFocus(); hideTooltip(); } });
+    g.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectNode(g.dataset.id); }
+    });
+  });
+}
+
+function applyFocus() {
+  if (!svg) return;
+  const id = hover || selected;
+  const path = new Set();
+  for (let cur = id ? byId(id) : null; cur; cur = cur.parent ? byId(cur.parent) : null) path.add(cur.id);
+  svg.classList.toggle("svg-focus", !!id);
+  svg.querySelectorAll(".gnode").forEach((g) => {
+    const gid = g.dataset.id;
+    g.classList.toggle("onpath", path.has(gid) && gid !== id);
+    g.classList.toggle("selected", gid === selected);
+    g.classList.toggle("hover", gid === hover);
+    g.classList.toggle("dim", !!id && !path.has(gid) && gid !== id);
+  });
+  svg.querySelectorAll(".edge-parent").forEach((p) => {
+    const to = p.dataset.to, from = byId(to) && byId(to).parent;
+    p.classList.toggle("onpath", !!id && path.has(to) && path.has(from));
+    p.classList.toggle("dim", !!id && !(path.has(to) && path.has(from)));
+  });
+}
+
+function selectNode(id) {
+  const n = byId(id);
+  if (!n) return;
+  if (childrenOf(id).length) {
+    if (expanded.has(id) && selected === id) expanded.delete(id);
+    else expanded.add(id);
+  }
+  selected = id;
+  selectedSig = "";
+  layoutKey = "";
+  renderGraph();
+  setContext(id);
+  tickDetail(true);
+}
+
+/* ---------- zoom / pan / pinch ---------- */
+function toUser(x, y) {
+  const pt = svg.createSVGPoint(); pt.x = x; pt.y = y;
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+function zoomAt(factor, x, y) {
+  if (!svg || !viewport) return;
+  const k = view.k * factor;
+  if (k < 0.55 || k > 18) return;
+  const p = toUser(x, y);
+  view.x = p.x - (p.x - view.x) * factor;
+  view.y = p.y - (p.y - view.y) * factor;
+  view.k = k;
+  hasMoved = true;
+  applyView();
+}
+let resetAnim = null;
+function resetView(animate) {
+  if (!viewport) return;
+  if (!animate || matchMedia("(prefers-reduced-motion: reduce)").matches) { view = { x: 0, y: 0, k: 1 }; hasMoved = false; applyView(); return; }
+  const from = { ...view }, t0 = performance.now(), dur = 280;
+  cancelAnimationFrame(resetAnim);
+  const step = (now) => {
+    const t = Math.min(1, (now - t0) / dur);
+    const e = 1 - Math.pow(1 - t, 3);
+    view.x = from.x * (1 - e); view.y = from.y * (1 - e); view.k = from.k + (1 - from.k) * e;
+    applyView();
+    if (t < 1) resetAnim = requestAnimationFrame(step);
+    else hasMoved = false;
+  };
+  resetAnim = requestAnimationFrame(step);
+}
+
+function bindGraphInteraction() {
+  const frame = el("graph-frame");
+  const pointers = new Map();
+  let panning = false, moved = false, lastX = 0, lastY = 0, pinchDist = 0;
+
+  frame.addEventListener("wheel", (ev) => {
+    if (!svg) return;
+    if (!ev.target.closest("svg.graph-svg")) return;
+    ev.preventDefault();
+    zoomAt(Math.exp(ev.deltaY * 0.0014), ev.clientX, ev.clientY);
+  }, { passive: false });
+
+  frame.addEventListener("dblclick", (ev) => {
+    if (!ev.target.closest("svg.graph-svg")) return;
+    resetView(true);
+  });
+
+  frame.addEventListener("pointerdown", (ev) => {
+    if (!svg || !ev.target.closest("svg.graph-svg")) return;
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    try { frame.setPointerCapture(ev.pointerId); } catch (e) { /* fine */ }
+    if (pointers.size === 1) { panning = true; moved = false; lastX = ev.clientX; lastY = ev.clientY; svg.classList.add("panning"); }
+    else if (pointers.size === 2) { panning = false; const [a, b] = [...pointers.values()]; pinchDist = Math.hypot(a.x - b.x, a.y - b.y); }
+  });
+
+  frame.addEventListener("pointermove", (ev) => {
+    if (!pointers.has(ev.pointerId)) return;
+    pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+    if (pointers.size >= 2) {
+      const [a, b] = [...pointers.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinchDist > 0) zoomAt(pinchDist / d, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      pinchDist = d; moved = true;
+      return;
+    }
+    if (!panning) return;
+    const dx = ev.clientX - lastX, dy = ev.clientY - lastY;
+    if (!moved && Math.hypot(dx, dy) > 4) moved = true;
+    lastX = ev.clientX; lastY = ev.clientY;
+    if (!moved || !vb) return;
+    const m = svg.getScreenCTM();
+    if (!m || !m.a || !m.d) return;
+    view.x -= dx / m.a / view.k; view.y -= dy / m.d / view.k; hasMoved = true;
+    applyView();
+  });
+
+  const end = (ev) => {
+    pointers.delete(ev.pointerId);
+    if (pointers.size === 0) {
+      panning = false; pinchDist = 0;
+      if (svg) svg.classList.remove("panning");
+      if (moved) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 60); moved = false; }
+    }
+  };
+  frame.addEventListener("pointerup", end);
+  frame.addEventListener("pointercancel", end);
+}
+
+/* ---------- tooltip ---------- */
+function positionTooltip(x, y) {
+  const t = el("tooltip");
+  const w = t.offsetWidth || 240, h = t.offsetHeight || 120;
+  let left = x + 16, top = y + 16;
+  if (left + w > window.innerWidth - 8) left = Math.max(8, x - w - 16);
+  if (top + h > window.innerHeight - 8) top = Math.max(8, y - h - 16);
+  t.style.left = left + "px"; t.style.top = top + "px";
+  t.style.transformOrigin = `${left < x ? "right" : "left"} ${top < y ? "bottom" : "top"}`;
+}
+function showTooltip(id, anchor) {
+  const n = byId(id);
+  if (!n) return;
+  const deps = (n.depends_on || []).map((d) => byId(d) ? clip(nodeName(byId(d)), 26) : d);
+  const t = el("tooltip");
+  t.innerHTML = `${esc(n.id)}
+    <div class="tt-goal">${esc(nodeName(n))}</div>
+    <div class="tt-row">${stateChip(n)}</div>
+    ${deps.length ? `<div class="tt-meta">waits on <b>${deps.map(esc).join(", ")}</b></div>` : ""}
+    ${n.activity ? `<div class="tt-meta">${esc(clip(firstLine(n.activity), 140))}</div>` : ""}`;
+  if (tooltipSeen) t.classList.add("instant"); else { t.classList.remove("instant"); tooltipSeen = true; }
+  t.classList.add("show"); t.setAttribute("aria-hidden", "false");
+  if (anchor) positionTooltip(anchor.x, anchor.y);
+}
+function hideTooltip() {
+  const t = el("tooltip");
+  if (t) { t.classList.remove("show"); t.setAttribute("aria-hidden", "true"); }
+}
+
+/* ==================================================================
+   The butler conversation — the only steering surface. The selected
+   node rides along as context so "reopen this" is unambiguous.
+   ================================================================== */
+const ACTION_WORD = { none: "No change needed", reopen: "Reopened", split: "Added steps", amend: "Amended", edit_contract: "Edited the contract", retry: "Retried", resolve: "Settled" };
+const EXAMPLES = [
+  "The last step did not do what I asked",
+  "Add a step that checks it on my phone",
+  "This part sounds wrong, redo it",
+];
 function conversationSig() {
-  return JSON.stringify(conversation.map((t) => [
-    t.id, t.status, (t.reply || "").length, t.error || "", t.plan && t.plan.rationale,
-    (t.tree_changes || []).length,
-  ]));
+  return JSON.stringify(conversation.map((t) => [t.id, t.status, (t.reply || "").length, t.error || "", t.plan && t.plan.rationale, (t.tree_changes || []).length]));
 }
 function renderTurn(t) {
   const user = `<div class="msg user">${esc(t.message)}</div>`;
   let butler;
   if (t.status === "working") {
-    butler = `<div class="msg butler working"><span class="wdots"><i></i><i></i><i></i></span>
-      The butler is inspecting the tree and applying the smallest correct change…</div>`;
+    butler = `<div class="msg butler working"><span class="wdots"><i></i><i></i><i></i></span>Reading the run and making the smallest correct change…</div>`;
   } else if (t.status === "failed") {
-    butler = `<div class="msg butler err"><b>Request failed.</b> ${esc(t.error || "unknown error")}</div>`;
+    butler = `<div class="msg butler err"><b>That request failed.</b> ${esc(t.error || "unknown error")}</div>`;
   } else {
     butler = renderReply(t);
   }
-  return `<div class="chat-turn">${user}${butler}</div>`;
+  return `<div class="turn">${user}${butler}</div>`;
 }
 function renderReply(t) {
   const plan = t.plan || {};
   const action = plan.action || "none";
   const nodes = plan.nodes || [];
   const changes = t.tree_changes || [];
-  const word = ACTION_WORD[action] || action;
   const head = `<div class="plan-head">
-      <span class="plan-action ${esc(action)}">${esc(word)}</span>
-      ${nodes.length ? `<span class="plan-nodes mono">${nodes.map(esc).join(", ")}</span>` : ""}
+      <span class="plan-action ${esc(action)}">${esc(ACTION_WORD[action] || action)}</span>
+      ${nodes.length ? `<span class="plan-nodes">${nodes.map(esc).join(", ")}</span>` : ""}
     </div>`;
   const why = plan.rationale ? `<div class="plan-why">${esc(plan.rationale)}</div>` : "";
   const changeList = changes.length
-    ? `<div class="changes"><div class="changes-title">Tree changes</div>${changes.map((c) =>
-        `<div class="change mono">${esc(c.id)} ${esc(c.from)} → ${esc(c.to)}</div>`).join("")}</div>`
+    ? `<div class="changes"><div class="changes-title">Changed in the run</div>${changes.map((c) => `<div class="change">${esc(c.id)} · ${esc(c.from)} → ${esc(c.to)}</div>`).join("")}</div>`
     : "";
-  const notes = t.reply
-    ? `<details class="disclosure reply"><summary>Butler's notes</summary><div class="inner"><pre class="box">${esc(t.reply)}</pre></div></details>`
-    : "";
+  const notes = t.reply ? `<details class="reply"><summary>Full reply</summary><pre>${esc(t.reply)}</pre></details>` : "";
   return `<div class="msg butler">${head}${why}${changeList}${notes}</div>`;
+}
+function chatEmpty() {
+  return `<div class="chat-empty">
+    <p class="empty">Nothing has been asked yet. Say what is wrong, or what should change.</p>
+    <div class="examples">${EXAMPLES.map((e) => `<button type="button" class="example" data-example="${esc(e)}">${esc(e)}</button>`).join("")}</div>
+  </div>`;
 }
 function renderChat(force) {
   const log = el("chat-log");
   if (!log) return;
   const sig = conversationSig();
   if (!force && sig === chatSig) return;
-  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
   chatSig = sig;
-  log.innerHTML = conversation.length
-    ? conversation.map(renderTurn).join("")
-    : '<div class="state-note">Ask the butler to change the plan in plain language — it decides the smallest correct change.</div>';
+  log.innerHTML = conversation.length ? conversation.map(renderTurn).join("") : chatEmpty();
   const last = conversation[conversation.length - 1];
   chatBusy = !!(last && last.status === "working");
   const send = el("chat-send");
@@ -997,16 +1091,18 @@ async function pollConversation(force) {
   }
 }
 async function sendChat(ev) {
-  ev.preventDefault();
+  if (ev) ev.preventDefault();
   const input = el("chat-input");
   const message = (input.value || "").trim();
   if (!message || chatBusy) return;
   const send = el("chat-send");
   send.disabled = true;
   try {
-    const res = await jpost("/api/butler", { message });
+    const payload = { message };
+    if (selected) payload.node = selected;
+    const res = await jpost("/api/butler", payload);
     if (res && res.ok) {
-      input.value = "";
+      input.value = ""; input.style.height = "";
       await pollConversation(true);
     } else {
       toast((res && res.error) || "the butler could not start", true);
@@ -1017,839 +1113,169 @@ async function sendChat(ev) {
     send.disabled = false;
   }
 }
-
-/* ---------- overview ---------- */
-function renderOverview() {
-  const c = (state && state.counts) || {};
-  const total = c.total || (state ? state.nodes.length : 0) || 0;
-  const complete = c.complete || 0;
-  const refused = (state && state.trace && state.trace.refused) || 0;
-  const overall = (state && state.overall_status) || (state && state.root_status) || "pending";
-  const rootGoal = (state && (state.root_goal || (byId("root") || {}).goal)) || "this project";
-  const pct = total ? Math.round((complete / total) * 100) : 0;
-
-  const running = state ? state.nodes.filter((n) => n.status === "running") : [];
-  const lead = running[0] || null;
-  const now = lead
-    ? `<div class="nowrunning">
-         <span class="label">● Now running</span>
-         <span class="who">${esc(nodeName(lead))}</span>
-         <span class="act" title="${esc(lead.activity || "")}">${esc(lead.activity || "starting…")}</span>
-       </div>`
-    : `<div class="nowrunning idle">
-         <span class="label">Run</span>
-         <span class="act">${state && state.nodes.some((n) => n.status === "failed")
-            ? "Stopped with failures. Select a failed node to retry it or steer the tree below."
-            : "No node is running right now."}</span>
-       </div>`;
-
-  el("overview").innerHTML = `
-    <div class="overview-top">
-      <div class="overview-goal">
-        <div class="eyebrow">Overall goal</div>
-        <h1 class="goal-title" title="${esc(rootGoal)}">${esc(rootGoal)}</h1>
-        <div class="goal-sub">${esc(state ? state.project : "")}</div>
-      </div>
-      <div class="stats">
-        ${stat("complete", complete, "complete")}
-        ${stat("running", c.running || 0, "running")}
-        ${stat("pending", c.pending || 0, "pending")}
-        ${stat("failed", c.failed || 0, "failed")}
-        ${stat("split", c.split || 0, "split")}
-        ${stat("refused", refused, "refused")}
-      </div>
-    </div>
-    <div class="progress">
-      <div class="progress-head">
-        <span><strong style="color:var(--text)">${complete}</strong> of ${total} nodes complete</span>
-        <span>${chip(overall)}</span>
-      </div>
-      <div class="bar"><span style="width:${pct}%"></span></div>
-    </div>
-    ${now}`;
-}
-function stat(kind, n, label) {
-  return `<div class="stat is-${kind}"><div class="n">${n}</div><div class="k">${label}</div></div>`;
-}
-
-/* ---------- task graph ---------- */
-let view = "graph";
-
-function renderTree() {
-  el("treeCount").textContent = state ? state.nodes.length + (state.nodes.length === 1 ? " node" : " nodes") : "";
-  el("show-deps").checked = showDeps;
-  renderNextUp();
-  if (!state || !state.nodes.length) {
-    el("tree").innerHTML = '<div class="state-note">No nodes yet. This project has not been initialised.</div>';
-    return;
-  }
-  if (view === "rows") {
-    renderRows();
-    bindNodeEvents();
-    applyFocus();
-  } else {
-    const rebuilt = renderGraph();
-    if (rebuilt) bindNodeEvents();
-    applyFocus();
-  }
-}
-
-/* "Next up" is the set of nodes that can start right now: pending with every
-   dependency complete. That, plus each node's run-state text, is how a viewer
-   sees what runs in parallel and what the sequence is. */
-function renderNextUp() {
-  const bar = el("nextup");
-  if (!state || !state.nodes.length) { bar.className = "nextup idle"; bar.innerHTML = ""; return; }
-  const ready = readyNodes();
-  const running = state.nodes.filter((n) => n.status === "running");
-  if (ready.length) {
-    const shown = ready.slice(0, 6).map((n) => `<span class="who" title="${esc(n.id)}">${esc(nodeName(n))}</span>`);
-    const more = ready.length > shown.length ? ` <span class="count">+${ready.length - shown.length} more</span>` : "";
-    bar.className = "nextup";
-    bar.innerHTML = `<span class="label">Next up</span><span class="who">${shown.join('<span class="sep"> · </span>')}</span>${more}`;
-    return;
-  }
-  bar.className = "nextup idle";
-  if (running.length) {
-    bar.innerHTML = `<span class="label">Next up</span><span class="note">Nothing new can start until the running node finishes.</span>`;
-  } else if (state.nodes.some((n) => n.status === "failed")) {
-    bar.innerHTML = `<span class="label">Next up</span><span class="note">A node failed. Nothing will start until it is retried or steered.</span>`;
-  } else if (state.nodes.every((n) => n.status === "complete")) {
-    bar.innerHTML = `<span class="label">Next up</span><span class="note">All nodes are done.</span>`;
-  } else {
-    bar.innerHTML = `<span class="label">Next up</span><span class="note">No node is runnable — every pending node is waiting on a dependency.</span>`;
-  }
-}
-
-function renderRows() {
-  el("graph-scroll").classList.remove("graph-view");
-  const build = (nodes) => {
-    if (!nodes.length) return "";
-    return `<ul>${nodes.map((n) => {
-      const kids = childrenOf(n.id);
-      const badges =
-        (n.stale ? ' <span class="badge warn">stale</span>' : "") +
-        (n.tampered ? ' <span class="badge bad">tampered</span>' : "");
-      const activity = n.activity
-        ? `<div class="row-activity" title="${esc(n.activity)}">${esc(clip(n.activity, 120))}</div>`
-        : "";
-      return `<li>
-        <button class="row ${n.status === "running" ? "running" : ""} ${selected === n.id ? "selected" : ""}"
-                data-id="${esc(n.id)}" title="${esc(n.id)}\n${esc(n.goal || "")}">
-          <span class="doto" style="background:var(--${esc(n.status)},var(--pending))"></span>
-          <span class="row-main">
-            <span class="row-title">${esc(nodeName(n))}</span>
-            ${activity}
-          </span>
-          <span style="display:flex;align-items:center;gap:6px;flex:none">${stateChip(n)}<span class="row-tag">${esc(shortId(n.id))}</span></span>
-        </button>
-        ${build(kids)}
-      </li>`;
-    }).join("")}</ul>`;
-  };
-  const root = byId("root");
-  const top = root ? [root] : state.nodes.filter((n) => !n.parent);
-  el("tree").innerHTML = build(top) || '<div class="state-note">No nodes.</div>';
-  el("tree").style.width = "";
-  el("tree").style.height = "";
-}
-
-/* Edge state rules:
-   - a parent edge carries the child's status;
-   - a dependency edge is failed if the node it feeds failed, active while the
-     dependent (or the dependency itself) is running, complete once the
-     dependency is done, and waiting otherwise. Every state is also named in
-     the legend, so colour is never the only carrier. */
-function edgeState(status) {
-  if (status === "failed") return "failed";
-  if (status === "running") return "active";
-  if (status === "complete") return "complete";
-  return "pending";
-}
-function depEdgeState(dep, node) {
-  if (node.status === "failed" || dep.status === "failed") return "failed";
-  if (node.status === "running" || dep.status === "running") return "active";
-  if (dep.status === "complete") return "complete";
-  return "pending";
-}
-
-/* ------------------------------------------------------------------
-   The fractal radial layout.
-
-   Each subtree owns an angular wedge of the circle, subdivided by leaf
-   weight as you descend. Every level sits on its own ring, and both the
-   ring spacing and the node size shrink by the same ratio at every step,
-   so the pattern repeats at every scale: a self-similar, recursive
-   structure that reads as one organic object. The whole thing is a single
-   SVG with a computed viewBox, so it always fits the viewport - no
-   horizontal scrolling, whatever the node count.
-
-   Descendency is always drawn. Dependency edges are the ones that make a
-   dense graph unreadable, so they stay hidden until a node is hovered or
-   selected (or the All dependencies toggle is on).
-   ------------------------------------------------------------------ */
-const GLYPH = { complete: "✓", running: "●", ready: "◇", waiting: "·", failed: "✕", split: "◆", suspended: "≡", pending: "○" };
-const STATUS_WORD = { complete: "done", running: "run", ready: "ready", waiting: "wait", failed: "failed", split: "split", suspended: "held", pending: "pending" };
-
-function graphSignature() {
-  return JSON.stringify(state.nodes.map((n) => [n.id, n.parent, n.depth, n.status, n.goal, n.depends_on, n.stale, n.tampered]));
-}
-
-function renderGraph() {
-  const tree = el("tree");
-  const scroll = el("graph-scroll");
-  const nodes = state.nodes;
-  const root = byId("root") || nodes.find((n) => !n.parent);
-  if (!root) { tree.innerHTML = '<div class="state-note">No root node.</div>'; return true; }
-  scroll.classList.add("graph-view");
-
-  const sig = graphSignature();
-  if (sig === graphSig && tree.querySelector("svg.graph-svg") && graphAPI) {
-    return false; // structure unchanged: keep zoom/pan, just refresh focus
-  }
-  graphSig = sig;
-  hover = null;
-  hideTooltip();
-
-  // Leaf weight: how much of the circle a subtree deserves.
-  const weight = {};
-  (function measure(n) {
-    const kids = childrenOf(n.id);
-    if (!kids.length) { weight[n.id] = 1; return 1; }
-    let w = 0;
-    kids.forEach((k) => { w += measure(k); });
-    weight[n.id] = w;
-    return w;
-  })(root);
-
-  let maxDepth = 0;
-  (function depth(n, d) { if (d > maxDepth) maxDepth = d; childrenOf(n.id).forEach((k) => depth(k, d + 1)); })(root, 0);
-
-  // Rings tighten as they go out (radius ~ d^p), and both node and type size
-  // shrink on the same curve, so the pattern repeats at every scale instead of
-  // a deep chain stretching to infinity.
-  const S = 0.82;
-  const ringR = [0];
-  for (let d = 1; d <= maxDepth; d++) ringR[d] = 92 * Math.pow(d, 0.72);
-  const baseNodeR = (d) => Math.max(4.5, 15 * Math.pow(S, d));
-  // Legible type: never below 11px, and it shrinks gently with depth.
-  const fsOf = (d) => Math.max(11, 13 * Math.pow(0.94, d));
-
-  // Recursive placement: a node's angle is its wedge's bisector.
-  const pos = {};
-  const place = (n, a0, a1, d) => {
-    const span = a1 - a0;
-    const mid = (a0 + a1) / 2;
-    const r = ringR[d];
-    const x = Math.cos(mid) * r, y = Math.sin(mid) * r;
-    const arc = Math.max(0.001, r * span);
-    // Never wider than its own wedge's arc can hold: crowded siblings simply
-    // render smaller instead of overlapping.
-    let nodeR = d === 0 ? 13 : Math.min(baseNodeR(d), 0.34 * arc);
-    nodeR = Math.max(3.6, nodeR);
-    pos[n.id] = { x, y, angle: mid, a0, a1, span, r, nodeR, depth: d };
-    const kids = childrenOf(n.id);
-    const tot = weight[n.id] || 1;
-    let cursor = a0;
-    kids.forEach((k) => {
-      const w = span * (weight[k.id] / tot);
-      place(k, cursor, cursor + w, d + 1);
-      cursor += w;
-    });
-  };
-  place(root, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2, 0);
-
-  // Labels. Fewer by default: only the root and the first generation are
-  // labelled up front; deeper labels are gathered for a node and revealed on
-  // hover or selection, so a wide graph stays readable. A leader line ties each
-  // label to its dot, and a candidate that would collide is hidden (the tooltip
-  // always has goal, status and counts).
-  const labels = {};
-  for (const id in pos) {
-    const p = pos[id];
-    const n = byId(id);
-    const st = runState(n);
-    const fs = fsOf(p.depth);
-    const arc = Math.max(0.001, p.r * p.span);
-    const maxLen = Math.floor(arc / (fs * 0.58));
-    const idTxt = shortId(id);
-    const statusWord = STATUS_WORD[st.key] || st.key;
-    let goalTxt = "";
-    if (p.depth > 0 && p.depth <= 2 && maxLen >= 16) {
-      goalTxt = clip(nodeName(n), Math.max(10, Math.min(22, maxLen - idTxt.length - statusWord.length - 2)));
-      if (goalTxt.length < 8) goalTxt = "";
-    }
-    labels[id] = {
-      fs, idTxt, statusWord, goalTxt, st: st,
-      x: null, two: false, below: false, byDefault: p.depth <= 1,
-    };
-  }
-
-  const occupied = [];
-  for (const id in pos) {
-    const p = pos[id];
-    occupied.push([p.x - p.nodeR - 2, p.x + p.nodeR + 2, p.y - p.nodeR - 2, p.y + p.nodeR + 2]);
-  }
-  const hits = (b) => occupied.some((o) => !(b[1] < o[0] || b[0] > o[1] || b[3] < o[2] || b[2] > o[3]));
-  const byDepth = Object.keys(pos).sort((a, b) => pos[a].depth - pos[b].depth);
-  for (const id of byDepth) {
-    const p = pos[id], L = labels[id];
-    const idLen = L.idTxt.length + L.statusWord.length + 1;
-    if (p.depth === 0) {
-      // The root sits at the centre with children all around, so its label
-      // goes below the core: a side label would run into a child.
-      const w = Math.max(idLen, L.goalTxt.length) * L.fs * 0.58;
-      const box = [p.x - w / 2 - 2, p.x + w / 2 + 2, p.y + p.nodeR + 4, p.y + p.nodeR + 4 + L.fs * 1.8];
-      if (!hits(box)) { occupied.push(box); L.x = p.x; L.below = true; }
-      else { labels[id] = null; }
-      continue;
-    }
-    const right = p.x >= 0;
-    const x = right ? p.x + p.nodeR + 7 : p.x - p.nodeR - 7;
-    const idW = idLen * L.fs * 0.58;
-    const idBox = right ? [x, x + idW, p.y - L.fs * 0.6, p.y + L.fs * 0.6] : [x - idW, x, p.y - L.fs * 0.6, p.y + L.fs * 0.6];
-    if (L.goalTxt) {
-      const w = Math.max(idLen, L.goalTxt.length) * L.fs * 0.58;
-      const gBox = right ? [x, x + w, p.y - L.fs * 1.0, p.y + L.fs * 1.0] : [x - w, x, p.y - L.fs * 1.0, p.y + L.fs * 1.0];
-      if (!hits(gBox)) { occupied.push(gBox); L.x = x; L.two = true; continue; }
-      L.goalTxt = "";
-    }
-    if (!hits(idBox)) { occupied.push(idBox); L.x = x; L.two = false; }
-    else { labels[id] = null; }
-  }
-
-  // The viewBox is the bounding box of every dot and every label that survived.
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const b of occupied) {
-    if (b[0] < minX) minX = b[0];
-    if (b[1] > maxX) maxX = b[1];
-    if (b[2] < minY) minY = b[2];
-    if (b[3] > maxY) maxY = b[3];
-  }
-
-  // The active path: every running node plus its ancestors.
-  const activeIds = new Set();
-  for (const n of nodes) {
-    if (n.status !== "running") continue;
-    for (let cur = n; cur; cur = cur.parent ? byId(cur.parent) : null) activeIds.add(cur.id);
-  }
-  const pathStateOf = (n) => n.status === "failed" ? "failed" : activeIds.has(n.id) ? "active" : edgeState(n.status);
-
-  const parentEdges = [];
-  for (const n of nodes) {
-    if (!n.parent || !pos[n.parent] || !pos[n.id]) continue;
-    const a = pos[n.parent], b = pos[n.id];
-    parentEdges.push(`<path class="edge edge-parent edge-${pathStateOf(n)}" data-edge="parent" data-from="${esc(n.parent)}" data-to="${esc(n.id)}" d="M${a.x},${a.y} L${b.x},${b.y}" />`);
-  }
-
-  const depEdges = [];
-  for (const n of nodes) {
-    if (!pos[n.id]) continue;
-    (n.depends_on || []).forEach((d, k) => {
-      const dep = byId(d), a = pos[d], b = pos[n.id];
-      if (!dep || !a || !b) return;
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-      const ml = Math.hypot(mx, my) || 1;
-      const off = (k % 3 - 1) * 10 + (k > 2 ? k * 4 : 0);
-      const cx = mx + (mx / ml) * (ml * 0.3 + 20) + (-dy / len) * off;
-      const cy = my + (my / ml) * (ml * 0.3 + 20) + (dx / len) * off;
-      const st = n.status === "failed" || dep.status === "failed"
-        ? "failed"
-        : activeIds.has(n.id) || dep.status === "running"
-          ? "active"
-          : depEdgeState(dep, n);
-      depEdges.push(`<path class="edge edge-dep edge-${st}" data-edge="dep" data-from="${esc(d)}" data-to="${esc(n.id)}" marker-end="url(#arrowDep)" d="M${a.x},${a.y} Q${cx},${cy} ${b.x},${b.y}" />`);
-    });
-  }
-
-  // No decorative ring frame: the globe reads from the radial node
-  // arrangement and its edges alone.
-  const nodeMarkup = nodes.filter((n) => pos[n.id]).map((n) => {
-    const p = pos[n.id], L = labels[n.id];
-    const rightHalf = p.x >= 0;
-    const anchor = rightHalf ? "start" : "end";
-    const glyph = p.nodeR >= 6 ? `<text class="node-glyph" text-anchor="middle" dominant-baseline="central" font-size="${(p.nodeR * 1.05).toFixed(1)}">${GLYPH[runState(n).key] || "○"}</text>` : "";
-    let label = "", leader = "";
-    if (L && L.x != null) {
-      if (L.below) {
-        label = `<text class="node-label" text-anchor="middle" dominant-baseline="central" font-size="${L.fs.toFixed(1)}" y="${(p.nodeR + L.fs * 1.2).toFixed(1)}">
-          <tspan class="nl-id" x="0" y="0">${esc(L.idTxt)}&#160;</tspan><tspan class="nl-st st-${esc(L.st.key)}" y="0">${esc(L.statusWord)}</tspan>
-        </text>`;
-      } else {
-        const lx = L.x - p.x;
-        const y1 = L.two ? (-L.fs * 0.45).toFixed(1) : "0";
-        const y2 = (L.fs * 0.7).toFixed(1);
-        const goal = L.goalTxt ? `<tspan class="nl-goal" x="${lx.toFixed(1)}" y="${y2}">${esc(L.goalTxt)}</tspan>` : "";
-        const from = rightHalf ? p.nodeR + 2 : -(p.nodeR + 2);
-        leader = `<line class="leader" x1="${from.toFixed(1)}" y1="0" x2="${lx.toFixed(1)}" y2="0" />`;
-        label = `<text class="node-label" text-anchor="${anchor}" dominant-baseline="central" font-size="${L.fs.toFixed(1)}">
-          <tspan class="nl-id" x="${lx.toFixed(1)}" y="${y1}">${esc(L.idTxt)}&#160;</tspan><tspan class="nl-st st-${esc(L.st.key)}" y="${y1}">${esc(L.statusWord)}</tspan>${goal}
-        </text>`;
-      }
-    }
-    const collapsed = L && !L.byDefault ? " hide-label" : "";
-    return `<g class="gnode ${esc(runState(n).key)}${n.status === "running" ? " running" : ""}${selected === n.id ? " selected" : ""}${collapsed}"
-      data-id="${esc(n.id)}" data-depth="${p.depth}" transform="translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})"
-      role="button" tabindex="0" aria-label="${esc(nodeName(n))} — ${esc(runState(n).label)}">
-      <circle class="node-dot" r="${p.nodeR.toFixed(1)}" />
-      ${glyph}
-      ${leader}
-      ${label}
-    </g>`;
-  }).join("");
-
-  const pad = 30;
-  const vb = { x: minX - pad, y: minY - pad, w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2 };
-
-  tree.style.width = "";
-  tree.style.height = "";
-  tree.innerHTML = `<svg class="graph-svg" viewBox="${vb.x.toFixed(1)} ${vb.y.toFixed(1)} ${vb.w.toFixed(1)} ${vb.h.toFixed(1)}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Task graph">
-    <defs>
-      <marker id="arrowDep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
-        <path d="M0,0 L10,5 L0,10 z" class="arrow-dep" />
-      </marker>
-    </defs>
-    <g class="edges">${parentEdges.join("")}${depEdges.join("")}</g>
-    <g class="nodes">${nodeMarkup}</g>
-  </svg>`;
-
-  const svg = tree.querySelector("svg.graph-svg");
-  graphAPI = { svg, vb, home: { x: vb.x, y: vb.y, w: vb.w, h: vb.h } };
-  applyViewBox();
-  return true;
-}
-
-function applyViewBox() {
-  if (!graphAPI || !graphAPI.svg) return;
-  const v = graphAPI.vb;
-  graphAPI.svg.setAttribute("viewBox", `${v.x} ${v.y} ${v.w} ${v.h}`);
-}
-
-/* Focus is one rule set shared by selection and hover: the path from the
-   root lights up, and dependency edges appear for the focused node. */
-function applyFocus() {
-  const tree = el("tree");
-  if (!tree) return;
-  const id = hover || selected;
-  const pathSet = new Set();
-  for (let cur = id ? byId(id) : null; cur; cur = cur.parent ? byId(cur.parent) : null) pathSet.add(cur.id);
-  tree.querySelectorAll(".edge-parent").forEach((p) => {
-    p.classList.toggle("onpath", !!id && pathSet.has(p.dataset.to));
-  });
-  tree.querySelectorAll(".edge-dep").forEach((p) => {
-    const show = showDeps || (!!id && (p.dataset.from === id || p.dataset.to === id));
-    p.classList.toggle("show", show);
-  });
-  tree.querySelectorAll(".gnode").forEach((g) => {
-    const gid = g.dataset.id;
-    g.classList.toggle("onpath", !!id && pathSet.has(gid) && gid !== id);
-    g.classList.toggle("selected", gid === selected);
-    g.classList.toggle("hover", gid === hover);
-    // Fewer labels by default: only the root and the first generation stay
-    // labelled; a deeper node's label is revealed while it is hovered or
-    // selected, and hidden again after. The layout depth is `data-depth`, not
-    // the store's `depth` (which counts differently).
-    const depth = Number(g.dataset.depth || 0);
-    g.classList.toggle("hide-label", !(depth <= 1 || gid === id));
-  });
-}
-
-/* ---------- node tooltip ---------- */
-function positionTooltip(x, y) {
-  const t = el("gtt");
-  const pad = 14;
-  const w = t.offsetWidth || 240, h = t.offsetHeight || 120;
-  let left = x + 16, top = y + 16;
-  if (left + w > window.innerWidth - 8) left = Math.max(8, x - w - 16);
-  if (top + h > window.innerHeight - 8) top = Math.max(8, y - h - 16);
-  t.style.left = left + "px";
-  t.style.top = top + "px";
-  // Origin-aware: the tooltip grows out of the corner nearest the pointer.
-  t.style.transformOrigin = `${left < x ? "right" : "left"} ${top < y ? "bottom" : "top"}`;
-}
-function showTooltip(id, anchor) {
+function setContext(id) {
   const n = byId(id);
-  if (!n) return;
-  const st = runState(n);
-  const deps = (n.depends_on || []).filter((d) => byId(d)).length;
-  const dependents = state.nodes.filter((x) => (x.depends_on || []).includes(id)).length;
-  const desc = descendantsOf(id).length;
-  const t = el("gtt");
-  t.innerHTML = `
-    <div class="gtt-id mono">${esc(n.id)}</div>
-    <div class="gtt-goal">${esc(nodeName(n))}</div>
-    <div class="gtt-row">${stateChip(n)}<span class="gtt-metric">depth ${esc(n.depth)}</span></div>
-    <div class="gtt-metrics">
-      <span>deps <b>${deps}</b></span>
-      <span>dependents <b>${dependents}</b></span>
-      <span>descendants <b>${desc}</b></span>
-    </div>
-    ${n.activity ? `<div class="gtt-act">▸ ${esc(clip(n.activity, 150))}</div>` : ""}`;
-  if (tooltipSeen) t.classList.add("instant");
-  else { t.classList.remove("instant"); tooltipSeen = true; }
-  t.classList.add("show");
-  t.setAttribute("aria-hidden", "false");
-  if (anchor) positionTooltip(anchor.x, anchor.y);
-}
-function hideTooltip() {
-  const t = el("gtt");
-  if (t) { t.classList.remove("show"); t.setAttribute("aria-hidden", "true"); }
+  selectedContext = n ? id : null;
+  const box = el("chat-context");
+  if (!box) return;
+  if (!n) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML = `Asking about <span class="ctx">${esc(clip(nodeName(n), 70))}</span> <button type="button" id="ctx-clear" aria-label="Clear the selected step">clear</button>`;
 }
 
-/* ---------- graph interaction ---------- */
-function bindNodeEvents() {
-  const tree = el("tree");
-  tree.querySelectorAll(".row, .gnode").forEach((b) => {
-    b.addEventListener("click", () => {
-      if (suppressClick) { suppressClick = false; return; }
-      selectNode(b.dataset.id);
-    });
-  });
-  tree.querySelectorAll(".gnode").forEach((g) => {
-    g.addEventListener("mouseenter", () => { hover = g.dataset.id; applyFocus(); showTooltip(g.dataset.id); });
-    g.addEventListener("mouseleave", () => { hover = null; applyFocus(); hideTooltip(); });
-    g.addEventListener("mousemove", (ev) => positionTooltip(ev.clientX, ev.clientY));
-    g.addEventListener("focus", () => {
-      const r = g.getBoundingClientRect();
-      hover = g.dataset.id; applyFocus();
-      showTooltip(g.dataset.id, { x: r.left, y: r.bottom });
-    });
-    g.addEventListener("blur", () => { hover = null; applyFocus(); hideTooltip(); });
-    g.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectNode(g.dataset.id); }
-    });
-  });
-}
-
-function zoomBy(factor, clientX, clientY) {
-  if (!graphAPI || !graphAPI.svg) return;
-  const v = graphAPI.vb, home = graphAPI.home;
-  const rect = graphAPI.svg.getBoundingClientRect();
-  const cx = clientX == null ? v.x + v.w / 2 : v.x + ((clientX - rect.left) / rect.width) * v.w;
-  const cy = clientY == null ? v.y + v.h / 2 : v.y + ((clientY - rect.top) / rect.height) * v.h;
-  const w = v.w * factor, h = v.h * factor;
-  if (w < home.w * 0.15 || w > home.w * 12) return;
-  v.x = cx - (cx - v.x) * factor;
-  v.y = cy - (cy - v.y) * factor;
-  v.w = w; v.h = h;
-  applyViewBox();
-}
-function fitGraph() {
-  if (!graphAPI) return;
-  graphAPI.vb = { ...graphAPI.home };
-  applyViewBox();
-}
-
-function bindGraphInteraction() {
-  const scroll = el("graph-scroll");
-
-  scroll.addEventListener("wheel", (ev) => {
-    if (view !== "graph" || !graphAPI || !graphAPI.svg) return;
-    if (!ev.target.closest("svg.graph-svg")) return;
-    ev.preventDefault();
-    zoomBy(Math.exp(ev.deltaY * 0.0012), ev.clientX, ev.clientY);
-  }, { passive: false });
-
-  let panning = false, moved = false, lastX = 0, lastY = 0;
-  scroll.addEventListener("pointerdown", (ev) => {
-    if (view !== "graph" || !graphAPI || !graphAPI.svg) return;
-    if (!ev.target.closest("svg.graph-svg")) return;
-    panning = true; moved = false; lastX = ev.clientX; lastY = ev.clientY;
-    graphAPI.svg.classList.add("panning");
-    try { scroll.setPointerCapture(ev.pointerId); } catch (e) { /* no capture, still fine */ }
-  });
-  scroll.addEventListener("pointermove", (ev) => {
-    if (!panning || !graphAPI) return;
-    const dx = ev.clientX - lastX, dy = ev.clientY - lastY;
-    if (!moved && Math.hypot(dx, dy) > 3) moved = true;
-    lastX = ev.clientX; lastY = ev.clientY;
-    if (!moved) return;
-    const rect = graphAPI.svg.getBoundingClientRect();
-    const v = graphAPI.vb;
-    v.x -= dx * (v.w / rect.width);
-    v.y -= dy * (v.h / rect.height);
-    applyViewBox();
-  });
-  const endPan = (ev) => {
-    if (!panning) return;
-    panning = false;
-    if (graphAPI && graphAPI.svg) graphAPI.svg.classList.remove("panning");
-    if (moved) { suppressClick = true; setTimeout(() => { suppressClick = false; }, 60); }
-    try { scroll.releasePointerCapture(ev.pointerId); } catch (e) { /* ignore */ }
-  };
-  scroll.addEventListener("pointerup", endPan);
-  scroll.addEventListener("pointercancel", endPan);
-}
-
-function setView(next) {
-  view = next;
-  el("view-graph").classList.toggle("active", next === "graph");
-  el("view-rows").classList.toggle("active", next === "rows");
-  el("view-graph").setAttribute("aria-pressed", next === "graph");
-  el("view-rows").setAttribute("aria-pressed", next === "rows");
-  hideTooltip();
-  renderTree();
-}
-
-function selectNode(id) {
-  if (selected === id) return;
-  selected = id;
-  selectedSig = "";
-  // Re-render (a no-op when the graph structure is unchanged) so the selected
-  // node's dependency edges appear and the root path lights up.
-  renderTree();
-  tickDetail(true);
-}
-
-/* ---------- detail ---------- */
-function listOr(items, renderItem) {
+/* ==================================================================
+   Node detail — strictly read-only: description and live events.
+   ================================================================== */
+function listOr(items, render) {
   if (!items || !items.length) return '<div class="empty">none</div>';
-  return `<ul class="clean">${items.map((i) => {
-    return `<li>${renderItem ? renderItem(i) : esc(i)}</li>`;
-  }).join("")}</ul>`;
+  return `<ul class="clean">${items.map((i) => `<li>${render ? render(i) : esc(i)}</li>`).join("")}</ul>`;
 }
-
-function eventSummary(e) {
-  if (!e) return "";
-  for (const k of ["error", "reason", "detail", "summary", "message", "assumption", "payload"]) {
-    if (e[k] != null && e[k] !== "") return typeof e[k] === "string" ? e[k] : JSON.stringify(e[k]);
-  }
-  const prim = Object.entries(e)
-    .filter(([k, v]) => !["at", "node", "event"].includes(k) && v != null && typeof v !== "object")
-    .map(([k, v]) => k + "=" + v);
-  return prim.join("  ");
-}
-function eventList(events) {
-  if (!events || !events.length) return '<div class="empty">no events yet</div>';
-  return `<div class="events">${events.map((e) => {
-    const name = (e && e.event) || "event";
-    const bad = name === "error" || (e && e.error) || /fail|revert|tamper|exhaust/.test(name);
-    const msg = eventSummary(e);
-    return `<div class="event ${bad ? "err" : ""}">
-      <span class="t">${esc(when(e && e.at))}</span>
-      <span class="name">${esc(name)}</span>
-      <span class="msg" title="${esc(msg)}">${esc(clip(msg, 300))}</span>
-    </div>`;
-  }).join("")}</div>`;
-}
-
-/* Render a diff the way git prints one: file headers, @@ hunk headers, green
-   additions, red removals, context lines, monospace, scrollable both ways.
-   The +, - and @@ markers stay in the text so colour is never the only cue. */
 function diffLineClass(line) {
   if (line.startsWith("diff --git ") || line.startsWith("diff --cc ")) return "file";
   if (line.startsWith("@@")) return "hunk";
   if (line.startsWith("+++") || line.startsWith("---")) return "head";
   if (line.startsWith("+")) return "add";
   if (line.startsWith("-")) return "del";
-  if (/^(commit |Merge:|Author:|Date:|    )/.test(line)) return "commit";
-  if (/^(index |new file|deleted file|similarity |rename |old mode|new mode|Binary files|GIT binary patch)/.test(line)) return "meta";
+  if (/^(commit |Merge:|Author:|Date:|    |index |new file|deleted file|similarity |rename |old mode|new mode|Binary files|GIT binary patch)/.test(line)) return "meta";
   return "ctx";
 }
 function renderDiff(diff) {
-  if (!diff || !diff.trim()) return '<pre class="diff-box"><span class="diffline ctx">(no commit for this node)</span></pre>';
-  const lines = String(diff).replace(/\n$/, "").split("\n");
-  const body = lines.map((line) => `<span class="diffline ${diffLineClass(line)}">${esc(line)}</span>`).join("");
+  if (!diff || !diff.trim()) return '<pre class="diff-box"><span class="diffline ctx">(nothing committed for this step)</span></pre>';
+  const body = String(diff).replace(/\n$/, "").split("\n").map((line) => `<span class="diffline ${diffLineClass(line)}">${esc(line)}</span>`).join("");
   return `<pre class="diff-box">${body}</pre>`;
 }
-
-function renderDetail(n) {
-  const parent = n.parent ? byId(n.parent) : null;
-  const dc = n.decisions || [];
-  const criteria = n.acceptance_criteria || [];
-  const verif = n.verification || [];
-  const manual = n.manual_verification || [];
-  const deps = n.depends_on || [];
-  const constraints = n.constraints || [];
-  const interfaces = n.interfaces || [];
-  const artifacts = n.artifacts || [];
-  const events = n.events || [];
-  const errors = n.errors || [];
-  const gates = n.gate_outcomes || [];
-
-  const parentLink = parent
-    ? `<a href="#" data-goto="${esc(parent.id)}" title="${esc(parent.id)}">${esc(clip(nodeName(parent), 42))}</a>`
-    : "—";
-
-  return `
-    <div class="detail-head">
-      <div class="meta">${stateChip(n)} <span class="row-tag">${esc(shortId(n.id))}</span></div>
-      <h1>${esc(n.goal || nodeName(n))}</h1>
-      <div class="meta">
-        <span class="mono" title="full node id">${esc(n.id)}</span>
-        <span>depth ${esc(n.depth)}</span>
-        <span>parent: ${parentLink}</span>
-      </div>
-    </div>
-    <div class="detail-body">
-      ${n.summary ? `<div class="section"><h3>Summary</h3><div>${esc(n.summary)}</div></div>` : ""}
-
-      <div class="section">
-        <h3>Live activity</h3>
-        <div class="nowrunning ${n.status === "running" ? "" : "idle"}" style="margin-top:0">
-          <span class="label">${n.status === "running" ? "● Running" : "Last output"}</span>
-          <span class="act">${esc(n.activity || "no output recorded for this node")}</span>
-        </div>
-      </div>
-
-      <div class="section">
-        <h3>Contract</h3>
-        <h4>Goal</h4>
-        <div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(n.goal || "")}</div>
-        <h4>Acceptance criteria</h4>${listOr(criteria)}
-        <h4>Verification commands <span class="muted" style="text-transform:none;letter-spacing:0">(must run on this machine)</span></h4>
-        ${listOr(verif, (v) => `<span class="cmd">${esc(v)}</span>`)}
-        <h4>Manual verification <span class="muted" style="text-transform:none;letter-spacing:0">(critic-judged)</span></h4>
-        ${listOr(manual)}
-        <h4>Depends on</h4>
-        ${listOr(deps, (d) => {
-          const dep = byId(d);
-          return dep
-            ? `<a href="#" data-goto="${esc(d)}" title="${esc(dep.goal || "")}">${esc(clip(nodeName(dep), 52))}</a> <span class="muted mono">${esc(shortId(d))}</span>`
-            : `<span class="mono">${esc(d)}</span>`;
-        })}
-        <h4>Interfaces</h4>${listOr(interfaces)}
-        <h4>Inherited constraints</h4>${listOr(constraints)}
-      </div>
-
-      <div class="section">
-        <h3>Decisions</h3>${listOr(dc)}
-      </div>
-
-      <div class="section">
-        <h3>Live output <span class="muted" style="text-transform:none;letter-spacing:0">(log tail)</span></h3>
-        ${eventList(events)}
-      </div>
-
-      <div class="section">
-        <h3>Gate outcomes</h3>
-        ${gateList(gates)}
-      </div>
-
-      ${errors.length ? `<div class="section"><h3>Errors</h3>${gateList(errors)}</div>` : ""}
-
-      <div class="section">
-        <h3>Artifacts</h3>
-        ${artifacts.length
-          ? `<table><thead><tr><th>file</th><th style="text-align:right">size</th></tr></thead><tbody>
-              ${artifacts.map((a) => `<tr><td class="mono">${esc(a.name)}</td><td class="num">${fmtBytes(a.size)}</td></tr>`).join("")}
-            </tbody></table>`
-          : '<div class="empty">none</div>'}
-      </div>
-
-      <div class="section">
-        <h3>Committed diff</h3>
-        <details class="disclosure" id="diff-disclosure">
-          <summary>Show the actual changes committed for this node</summary>
-          <div class="inner">${renderDiff(n.diff)}</div>
-        </details>
-        <details class="disclosure">
-          <summary>Assembled executor context (${fmtBytes(n.context_bytes)})</summary>
-          <div class="inner"><pre class="box">${esc(n.context || "")}</pre></div>
-        </details>
-      </div>
-    </div>`;
+function eventSummary(e) {
+  if (!e) return "";
+  for (const k of ["error", "reason", "detail", "summary", "message", "assumption", "payload"]) {
+    if (e[k] != null && e[k] !== "") return typeof e[k] === "string" ? e[k] : JSON.stringify(e[k]);
+  }
+  return Object.entries(e).filter(([k, v]) => !["at", "node", "event"].includes(k) && v != null && typeof v !== "object").map(([k, v]) => k + "=" + v).join("  ");
 }
-
-function gateList(items) {
-  if (!items || !items.length) return '<div class="empty">none</div>';
-  return `<div class="events">${items.map((e) => {
-    const name = (e && e.event) || "gate";
-    const bad = /fail|error|revert|reject/.test(name) || (e && e.error);
+function eventList(events) {
+  if (!events || !events.length) return '<div class="empty">No output recorded yet.</div>';
+  return `<div class="events">${events.map((e) => {
+    const name = (e && e.event) || "event";
+    const bad = name === "error" || (e && e.error) || /fail|revert|tamper|exhaust/.test(name);
     return `<div class="event ${bad ? "err" : ""}">
-      <span class="t">${esc(when(e && e.at))}</span>
+      <time>${esc(when(e && e.at))}</time>
       <span class="name">${esc(name)}</span>
-      <span class="msg">${esc(clip(eventSummary(e), 300))}</span>
+      <span class="msg">${esc(clip(eventSummary(e), 500))}</span>
     </div>`;
   }).join("")}</div>`;
 }
-
-/* ---------- detail polling ---------- */
-
+function renderDetail(n) {
+  const parent = n.parent ? byId(n.parent) : null;
+  const criteria = n.acceptance_criteria || [];
+  const events = n.events || [];
+  return `
+    <div class="detail-head">
+      <div style="min-width:0">
+        <h2>${esc(nodeName(n))}</h2>
+        <div class="meta">${esc(n.id)} · depth ${esc(n.depth)}${parent ? ` · inside <b>${esc(clip(nodeName(parent), 48))}</b>` : ""}</div>
+      </div>
+      ${stateChip(n)}
+    </div>
+    <div class="detail-grid">
+      <div class="detail-block">
+        <h4>Doing now</h4>
+        <div class="detail-act ${n.status === "running" ? "live" : ""}">${esc(n.activity || (n.status === "running" ? "starting…" : "No live output for this step."))}</div>
+      </div>
+      <div class="detail-block">
+        <h4>What it is</h4>
+        <div class="prose">${esc(n.goal || nodeName(n))}</div>
+      </div>
+      ${criteria.length ? `<div class="detail-block"><h4>Done when</h4>${listOr(criteria)}</div>` : ""}
+      <div class="detail-block">
+        <h4>Live events</h4>
+        ${eventList(events)}
+      </div>
+      <div class="detail-block">
+        <details class="code"><summary>Code changes</summary>${renderDiff(n.diff)}</details>
+      </div>
+    </div>`;
+}
 async function tickDetail(force) {
-  if (!selected || detailBusy) return;
+  const box = el("detail");
+  if (!selected) {
+    box.innerHTML = '<p class="detail-empty">Select a step in the graph to read what it is and what it is doing.</p>';
+    return;
+  }
+  if (detailBusy) return;
   detailBusy = true;
   try {
     const n = await jget("/api/node?id=" + encodeURIComponent(selected));
-    const node = byId(selected);
-    const sig = JSON.stringify([n.status, n.activity, n.depth, node && node.children, n.events && n.events.length]);
-    if (force || sig !== selectedSig) {
-      selectedSig = sig;
-      el("detail").innerHTML = renderDetail(n);
-    }
+    const sig = JSON.stringify([n.status, n.activity, n.depth, (n.events || []).length, (n.diff || "").length]);
+    if (force || sig !== selectedSig) { selectedSig = sig; box.innerHTML = renderDetail(n); }
   } catch (err) {
-    el("detail").innerHTML = `<div class="state-note err">Could not load node ${esc(selected)} — ${esc(err)}</div>`;
+    box.innerHTML = `<p class="detail-empty">Could not load ${esc(selected)} — ${esc(err)}</p>`;
   } finally {
     detailBusy = false;
   }
 }
 
-/* ---------- main loop ---------- */
+/* ==================================================================
+   Poll loop.
+   ================================================================== */
 function setLive(status) {
-  const live = el("live");
-  live.className = "live " + (status === "ok" ? "busy" : status === "off" ? "off" : "");
-  el("liveText").textContent =
-    status === "ok" ? "live" : status === "off" ? "disconnected" : "connecting…";
+  el("live").className = "live " + (status === "ok" ? "busy" : status === "off" ? "off" : "");
+  el("liveText").textContent = status === "ok" ? "live" : status === "off" ? "disconnected" : "connecting…";
 }
-
 async function tick(force) {
   try {
     state = await jget("/api/state");
     setLive("ok");
-    el("project").textContent = state.project || "";
-    el("project").title = state.project || "";
-    renderOverview();
-    renderTree();
+    const present = new Set(state.nodes.map((n) => n.id));
+    for (const id of [...expanded]) if (!present.has(id)) expanded.delete(id);
+    renderRun();
+    renderGraph();
+    const cs = contentSignature();
+    if (cs !== paintKey) paintGraph();
     if (!selected && state.nodes.length) {
-      const root = byId("root") || state.nodes[0];
-      selected = root.id;
-      renderTree();
+      selected = (byId("root") || state.nodes[0]).id;
+      openChain(selected);
+      layoutKey = "";
+      renderGraph();
+      setContext(selected);
     }
     await tickDetail(force);
   } catch (err) {
     setLive("off");
     if (!state) {
-      el("overview").innerHTML = `<div class="state-note err">Dashboard disconnected — ${esc(err)}. Retrying…</div>`;
-      el("tree").innerHTML = '<div class="state-note err">No state available.</div>';
+      el("hero-now").textContent = "Disconnected — retrying.";
+      el("tree").innerHTML = '<div class="graph-empty">No state available.</div>';
     }
   }
-  // The conversation polls on the same cadence; the butler may still be
-  // working, and the turn settles when it finishes.
   await pollConversation(false);
 }
 
+/* ==================================================================
+   Wiring.
+   ================================================================== */
 document.addEventListener("click", (ev) => {
-  const a = ev.target.closest("[data-goto]");
-  if (a) { ev.preventDefault(); selectNode(a.dataset.goto); }
+  const ex = ev.target.closest("[data-example]");
+  if (ex) { const input = el("chat-input"); input.value = ex.dataset.example; input.focus(); return; }
+  if (ev.target.closest("#ctx-clear")) { setContext(null); return; }
 });
-el("view-graph").addEventListener("click", () => setView("graph"));
-el("view-rows").addEventListener("click", () => setView("rows"));
-el("show-deps").addEventListener("change", (ev) => {
-  showDeps = ev.target.checked;
-  applyFocus();
-});
-el("zoom-in").addEventListener("click", () => zoomBy(0.8));
-el("zoom-out").addEventListener("click", () => zoomBy(1.25));
-el("zoom-fit").addEventListener("click", fitGraph);
-bindGraphInteraction();
-
 el("chat-form").addEventListener("submit", sendChat);
 el("chat-input").addEventListener("keydown", (ev) => {
-  // Enter sends; Shift+Enter makes a new line.
-  if (ev.key === "Enter" && !ev.shiftKey) {
-    ev.preventDefault();
-    el("chat-form").requestSubmit();
-  }
+  if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); el("chat-form").requestSubmit(); }
+});
+el("chat-input").addEventListener("input", (ev) => {
+  const t = ev.target;
+  t.style.height = "auto";
+  t.style.height = Math.min(t.scrollHeight, 180) + "px";
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") { hideTooltip(); }
+});
+window.addEventListener("resize", () => {
+  if (!home || !svg || hasMoved) return;
+  vb = { ...home };
+  applyVB();
 });
 
-/* A narrow phone gets the flat Rows view by default: the graph still works and
-   is one tap away, but a wide graph must not be the first thing on a 390px
-   screen. The choice is the viewer's after that. */
-if (window.innerWidth < 640) setView("rows");
-
-setInterval(tick, 2000);
+bindGraphInteraction();
+setInterval(() => tick(false), 2000);
 tick(true);
 pollConversation(true);
 </script>

@@ -23,7 +23,12 @@
   same `Store`, not a parallel state path. Route every dashboard read/mutation
   through `Store` methods (or a new one there), never through ad-hoc file or SQL
   access, so TUI, CLI and dashboard state stay identical. Its loopback/read-only
-  defaults and `--bind-all` risk are documented in README "Web dashboard".
+  defaults and `--bind-all` risk are documented in README "Web dashboard". The
+  page has no steering controls: the graph is design and navigation (zoom / pan /
+  select), the butler chat is the only action surface, and node detail is
+  read-only. A graph selection rides to the butler as the optional `node` field
+  on `POST /api/butler`; if a control is ever removed, its capability must
+  already exist as a butler tool.
 - The butler (`fractal ask` / `fractal butler`, src/butler.rs) is the one
   steering agent. It lives outside the task tree, is not a node, and the root and
   every node stay ordinary nodes - no node owns an architect role. Every butler
