@@ -145,17 +145,33 @@ The page is organised so a run can be understood at a glance, then acted on:
   (complete / running / pending / failed / split / refused), a completion bar,
   and the node that is running right now with its latest output line.
 - **Task graph**, full width across the top of the page: the tree drawn as a
-  graph of nodes, each labelled with its **goal** and its **run state** in
-  words - `ready`, `running`, `waiting on <ids>`, `done`, `failed`. `ready`
-  means pending with every `depends_on` complete, so what can run in parallel
-  and what must wait are readable without decoding colours. A **Next up** line
-  names the nodes runnable right now. Parent → child edges are always drawn;
-  `depends_on` edges are hidden by default (they are what makes a dense graph
-  unreadable) and shown by the **Dependencies** toggle, or focused on the
-  selected node so one node's inputs and outputs appear on selection. The
-  legend names every edge state, so colour is never the only carrier. A
-  **Rows** view gives the same information as a flat, indented list, and is the
-  default under 640 px; a **Graph / Rows** toggle is always available.
+  **fractal radial layout**. Each subtree owns an angular wedge that subdivides
+  by leaf weight, every depth sits on its own ring, and ring spacing and node
+  size shrink on the same curve, so the pattern repeats at every scale and the
+  whole run reads as one organic structure rather than scattered boxes. The
+  layout is computed in a single SVG whose viewBox is the bounding box of every
+  node and label, so it **always fits the viewport** - no horizontal scrolling
+  at any node count. Zoom in/out/fit controls and drag-to-pan are available
+  when you want to inspect a dense tree; the initial view always fits.
+  Each node carries its **run state in words** - `ready`, `running`,
+  `waiting on <ids>`, `done`, `failed` - so what can run in parallel and what
+  must wait is readable without decoding colours. **Parent -> child edges are
+  always drawn** (that is the descendency). **Dependency edges are the ones
+  that clutter a graph, so they stay hidden by default**: hovering or selecting
+  a node reveals that node's direct dependencies and dependents as curved cyan
+  arcs with arrowheads, distinct from the parent edges, and selection also
+  lights its whole path from the root. The **All dependencies** toggle shows
+  every `depends_on` edge for someone who wants the whole picture. Hovering a
+  node shows a compact tooltip (goal, status, depth, dependency/dependent and
+  descendant counts, latest activity); clicking selects it and opens the full
+  detail below. Running nodes pulse and their edges carry an animated energy
+  flow. A **Next up** line names the nodes runnable right now. Labels are
+  resolved against each other so they never overlap: shallow nodes keep their
+  goal, deeper nodes fall back to id + status, and a label with no room is
+  hidden (the tooltip still has everything). The legend names every edge state,
+  so colour is never the only carrier. A **Rows** view gives the same
+  information as a flat, indented list, and is the default under 640 px; a
+  **Graph / Rows** toggle is always available.
 - **Node detail** (select any node, below the graph): the full contract (goal,
   acceptance criteria, `verification`, `manual_verification`, `depends_on`,
   interfaces, inherited constraints), its latest live activity, decisions, the
@@ -179,8 +195,13 @@ The page is organised so a run can be understood at a glance, then acted on:
   never mutates implicitly.
 
 The page is a single embedded HTML file with inline CSS/JS: no CDN, no build
-step, works offline. It respects `prefers-reduced-motion` (all animation is
-disabled, state remains in text and colour) and is responsive down to ~390 px.
+step, works offline. Its visual language is deliberately technical: a near-black
+ground with a faint drifting grid and vignette, hairline surfaces, off-white
+text, monospace for identifiers and data, a warm rust/amber primary and a cool
+cyan reserved for dependencies, with every status state named in words as well
+as coloured. Page-level motion is subtle and every animation is disabled under
+`prefers-reduced-motion`, which also leaves the state fully readable in text and
+colour. It is responsive down to ~390 px.
 
 Live activity is written by the running scheduler to `.fractal/activity/<id>`,
 a display-only scratch file outside `log/events.jsonl`: it is not part of the
