@@ -187,66 +187,57 @@ cannot bind at all, the run continues and the line names the `fractal serve`
 command instead. Disable auto-serving with `--no-dashboard` or
 `FRACTAL_NO_DASHBOARD=1` (for CI).
 
-The page is organised so a run can be understood at a glance, then acted on:
+The page is built around three things, in order of importance:
 
-- **Run overview**: the project goal, the whole-run status (a failed node
-  anywhere surfaces here even when the root is still `split`), counts
-  (complete / running / pending / failed / split / refused), a completion bar,
-  and the node that is running right now with its latest output line.
-- **Task graph**, full width across the top of the page: the tree drawn as a
-  **fractal radial layout**. Each subtree owns an angular wedge that subdivides
-  by leaf weight, every depth sits on its own ring, and ring spacing and node
-  size shrink on the same curve, so the pattern repeats at every scale and the
-  whole run reads as one organic structure rather than scattered boxes. The
-  layout is computed in a single SVG whose viewBox is the bounding box of every
-  node and label, so it **always fits the viewport** - no horizontal scrolling
-  at any node count. Zoom in/out/fit controls and drag-to-pan are available
-  when you want to inspect a dense tree; the initial view always fits.
-  Each node carries its **run state in words** - `ready`, `running`,
-  `waiting on <ids>`, `done`, `failed` - so what can run in parallel and what
-  must wait is readable without decoding colours. **Parent -> child edges are
-  always drawn** (that is the descendency). **Dependency edges are the ones
-  that clutter a graph, so they stay hidden by default**: hovering or selecting
-  a node reveals that node's direct dependencies and dependents as curved cyan
-  arcs with arrowheads, distinct from the parent edges, and selection also
-  lights its whole path from the root. The **All dependencies** toggle shows
-  every `depends_on` edge for someone who wants the whole picture. Hovering a
-  node shows a compact tooltip (goal, status, depth, dependency/dependent and
-  descendant counts, latest activity); clicking selects it and opens the full
-  detail below. Running nodes pulse and their edges carry an animated energy
-  flow. A **Next up** line names the nodes runnable right now. Labels are
-  resolved against each other so they never overlap: shallow nodes keep their
-  goal, deeper nodes fall back to id + status, and a label with no room is
-  hidden (the tooltip still has everything). The legend names every edge state,
-  so colour is never the only carrier. A **Rows** view gives the same
-  information as a flat, indented list, and is the default under 640 px; a
-  **Graph / Rows** toggle is always available.
-- **Node detail** (select any node, below the graph): the full contract (goal,
-  acceptance criteria, `verification`, `manual_verification`, `depends_on`,
-  interfaces, inherited constraints), its latest live activity, decisions, the
-  `log/events.jsonl` tail, gate outcomes, errors, artifacts, and the committed
-  diff rendered **the way git prints it** - `diff --git` / `---` / `+++`
-  headers, `@@` hunk headers, green additions, red removals and context lines
-  in monospace, scrollable both directions. Raw JSON is never the default view.
-- **Conversation with the butler** (the right-hand panel, or above the graph on
-  a narrow screen): the way you steer, instead of a panel of parameters. Type a
+- **The graph — the hero.** The tree drawn as a **fractal radial layout**: each
+  subtree owns an angular wedge subdivided by leaf weight, every depth sits on
+  its own ring. Only the root is open at first, so every drawn node keeps a
+  legible label; a node with hidden children shows `+N` and opens when clicked.
+  Each node carries its **state as a shape, a glyph and a word** — `done`,
+  `running`, `ready`, `waiting`, `failed`, `blocked` — so the six states stay
+  distinct in a greyscale screenshot; colour is never the only cue. Parent →
+  child edges are always drawn; a node's `depends_on` edges appear only while it
+  is selected or hovered, so the graph stays free of crossing spaghetti. Hover
+  focuses the node — it scales, its label appears, its path from the root lights
+  up and the rest recedes. Click selects it, expands its children and seeds the
+  butler context below. **Wheel / pinch zooms, drag pans, double-click fits**,
+  all applied as one SVG transform so the graph stays smooth on the GPU. The
+  hide-and-seek viewBox fitting and the separate Rows view are gone; a node's
+  label is measured from the DOM so it can never be clipped, and the page never
+  scrolls horizontally at any node count. Decorative rings, the core glow and
+  coloured halos are gone; depth comes from the graph itself.
+- **The butler conversation — the one steering surface.** On a laptop it rides
+  a sticky right-hand rail, so it is one keystroke away at any scroll. Type a
   message in plain language (`the tracker should use real data, not simulated`),
   Send, and the butler inspects the tree and replies with its plan and its
   rationale — kept, or which nodes it reopened or added, and why — plus the
-  resulting tree changes (`root-01: complete -> pending`). The request is
-  claimed and shown as working immediately, the butler runs off the request
-  thread, and the panel polls until the turn settles; the page is never blocked.
-  The transcript is durable in `.fractal/butler/conversation.json`, so a refresh
-  (or a server restart, which settles an interrupted turn as failed) shows the
-  same conversation. The individual constraint / edit-contract / amend / retry
-  widgets are gone: the butler covers them, and there is one steering path, not
-  two. Node detail still shows the contract, the committed diff and the live
-  activity — the conversation and the graph are the interface.
+  resulting tree changes (`root-01: complete -> pending`). The request is claimed
+  and shown as working immediately, the butler runs off the request thread, and
+  the panel polls until the turn settles; the page is never blocked. The node you
+  selected in the graph rides along as context, so "redo this" is unambiguous: a
+  line above the composer names it and a `clear` control drops it. The transcript
+  is durable in `.fractal/butler/conversation.json`, so a refresh (or a server
+  restart, which settles an interrupted turn as failed) shows the same
+  conversation. The individual constraint / edit-contract / amend / retry widgets
+  are gone: the butler covers them, and there is one steering path, not two.
+- **Node detail — read-only.** Select a node and the page describes it: what it
+  is (goal and "done when" criteria), what it is doing now (latest activity) and
+  its **live events**, with the committed diff under **Code changes**. There are
+  no buttons and no editing here; every change goes through the conversation.
 
 The dashboard's steering API is `GET /api/butler` (the durable transcript) and
-`POST /api/butler {"message": "..."}`, which claims a turn, runs the butler in
-the background and returns `202` with the turn id; a second request while one is
+`POST /api/butler {"message": "...", "node": "root-02"}`. The optional `node` is
+the graph selection the request is about; an unknown id is rejected with `400`
+before a turn is claimed. The POST claims a turn, runs the butler in the
+background and returns `202` with the turn id; a second request while one is
 working is refused with `409`. Both route through `Store` like everything else.
+
+The butler's tool set is the complete action surface, because the page has no
+other controls. It covers reading run and node state (`tree`, `node`, `digest`,
+`trace`, `next`, `verify`), steering a constraint (`constraint`, `amend`,
+`resolve`), editing a contract (`edit_contract`), reopening (`reopen`), splitting
+(`split`), retrying (`retry`), resuming (`resume`) and recording its decision
+(`plan`); the graph selection is the context it operates on.
 
 The page is a single embedded HTML file with inline CSS/JS: no CDN, no build
 step, works offline. Its visual language follows the pinned La Fabrique à Sites
@@ -260,13 +251,6 @@ Colour is never the only carrier: every status state is named in words as well.
 Motion is transform/opacity only with custom curves, and `prefers-reduced-motion`
 keeps opacity and colour while dropping movement. It is responsive down to
 ~390 px.
-
-The graph keeps its round/globe radial shape but is read as a graph, not framed
-by one: the decorative rings, core glow and coloured halos are gone. Node labels
-are leader-lined to their dot, only the root and the first generation are
-labelled by default, and a deeper node's label is revealed on hover or
-selection; labels are still collision-resolved so they never overlap, and the
-tooltip always carries goal, status, dependencies and latest activity.
 
 Live activity is written by the running scheduler to `.fractal/activity/<id>`,
 a display-only scratch file outside `log/events.jsonl`: it is not part of the

@@ -148,7 +148,9 @@ fn is_working(turn: &Value) -> bool {
 /// Claim the next turn and persist it as `working` before any agent runs, so a
 /// refresh (or another entrypoint) sees the request immediately. Refuses while a
 /// previous turn is still working: the tree has one steering agent at a time.
-pub fn begin_turn(store: &Store, message: &str) -> Result<String, StoreError> {
+/// `node` is the step the user had selected in the graph, if any; it is stored
+/// with the turn and handed to the butler so "this step" is unambiguous.
+pub fn begin_turn(store: &Store, message: &str, node: Option<&str>) -> Result<String, StoreError> {
     let _guard = TURN_LOCK.lock().unwrap();
     let mut turns = read_conversation(store);
     if turns.last().map(is_working).unwrap_or(false) {
@@ -162,12 +164,16 @@ pub fn begin_turn(store: &Store, message: &str) -> Result<String, StoreError> {
         turns.len() + 1,
         chrono::Utc::now().timestamp_millis()
     );
-    turns.push(json!({
+    let mut turn = json!({
         "id": id,
         "at": now(),
         "status": "working",
         "message": message,
-    }));
+    });
+    if let Some(node) = node {
+        turn["node"] = json!(node);
+    }
+    turns.push(turn);
     if turns.len() > MAX_TURNS {
         let drop = turns.len() - MAX_TURNS;
         turns.drain(0..drop);
@@ -547,7 +553,7 @@ Finish by recording your decision (this is required, and it is how the user lear
 
 Then print a short plain-language summary for the user."#;
 
-fn build_prompt(store: &Store, message: &str) -> Result<String, StoreError> {
+fn build_prompt(store: &Store, message: &str, node: Option<&str>) -> Result<String, StoreError> {
     let nodes = store.walk()?;
     let mut tree = String::new();
     for n in &nodes {
@@ -560,8 +566,20 @@ fn build_prompt(store: &Store, message: &str) -> Result<String, StoreError> {
         };
         tree.push_str(&format!("{indent}{} [{}] {}{deps}\n", n.id, n.status, goal));
     }
+    let focus = match node {
+        Some(id) => {
+            let selected = store.get(id)?;
+            let goal = selected.goal.lines().next().unwrap_or(&selected.goal);
+            format!(
+                "\n## Selected step\nThe user is looking at `{id}` [{}] {goal}\n\
+                 When the request says \"this\", \"it\" or \"the step\", it means `{id}`.\n",
+                selected.status
+            )
+        }
+        None => String::new(),
+    };
     Ok(format!(
-        "{ROLE_PROMPT}\n\n## Current tree\n{tree}\n## User request\n{message}\n\n\
+        "{ROLE_PROMPT}\n\n## Current tree\n{tree}{focus}\n## User request\n{message}\n\n\
          Inspect what you need with the tools, then apply the smallest correct \
          change and finish with a `plan` tool call."
     ))
@@ -572,15 +590,22 @@ fn build_prompt(store: &Store, message: &str) -> Result<String, StoreError> {
 /// the tree changes it produced. Recorded to `.fractal/butler/log.jsonl` (the
 /// audit trail) and to the durable conversation the dashboard chat panel reads.
 pub fn run(store: &Store, message: &str, model: &str) -> Result<Value, String> {
-    let turn_id = begin_turn(store, message).map_err(|e| e.to_string())?;
-    run_turn(store, &turn_id, message, model)
+    let turn_id = begin_turn(store, message, None).map_err(|e| e.to_string())?;
+    run_turn(store, &turn_id, message, None, model)
 }
 
 /// Run the already-claimed turn `turn_id` and settle it as done or failed. Split
 /// from `run` so the dashboard can claim a turn synchronously, return to the
-/// browser, and run the agent in the background.
-pub fn run_turn(store: &Store, turn_id: &str, message: &str, model: &str) -> Result<Value, String> {
-    let outcome = run_session(store, message, model);
+/// browser, and run the agent in the background. `node` is the graph selection
+/// that seeds the session's context.
+pub fn run_turn(
+    store: &Store,
+    turn_id: &str,
+    message: &str,
+    node: Option<&str>,
+    model: &str,
+) -> Result<Value, String> {
+    let outcome = run_session(store, message, node, model);
     match &outcome {
         Ok(record) => {
             let _ = update_turn(
@@ -601,13 +626,18 @@ pub fn run_turn(store: &Store, turn_id: &str, message: &str, model: &str) -> Res
     outcome
 }
 
-fn run_session(store: &Store, message: &str, model: &str) -> Result<Value, String> {
+fn run_session(
+    store: &Store,
+    message: &str,
+    node: Option<&str>,
+    model: &str,
+) -> Result<Value, String> {
     store.reconcile().map_err(|e| e.to_string())?;
     // A new session must not inherit a previous session's plan.
     let _ = std::fs::remove_file(plan_path(store));
 
     let before = store.walk().map_err(|e| e.to_string())?;
-    let prompt = build_prompt(store, message).map_err(|e| e.to_string())?;
+    let prompt = build_prompt(store, message, node).map_err(|e| e.to_string())?;
     let on_output: crate::runner::OutputFn = std::sync::Arc::new(|line: &str| eprintln!("{line}"));
 
     let reply =
@@ -914,14 +944,18 @@ mod tests {
     #[test]
     fn begin_turn_persists_the_message_and_refuses_a_second_run() {
         let (store, dir) = temp_store("begin_turn");
-        let id = begin_turn(&store, "make the tracker use real data").unwrap();
+        let id = begin_turn(&store, "make the tracker use real data", Some("root-01")).unwrap();
         let turns = read_conversation(&store);
         assert_eq!(turns.len(), 1, "the request must be recorded immediately");
         assert_eq!(turns[0]["id"], id);
         assert_eq!(turns[0]["status"], "working");
         assert_eq!(turns[0]["message"], "make the tracker use real data");
+        assert_eq!(
+            turns[0]["node"], "root-01",
+            "the graph selection must ride with the turn"
+        );
 
-        let second = begin_turn(&store, "another request");
+        let second = begin_turn(&store, "another request", None);
         assert!(
             second.is_err(),
             "a working turn must block a second concurrent request"
@@ -932,7 +966,7 @@ mod tests {
     #[test]
     fn a_settled_turn_carries_the_plan_and_the_reply() {
         let (store, dir) = temp_store("settle_turn");
-        let id = begin_turn(&store, "fix the wiring").unwrap();
+        let id = begin_turn(&store, "fix the wiring", None).unwrap();
         update_turn(
             &store,
             &id,
@@ -949,19 +983,19 @@ mod tests {
         assert_eq!(turns[0]["plan"]["action"], "reopen");
         assert_eq!(turns[0]["tree_changes"][0]["to"], "pending");
         // A settled turn no longer blocks the next request.
-        assert!(begin_turn(&store, "a follow-up").is_ok());
+        assert!(begin_turn(&store, "a follow-up", None).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn recover_interrupted_fails_a_leftover_working_turn() {
         let (store, dir) = temp_store("recover");
-        begin_turn(&store, "a request whose process died").unwrap();
+        begin_turn(&store, "a request whose process died", None).unwrap();
         recover_interrupted(&store);
         let turns = read_conversation(&store);
         assert_eq!(turns[0]["status"], "failed");
         assert!(
-            begin_turn(&store, "the next request").is_ok(),
+            begin_turn(&store, "the next request", None).is_ok(),
             "recovery must unblock the next request"
         );
         let _ = std::fs::remove_dir_all(&dir);
