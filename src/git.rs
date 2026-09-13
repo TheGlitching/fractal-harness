@@ -637,9 +637,24 @@ pub fn create_worktree(root: &Path, node_id: &str, suffix: u64) -> Result<Worktr
 /// Cherry-pick one node's commit onto the shared tree. On conflict the pick is
 /// aborted so the shared tree is left exactly as it was; the caller fails the
 /// node with the returned reason rather than corrupting the tree.
+///
+/// Identity is forced per-invocation exactly as `commit` does, because
+/// cherry-pick writes a committer and a machine with no global git config (CI)
+/// otherwise refuses it.
 pub fn integrate_commit(root: &Path, sha: &str) -> Result<(), String> {
     let _index = index_lock();
-    match git(root, &["cherry-pick", "--allow-empty", sha]) {
+    match git(
+        root,
+        &[
+            "-c",
+            "user.name=fractal",
+            "-c",
+            "user.email=fractal@localhost",
+            "cherry-pick",
+            "--allow-empty",
+            sha,
+        ],
+    ) {
         Ok(_) => Ok(()),
         Err(e) => {
             let _ = git(root, &["cherry-pick", "--abort"]);
