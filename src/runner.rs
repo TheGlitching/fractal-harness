@@ -717,12 +717,19 @@ fn bullets(items: &[String]) -> String {
     }
 }
 
+/// Run one node's agent. `work_root` is the directory the agent edits and the
+/// orchestrator diffs, verifies and commits: the shared project tree when nodes
+/// run one at a time, or the node's own worktree when a ready batch runs
+/// concurrently. The node's memory (`contract.md`, `decisions.md`, `log/`) stays
+/// in the shared store and is referenced by absolute path, so the audit trail is
+/// never split across worktrees.
 pub fn run_node(
     store: &Store,
     node: &Node,
     model: &str,
     on_output: OutputFn,
     feedback: Option<&str>,
+    work_root: &Path,
 ) -> std::result::Result<VerbResult, RunnerError> {
     let mut prompt =
         assemble_context(store, node).map_err(|e| RunnerError::Other(e.to_string()))?;
@@ -731,7 +738,7 @@ pub fn run_node(
     }
 
     let executor = get_executor();
-    let project_root = store.tree_dir.parent().unwrap_or(&store.tree_dir);
+    let project_root = work_root;
     match executor.as_str() {
         "omp" | "pi" => call_via_omp(
             &prompt,
@@ -1164,6 +1171,7 @@ pub fn verify_node(
     artifacts: &[(String, String)],
     criteria: &[String],
     model: &str,
+    work_root: &Path,
 ) -> std::result::Result<(String, Vec<Value>), RunnerError> {
     let mut artifact_summary = String::new();
     for (p, c) in artifacts {
@@ -1202,7 +1210,7 @@ pub fn verify_node(
     // brand-new untracked files - is precisely this node's contribution, not its
     // description of itself. Judging prose alone is how a node that never
     // created a file was passed as complete.
-    let changed_on_disk = crate::git::has_uncommitted_changes(&store.root);
+    let changed_on_disk = crate::git::has_uncommitted_changes(work_root);
     let code_evidence = if !changed_on_disk {
         if !children.is_empty() {
             "(no direct change; this node aggregates the verified children above)".to_string()
@@ -1212,7 +1220,7 @@ pub fn verify_node(
     } else {
         format!(
             "Working-tree change (git):\n{}",
-            crate::git::worktree_change_summary(&store.root, 12000)
+            crate::git::worktree_change_summary(work_root, 12000)
         )
     };
 

@@ -686,14 +686,19 @@ impl Store {
         Ok(children)
     }
 
+    /// Mark a node complete. `project_root` is where the deliverable's declared
+    /// artifacts are written into the live project: the shared tree when nodes
+    /// run one at a time, or the node's own worktree when they run concurrently.
+    /// The node's artifact archive in `tree/` always stays in the shared store.
     pub fn complete(
         &self,
         node: &Node,
         summary: &str,
         deliverable: &str,
         artifacts: &[(String, String)],
+        project_root: &Path,
     ) -> Result<(), StoreError> {
-        self.write_artifacts(node, artifacts, deliverable)?;
+        self.write_artifacts(node, artifacts, deliverable, project_root)?;
         self.sync_unified_workspace(node, artifacts)?;
         let stamp = now();
         self.with_conn(|conn| {
@@ -726,9 +731,9 @@ impl Store {
         node: &Node,
         artifacts: &[(String, String)],
         deliverable: &str,
+        project_root: &Path,
     ) -> Result<(), StoreError> {
         fs::create_dir_all(node.artifacts_dir())?;
-        let project_root = self.tree_dir.parent().unwrap_or(&self.tree_dir);
         let mut written = false;
         for (p, c) in artifacts {
             if c.trim().is_empty() {
@@ -2398,6 +2403,7 @@ mod tests {
                 "v1",
                 "deliverable",
                 &[("a.txt".into(), "v1".into())],
+                &dir,
             )
             .unwrap();
         store
@@ -2406,6 +2412,7 @@ mod tests {
                 "done",
                 "deliverable",
                 &[("b.txt".into(), "done".into())],
+                &dir,
             )
             .unwrap();
         assert!(
@@ -2421,6 +2428,7 @@ mod tests {
                 "v2",
                 "deliverable",
                 &[("a.txt".into(), "v2".into())],
+                &dir,
             )
             .unwrap();
         let stale = store.stale_ids().unwrap();
@@ -2504,7 +2512,7 @@ mod tests {
         let (store, dir) = temp_store("digestcomplete");
         let root = store.init_with_budget("build a thing", None).unwrap();
         store
-            .complete(&root, "delivered", "the whole thing", &[])
+            .complete(&root, "delivered", "the whole thing", &[], &dir)
             .unwrap();
 
         let digest = store.generate_digest().unwrap();

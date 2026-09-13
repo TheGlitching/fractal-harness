@@ -9,10 +9,32 @@ use crate::store::{
 use crate::tui::{StatsSnapshot, TuiState};
 use crate::verify::GateScope;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub(crate) static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Serializes every mutation of the *shared* tree: cherry-picking a verified
+/// node's commit back onto it, and running an escalation owner there. Node work
+/// itself happens in isolated worktrees and does not take this lock, so genuine
+/// parallelism is preserved; only the short integration step and the rare
+/// escalation resolution serialize.
+static SHARED_TREE_LOCK: Mutex<()> = Mutex::new(());
+
+fn shared_tree_lock() -> MutexGuard<'static, ()> {
+    SHARED_TREE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Unique suffix for worktree dirs/branches within a run, so a branch kept
+/// after an integration conflict cannot collide with a later retry.
+static WORKTREE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_worktree_suffix() -> u64 {
+    WORKTREE_SEQ.fetch_add(1, Ordering::Relaxed)
+}
 
 const MAX_DEPTH: i64 = 4;
 /// Retries per node before it fails closed. Six gives a small model room to
@@ -46,6 +68,10 @@ pub struct RunReport {
     /// A failed node's gate-passing-but-critic-contested work was committed as a
     /// checkpoint rather than reverted, so it survives for a later retry.
     pub checkpoint_committed: bool,
+    /// The commit this node authored in its worktree, if any. The parallel batch
+    /// runner cherry-picks it onto the shared tree after the batch; the serial
+    /// path commits directly on the shared tree and leaves this unset.
+    pub last_commit: Option<String>,
 }
 
 impl Default for RunReport {
@@ -62,6 +88,7 @@ impl Default for RunReport {
             verify_failures: 0,
             node_depths: vec![],
             checkpoint_committed: false,
+            last_commit: None,
         }
     }
 }
@@ -118,6 +145,9 @@ pub fn run(
     interactive: bool,
 ) -> std::result::Result<RunReport, StoreError> {
     store.reconcile()?;
+    // Clear worktrees/branches a previous run left behind (crash or resume), so
+    // this run always starts from one coherent shared tree.
+    crate::git::cleanup_worktrees(&store.root);
     let nodes = store.walk()?;
     for n in &nodes {
         if n.status == RUNNING {
@@ -210,71 +240,61 @@ pub fn run(
             s.stats = sn;
         }
 
-        // Nodes execute one at a time on the shared working tree.
-        //
-        // Concurrent nodes in one directory cannot be attributed: a sibling's
-        // uncommitted files appear in this node's diff, `git add` would commit
-        // them under the wrong node, and a failed attempt's files would leak
-        // into the next node. Per-node git worktrees were considered and
-        // rejected: the in-place model has parents and children share a single
-        // tree and `dist/`, so isolating each node would require cross-worktree
-        // merges the tree's dependency model does not describe. Serializing the
-        // whole node - not just verify+commit - is the low-risk correct option:
-        // no sibling can hold uncommitted work while this node runs, so its
-        // diff, verification and commit are exactly its own. `FRACTAL_PARALLEL`
-        // is retained as a batch hint; execution stays serialized.
-        for node in batch {
-            let state_output = state.clone();
-            let nid = node.id.clone();
-            // The dashboard reads node state from disk, not from this process's
-            // TUI state, so the latest output line is mirrored to a scratch file
-            // as it arrives. `Store::new` only builds paths (no db open), so an
-            // owned, 'static writer is cheap inside the output closure.
-            let activity_store = crate::store::Store::new(&store.root);
-            let on_output: crate::runner::OutputFn = Arc::new(move |line: &str| {
-                let clean = line.trim().to_string();
-                if !clean.is_empty() {
-                    activity_store.write_activity(&nid, &clean).ok();
-                }
-                if let Ok(mut s) = state_output.lock() {
-                    s.log_lines.push(clean.clone());
-                    s.node_activities.insert(nid.clone(), clean.clone());
-                    if !clean.is_empty() {
-                        s.last_activity = clean;
-                    }
-                }
-            });
+        // A ready batch may run concurrently, each node in its own git worktree
+        // so no sibling can see another's uncommitted work. `FRACTAL_PARALLEL=1`
+        // (and any batch of one, or a batch with an intra-batch dependency) keeps
+        // the original single-tree serial path unchanged.
+        let parallel = max_parallel > 1 && batch.len() > 1 && batch_is_independent(batch);
+        let worktrees = if parallel {
+            create_batch_worktrees(store, batch)
+        } else {
+            None
+        };
 
-            let result = run_one_node(store, node, &model_owned, on_output, state);
-            match result {
-                Ok(sub) => {
-                    let failed = sub.failed > 0;
-                    report.merge(&sub);
-                    // Revert the failed node's own files so they cannot leak
-                    // into a sibling's diff. A checkpointed node's work is
-                    // deliberately kept in history instead.
-                    if failed && !sub.checkpoint_committed {
+        if let Some(wts) = worktrees {
+            run_batch_parallel(store, batch, &model_owned, state, &mut report, wts);
+        } else {
+            for node in batch {
+                let on_output = make_on_output(state, &node.id, &store.root);
+                let result = run_one_node(
+                    store,
+                    node,
+                    &model_owned,
+                    on_output,
+                    state,
+                    &store.root,
+                    false,
+                );
+                match result {
+                    Ok(sub) => {
+                        let failed = sub.failed > 0;
+                        report.merge(&sub);
+                        // Revert the failed node's own files so they cannot leak
+                        // into a sibling's diff. A checkpointed node's work is
+                        // deliberately kept in history instead.
+                        if failed && !sub.checkpoint_committed {
+                            let nodes = store.walk().unwrap_or_default();
+                            if let Some(n) = nodes.iter().find(|n2| n2.id == node.id) {
+                                revert_failed_node(store, n, &store.root);
+                            }
+                        }
+                    }
+                    Err(e) => {
                         let nodes = store.walk().unwrap_or_default();
                         if let Some(n) = nodes.iter().find(|n2| n2.id == node.id) {
-                            revert_failed_node(store, n);
+                            let _ = store.append_decision(n, &format!("error: {e}"));
+                            let _ = store.set_status(n, FAILED);
+                            revert_failed_node(store, n, &store.root);
+                            report.failed += 1;
                         }
                     }
                 }
-                Err(e) => {
-                    let nodes = store.walk().unwrap_or_default();
-                    if let Some(n) = nodes.iter().find(|n2| n2.id == node.id) {
-                        let _ = store.append_decision(n, &format!("error: {e}"));
-                        let _ = store.set_status(n, FAILED);
-                        revert_failed_node(store, n);
-                        report.failed += 1;
-                    }
-                }
+                let ns = store.walk().unwrap_or_default();
+                let sn = snapshot(&report, &ns);
+                let mut s = state.lock().unwrap();
+                s.nodes = ns;
+                s.stats = sn;
             }
-            let ns = store.walk().unwrap_or_default();
-            let sn = snapshot(&report, &ns);
-            let mut s = state.lock().unwrap();
-            s.nodes = ns;
-            s.stats = sn;
         }
     }
 
@@ -299,6 +319,185 @@ pub fn run(
         }
     }
     Ok(report)
+}
+
+/// Build the per-node output sink. The dashboard reads node state from disk,
+/// not from this process's TUI state, so the latest output line is mirrored to a
+/// scratch file as it arrives. `Store::new` only builds paths (no db open), so an
+/// owned, 'static writer is cheap inside the output closure.
+fn make_on_output(
+    state: &Arc<Mutex<TuiState>>,
+    node_id: &str,
+    root: &Path,
+) -> crate::runner::OutputFn {
+    let state_output = Arc::clone(state);
+    let nid = node_id.to_string();
+    let activity_store = crate::store::Store::new(root);
+    Arc::new(move |line: &str| {
+        let clean = line.trim().to_string();
+        if !clean.is_empty() {
+            activity_store.write_activity(&nid, &clean).ok();
+        }
+        if let Ok(mut s) = state_output.lock() {
+            s.log_lines.push(clean.clone());
+            s.node_activities.insert(nid.clone(), clean.clone());
+            if !clean.is_empty() {
+                s.last_activity = clean;
+            }
+        }
+    })
+}
+
+/// True when no node in the batch depends on another in the same batch. The
+/// ready set never contains one (a dependent waits for its dependency to be
+/// complete), but a stale re-verification batch can, so this is the guard that
+/// keeps such a batch serial.
+fn batch_is_independent(batch: &[Node]) -> bool {
+    let ids: HashSet<&str> = batch.iter().map(|n| n.id.as_str()).collect();
+    batch
+        .iter()
+        .all(|n| n.depends_on.iter().all(|d| !ids.contains(d.as_str())))
+}
+
+/// Create one worktree per node, off the current shared HEAD. Returns `None`
+/// (after undoing any partial setup) if isolation cannot be provided, so the
+/// caller falls back to the serial path rather than running nodes on the shared
+/// tree where they could contaminate each other.
+fn create_batch_worktrees(store: &Store, batch: &[Node]) -> Option<Vec<crate::git::Worktree>> {
+    let mut worktrees = Vec::new();
+    for node in batch {
+        match crate::git::create_worktree(&store.root, &node.id, next_worktree_suffix()) {
+            Ok(wt) => worktrees.push(wt),
+            Err(e) => {
+                for wt in &worktrees {
+                    crate::git::remove_worktree(&store.root, wt, true);
+                }
+                let _ = store.append_log(
+                    node,
+                    &serde_json::json!({"event":"worktree_unavailable","error":e}),
+                );
+                return None;
+            }
+        }
+    }
+    Some(worktrees)
+}
+
+/// Run a ready batch concurrently, one node per worktree. Each node's own diff,
+/// verification and commit happen only in its worktree; after the workers join,
+/// verified commits are cherry-picked onto the shared tree in batch order. A
+/// cherry-pick that conflicts fails that node with the conflict as the reason and
+/// keeps its branch, leaving the shared tree exactly as it was.
+fn run_batch_parallel(
+    store: &Store,
+    batch: &[Node],
+    model: &str,
+    state: &Arc<Mutex<TuiState>>,
+    report: &mut RunReport,
+    worktrees: Vec<crate::git::Worktree>,
+) {
+    let mut results: Vec<(usize, std::result::Result<RunReport, String>)> = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for (i, node) in batch.iter().enumerate() {
+            let on_output = make_on_output(state, &node.id, &store.root);
+            let node = node.clone();
+            let model = model.to_string();
+            let work_root = worktrees[i].path.clone();
+            let state_arc = Arc::clone(state);
+            handles.push(scope.spawn(move || {
+                let r = run_one_node(
+                    store, &node, &model, on_output, &state_arc, &work_root, true,
+                );
+                (i, r)
+            }));
+        }
+        // Handles are pushed in batch order, so a panicked worker is still
+        // attributed to its own node (`expected` is its index).
+        for handle in handles {
+            let expected = results.len();
+            let (i, r) = handle
+                .join()
+                .unwrap_or_else(|_| (expected, Err("node thread panicked".to_string())));
+            results.push((i, r));
+        }
+    });
+
+    let _guard = shared_tree_lock();
+    for (i, result) in results {
+        let node = &batch[i];
+        let worktree = &worktrees[i];
+        match result {
+            Ok(sub) => {
+                let commit = sub.last_commit.clone();
+                // A commit can also be an unverified checkpoint from a node that
+                // failed; only a node with no failures may become COMPLETE.
+                let succeeded = sub.failed == 0;
+                report.merge(&sub);
+                match commit {
+                    Some(sha) => match crate::git::integrate_commit(&store.root, &sha) {
+                        Ok(()) => {
+                            let short: String = sha.chars().take(8).collect();
+                            store
+                                .append_decision(
+                                    node,
+                                    &format!("integrated {short} into the shared tree"),
+                                )
+                                .ok();
+                            // The commit is now durable on the shared tree; only
+                            // now is the node truly complete.
+                            if succeeded {
+                                store.set_status(node, COMPLETE).ok();
+                            }
+                            crate::git::remove_worktree(&store.root, worktree, true);
+                        }
+                        Err(e) => {
+                            // Conflict: the tree is exactly as it was (the pick
+                            // was aborted). Fail the node and keep its branch so
+                            // the work is recoverable.
+                            store
+                                .append_decision(
+                                    node,
+                                    &format!("failed: integration conflict: {e}"),
+                                )
+                                .ok();
+                            store
+                                .append_log(
+                                    node,
+                                    &serde_json::json!({
+                                        "event": "integration_conflict",
+                                        "error": e,
+                                        "branch": worktree.branch,
+                                    }),
+                                )
+                                .ok();
+                            store.set_status(node, FAILED).ok();
+                            report.failed += 1;
+                            crate::git::remove_worktree(&store.root, worktree, false);
+                        }
+                    },
+                    // A decomposition/aggregation node, or a clean failure with
+                    // nothing worth keeping: discard the worktree (this is what
+                    // removes a failed node's half-written files).
+                    None => crate::git::remove_worktree(&store.root, worktree, true),
+                }
+            }
+            Err(e) => {
+                let nodes = store.walk().unwrap_or_default();
+                if let Some(n) = nodes.iter().find(|n2| n2.id == node.id) {
+                    let _ = store.append_decision(n, &format!("error: {e}"));
+                    let _ = store.set_status(n, FAILED);
+                    report.failed += 1;
+                }
+                crate::git::remove_worktree(&store.root, worktree, true);
+            }
+        }
+        let ns = store.walk().unwrap_or_default();
+        let sn = snapshot(report, &ns);
+        let mut s = state.lock().unwrap();
+        s.nodes = ns;
+        s.stats = sn;
+    }
 }
 
 /// The status a completed run reports for its root. A failed node anywhere in
@@ -498,11 +697,12 @@ fn reject_unrunnable_gates(root: &std::path::Path, contracts: &[Contract]) -> Op
     }
 }
 
-/// A terminally failed node must not leave its half-written work in the shared
-/// tree. Revert its uncommitted files so the next node's diff, verification and
-/// commit see only that next node's work. Ignored harness paths survive.
-fn revert_failed_node(store: &Store, node: &Node) {
-    if let Err(e) = crate::git::reset_uncommitted(&store.root) {
+/// A terminally failed node must not leave its half-written work where a later
+/// node could see it. Revert its uncommitted files in `work_root` - the shared
+/// tree in serial mode, or the node's soon-to-be-discarded worktree when a batch
+/// ran concurrently. Ignored harness paths survive.
+fn revert_failed_node(store: &Store, node: &Node, work_root: &Path) {
+    if let Err(e) = crate::git::reset_uncommitted(work_root) {
         store
             .append_log(
                 node,
@@ -530,12 +730,40 @@ fn gate_scope(node: &Node, aggregating: bool) -> GateScope {
     }
 }
 
+/// Run an escalation owner (or the parent of a replanned branch). In parallel
+/// mode every other node is in its own worktree, so the owner must not run in
+/// the escalating child's worktree: it runs on the shared tree under the
+/// shared-tree lock and its own work is committed under its node before the lock
+/// is released, keeping the child's commit attributable and the shared tree clean
+/// for integration. In serial mode this is the owner running on the shared tree
+/// exactly as before.
+fn run_escalation_owner(
+    store: &Store,
+    owner: &Node,
+    model: &str,
+    on_output: crate::runner::OutputFn,
+    feedback: &str,
+    parallel: bool,
+) -> std::result::Result<crate::runner::VerbResult, RunnerError> {
+    if !parallel {
+        return run_node(store, owner, model, on_output, Some(feedback), &store.root);
+    }
+    let _guard = shared_tree_lock();
+    let result = run_node(store, owner, model, on_output, Some(feedback), &store.root);
+    if result.is_ok() {
+        let _ = crate::git::commit_node_work(&store.root, &owner.id, "escalation resolution");
+    }
+    result
+}
+
 fn run_one_node(
     store: &Store,
     node: &Node,
     model: &str,
     on_output: crate::runner::OutputFn,
     state: &Arc<Mutex<TuiState>>,
+    work_root: &Path,
+    parallel: bool,
 ) -> std::result::Result<RunReport, String> {
     let mut report = RunReport::default();
     let children = store.children_of(node).map_err(|e| e.to_string())?;
@@ -609,7 +837,14 @@ fn run_one_node(
             None
         };
 
-        let result = match run_node(store, node, model, on_output.clone(), feedback.as_deref()) {
+        let result = match run_node(
+            store,
+            node,
+            model,
+            on_output.clone(),
+            feedback.as_deref(),
+            work_root,
+        ) {
             Ok(r) => r,
             Err(RunnerError::Other(e)) => {
                 if INTERRUPTED.load(Ordering::SeqCst) {
@@ -730,12 +965,13 @@ fn run_one_node(
                     assumption = result.assumption,
                     evidence = result.evidence
                 );
-                let resolve = run_node(
+                let resolve = run_escalation_owner(
                     store,
                     &owner,
                     model,
                     on_output.clone(),
-                    Some(&escalation_feedback),
+                    &escalation_feedback,
+                    parallel,
                 );
                 store.set_status(&owner, SPLIT_STATUS).ok();
                 let resolve = match resolve {
@@ -820,12 +1056,13 @@ fn run_one_node(
                             .as_ref()
                             .and_then(|pid| store.get(pid).ok())
                             .unwrap_or_else(|| owner.clone());
-                        let parent_resolve = run_node(
+                        let parent_resolve = run_escalation_owner(
                             store,
                             &parent,
                             model,
                             on_output.clone(),
-                            Some(&escalation_feedback),
+                            &escalation_feedback,
+                            parallel,
                         );
                         if matches!(&parent_resolve, Ok(pr)
                             if pr.verb == ESCALATE_RESOLVE
@@ -915,7 +1152,7 @@ fn run_one_node(
                     ));
                     continue;
                 }
-                if let Some(reason) = reject_unrunnable_gates(&store.root, &result.subtasks) {
+                if let Some(reason) = reject_unrunnable_gates(work_root, &result.subtasks) {
                     report.refused += 1;
                     store
                         .append_log(
@@ -1014,9 +1251,8 @@ fn run_one_node(
                 // fixable - and where `reopen` can push it back down.
                 let contract = node.contract();
                 let scope = gate_scope(node, aggregating);
-                let gates =
-                    crate::verify::resolve_gates(&store.root, &contract.verification, scope);
-                let changed = crate::git::has_uncommitted_changes(&store.root);
+                let gates = crate::verify::resolve_gates(work_root, &contract.verification, scope);
+                let changed = crate::git::has_uncommitted_changes(work_root);
                 let no_diff = !has_children && !changed;
 
                 // Fail closed on an empty diff: a leaf is where work lands, so a
@@ -1061,8 +1297,8 @@ fn run_one_node(
                     // before the gates run, then exclude whatever they created:
                     // that is the app's state, not this node's work, and it must
                     // not enter the diff, the critic's evidence or history.
-                    let pre_gate_untracked = crate::git::untracked_files(&store.root);
-                    let outcomes = crate::verify::run_gates(&store.root, &gates, GATE_TIMEOUT_SECS);
+                    let pre_gate_untracked = crate::git::untracked_files(work_root);
+                    let outcomes = crate::verify::run_gates(work_root, &gates, GATE_TIMEOUT_SECS);
                     let manual: Vec<String> = outcomes
                         .iter()
                         .filter(|o| o.manual)
@@ -1090,12 +1326,12 @@ fn run_one_node(
                             )
                             .ok();
                     }
-                    let runtime: Vec<String> = crate::git::untracked_files(&store.root)
+                    let runtime: Vec<String> = crate::git::untracked_files(work_root)
                         .difference(&pre_gate_untracked)
                         .cloned()
                         .collect();
                     if !runtime.is_empty() {
-                        if let Err(e) = crate::git::ignore_runtime_paths(&store.root, &runtime) {
+                        if let Err(e) = crate::git::ignore_runtime_paths(work_root, &runtime) {
                             store
                                 .append_log(
                                     node,
@@ -1144,6 +1380,7 @@ fn run_one_node(
                     &result.artifacts,
                     &criteria,
                     model,
+                    work_root,
                 ) {
                     Ok((verdict, _crit_details)) if verdict == "PASS" => {
                         store
@@ -1152,6 +1389,7 @@ fn run_one_node(
                                 &result.summary,
                                 &result.deliverable,
                                 &result.artifacts,
+                                work_root,
                             )
                             .map_err(|e| e.to_string())?;
                         store.append_decision(node, "verified: verdict=PASS").ok();
@@ -1164,16 +1402,24 @@ fn run_one_node(
                                 .ok();
                         }
 
+                        // In a concurrent batch the commit is integrated only
+                        // after every worker finishes. Keep the node running
+                        // until then, so a crash cannot leave a COMPLETE node
+                        // whose only copy of the work is a worktree that resume
+                        // would prune. The scheduler restores COMPLETE once the
+                        // cherry-pick lands.
+                        if parallel {
+                            store.set_status(node, RUNNING).ok();
+                        }
+
                         // One commit per verified node, so the code's history and
                         // the tree's history are the same history and any single
                         // node's contribution stays attributable and revertible.
-                        match crate::git::commit_node_work(&store.root, &node.id, &result.summary) {
+                        match crate::git::commit_node_work(work_root, &node.id, &result.summary) {
                             Ok(Some(sha)) => {
                                 let short: String = sha.chars().take(8).collect();
-                                let files = crate::git::changed_files_since(
-                                    &store.root,
-                                    &format!("{sha}~1"),
-                                );
+                                let files =
+                                    crate::git::changed_files_since(work_root, &format!("{sha}~1"));
                                 store
                                     .append_decision(
                                         node,
@@ -1181,9 +1427,13 @@ fn run_one_node(
                                     )
                                     .ok();
                                 on_output(&format!("  [{}] committed {}", node.id, short));
+                                report.last_commit = Some(sha);
                             }
                             Ok(None) => {
                                 // Legitimate for a pure decomposition step.
+                                if parallel {
+                                    store.set_status(node, COMPLETE).ok();
+                                }
                             }
                             Err(e) => {
                                 store
@@ -1192,6 +1442,9 @@ fn run_one_node(
                                         &serde_json::json!({"event":"commit_failed","error":e}),
                                     )
                                     .ok();
+                                if parallel {
+                                    store.set_status(node, COMPLETE).ok();
+                                }
                             }
                         }
 
@@ -1322,11 +1575,11 @@ fn run_one_node(
         None
     };
     if let Some(reason) = checkpoint_reason {
-        if !crate::git::has_uncommitted_changes(&store.root) {
+        if !crate::git::has_uncommitted_changes(work_root) {
             // Nothing to preserve; fall through to the terminal failure.
         } else {
             match crate::git::commit_node_work(
-                &store.root,
+                work_root,
                 &node.id,
                 &format!("unverified checkpoint ({reason})"),
             ) {
@@ -1339,6 +1592,7 @@ fn run_one_node(
                         )
                         .ok();
                     report.checkpoint_committed = true;
+                    report.last_commit = Some(sha);
                 }
                 Ok(None) => {}
                 Err(e) => {

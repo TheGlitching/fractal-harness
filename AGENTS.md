@@ -8,9 +8,12 @@
   make it pass. If a test seems wrong, write your reasoning in notes.md and stop.
 - Run `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`
   before finishing.
-- Nodes execute one at a time on the shared working tree; per-node diffs,
-  verification and commits rely on that. Do not re-enable concurrent node
-  execution without solving diff/commit attribution first, and keep the
+- Nodes whose dependencies are satisfied run concurrently (up to
+  `FRACTAL_PARALLEL`, default 4), each in its own git worktree under
+  `.fractal/worktrees/`, so each node's diff, verification and commit are
+  exactly its own; verified commits are cherry-picked back onto the shared tree
+  in batch order. Node memory stays in the shared `tree/`, never in a worktree.
+  `FRACTAL_PARALLEL=1` keeps the original single-tree serial path. Keep the
   harness's own paths out of the user's repo. See README "Per-node isolation and
   workspace exclusion".
 - State layout, verbs, and terminology must match docs/SPEC.md §4 exactly:
