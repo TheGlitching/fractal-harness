@@ -32,7 +32,12 @@ in the project repo.
 - **Fail-Safe & Auto-Healing Retries**: Nodes retry up to 3 times on runtime errors or verification failures, feeding back precise failure reasons so the model corrects its output.
 - **Upward Escalation**: A node that finds an inherited assumption false suspends its branch and reopens the ancestor that owns it, which resolves with `amend`, `overrule`, `replan`, or `depends_on`. A challenged assumption is not treated as an accepted constraint until the owner has ruled.
 - **Fail-Closed Completion & Verification**: No decision is an error and a retry, never a fabricated `complete`; a completion must be backed by a real git diff; the critic's verdict must be an explicit `PASS` with per-criterion results.
-- **Per-Node Isolation**: Nodes execute one at a time on the shared working tree, so each node's diff, verification and commit are exactly its own; a failed node's uncommitted files are reverted before the next node runs. The harness's own paths never enter the user's repository.
+- **Per-Node Isolation**: Independent ready nodes run concurrently, each in its
+  own git worktree, so each node's diff, verification and commit are exactly its
+  own; verified commits are integrated back onto the shared tree in dependency
+  order. A failed node's worktree is discarded, so its half-written files can
+  never leak into a sibling. The harness's own paths never enter the user's
+  repository.
 - **Interactive TUI Steering**: Inspect running nodes, review decisions & constraints, inject new global or subtree constraints, and trigger retries directly from the live TUI.
 
 ## Installation
@@ -238,7 +243,7 @@ The picker is only opened on a real terminal; headless runs never prompt.
 | `FRACTAL_MAX_STEPS` | `500` | Backstop loop bound for a single run |
 | `FRACTAL_TIMEOUT` | `300` | Seconds before a stuck node is killed |
 | `FRACTAL_MAX_ATTEMPTS` | `6` | Retries per node before it fails closed; also how many times a narrated-but-unparsed decision is retried |
-| `FRACTAL_PARALLEL` | `4` | Nodes selected per scheduling batch; execution is serialized (see Per-Node Isolation) |
+| `FRACTAL_PARALLEL` | `4` | Independent ready nodes run concurrently, this many at a time, each in its own git worktree; `1` keeps the original single-tree serial path |
 
 ### Budgets
 
@@ -258,22 +263,36 @@ report exact usage; without it, four characters are counted as one token.
 
 ### Per-node isolation and workspace exclusion
 
-Nodes run one at a time against the single live project tree. That is deliberate:
-agents edit the real repository in place, so two nodes writing concurrently
-cannot be attributed - the second node's `git diff` would contain the first's
-uncommitted files, and `git add` could commit a sibling's work under the wrong
-node. Serializing the whole node (not just verify+commit) means each node's diff,
-verification and commit are exactly its own, and a node that fails terminally has
-its uncommitted files reverted before the next node starts. Git index mutation is
-guarded process-wide.
+Nodes whose dependencies are satisfied run concurrently, up to
+`FRACTAL_PARALLEL` (default `4`) at a time. Each running node gets its own git
+worktree, branched from the shared tree's current `HEAD`, so its edits, `git
+diff`, verification gates and commit are exactly its own: a sibling's
+uncommitted files do not exist in that worktree and cannot be attributed to it,
+and `git add` cannot sweep them into the wrong node. When the batch finishes, its
+verified commits are cherry-picked back onto the shared tree. A cherry-pick that
+conflicts fails that node with the conflict recorded as its reason and keeps its
+branch for recovery, leaving the shared tree exactly as it was rather than
+half-merged. A node that fails terminally simply has its worktree discarded, so
+its half-written work cannot leak into a sibling.
+
+Each node's harness memory - `tree/<id>/contract.md`, `decisions.md`, `log/`,
+`artifacts/` - lives once in the shared tree and is never copied into a worktree;
+the agent reads its generated `CLAUDE.md` from that shared path and edits code in
+its worktree. The orchestrator therefore owns a single audit trail, and the
+memory-tamper digest is unaffected. `FRACTAL_PARALLEL=1` keeps the original
+single-tree serial path exactly. Escalation is the one serialization point: an
+owner reopened to settle an escalation runs on the shared tree under a lock (and
+its own work is committed under its own node), so concurrency never reroutes an
+ancestor's work into a child's commit.
 
 The harness never commits its own working directories into the project. `tree/`,
-`.fractal/` (including SQLite `-wal`/`-shm`), `global/`, `dist/`, `trace.json`,
-`digest.md` and `.fractal_decision_*` are written to the repository's local
-`.git/info/exclude` and are also excluded from every `git add`, `git status` and
-diff the harness runs. A pre-existing `.gitignore` is never modified or replaced,
-so running inside a real repository cannot pollute its history with harness
-internals.
+`.fractal/` (including SQLite `-wal`/`-shm` and `.fractal/worktrees/`), `global/`,
+`dist/`, `trace.json`, `digest.md` and `.fractal_decision_*` are written to the
+repository's local `.git/info/exclude` and are also excluded from every `git add`,
+`git status` and diff the harness runs. A pre-existing `.gitignore` is never
+modified or replaced, so running inside a real repository cannot pollute its
+history with harness internals. Worktrees left behind by a crash are pruned at
+the start of the next run.
 
 The same exclusion covers dependency trees and build junk (`node_modules/`,
 `.pnpm-store/`, `__pycache__/`, `.venv/`, `coverage/`, `.next/`, `*.log`, ...), so
@@ -284,8 +303,8 @@ too, keeping it out of the diff, the critic's evidence and history.
 
 ### Failure isolation and recovery
 
-A node that exhausts its retries fails closed: its own uncommitted files are
-reverted so they cannot leak into a sibling's diff, and the run keeps going. In a
+A node that exhausts its retries fails closed: its own worktree is discarded, so
+its uncommitted files cannot leak into a sibling's diff, and the run keeps going. In a
 headless run, a failure no longer ends the whole tree - independent and deferred
 siblings still run, dependents simply wait, and the completed run reports its root
 as `failed` (the root node itself stays `split` so `fractal retry` can still

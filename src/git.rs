@@ -257,6 +257,9 @@ pub fn ignore_runtime_paths(root: &Path, paths: &[String]) -> Result<(), String>
     if paths.is_empty() {
         return Ok(());
     }
+    // Concurrent nodes can discover runtime state at the same time; the exclude
+    // file is shared by every worktree, so serialize the read-modify-write.
+    let _index = index_lock();
     let rel = git(root, &["rev-parse", "--git-path", "info/exclude"])?;
     let path = {
         let p = PathBuf::from(&rel);
@@ -561,6 +564,132 @@ pub fn reset_uncommitted(root: &Path) -> Result<(), String> {
     git(root, &["reset", "--hard", "HEAD"])?;
     git(root, &["clean", "-fd"])?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Per-node worktrees: the isolation primitive for concurrent nodes.
+//
+// A ready batch used to run one node at a time on the shared tree because two
+// agents editing the same directory cannot be attributed. Each concurrently
+// running node now gets its own git worktree off the shared HEAD, so its edits,
+// diff, verification and commit are exactly its own; siblings cannot see each
+// other's uncommitted files. A verified node's commit is cherry-picked back onto
+// the shared tree once the batch finishes.
+// ---------------------------------------------------------------------------
+
+/// Where every node worktree lives. It is under `.fractal/`, a harness path
+/// excluded from the user's history, so a worktree checkout can never be
+/// committed and `remove_dir_all` cannot touch user files.
+fn worktrees_dir(root: &Path) -> PathBuf {
+    root.join(".fractal").join("worktrees")
+}
+
+/// One node's isolated checkout.
+pub struct Worktree {
+    pub path: PathBuf,
+    pub branch: String,
+}
+
+/// Turn a node id into a safe ref/directory component. Node ids are `root-01`
+/// shaped; this only defends against an id with a path separator or whitespace.
+fn sanitize_ref(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// Create a worktree for `node_id` off the current shared HEAD. `suffix` keeps
+/// the directory and branch unique across batches, so a branch deliberately kept
+/// after an integration conflict cannot collide with a later retry.
+pub fn create_worktree(root: &Path, node_id: &str, suffix: u64) -> Result<Worktree, String> {
+    let _index = index_lock();
+    let base =
+        head_sha(root).ok_or_else(|| "no HEAD to branch a node worktree from".to_string())?;
+    let safe = sanitize_ref(node_id);
+    let branch = format!("fractal/node/{safe}-{suffix}");
+    let dir = worktrees_dir(root).join(format!("{safe}-{suffix}"));
+    if dir.exists() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    git(
+        root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            &branch,
+            &dir.to_string_lossy(),
+            &base,
+        ],
+    )?;
+    Ok(Worktree { path: dir, branch })
+}
+
+/// Cherry-pick one node's commit onto the shared tree. On conflict the pick is
+/// aborted so the shared tree is left exactly as it was; the caller fails the
+/// node with the returned reason rather than corrupting the tree.
+pub fn integrate_commit(root: &Path, sha: &str) -> Result<(), String> {
+    let _index = index_lock();
+    match git(root, &["cherry-pick", "--allow-empty", sha]) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let _ = git(root, &["cherry-pick", "--abort"]);
+            Err(e)
+        }
+    }
+}
+
+/// Remove a node's worktree. The branch is deleted once its commit is either
+/// integrated or provably empty; a conflict keeps it so the work is recoverable.
+pub fn remove_worktree(root: &Path, worktree: &Worktree, delete_branch: bool) {
+    let _index = index_lock();
+    let _ = git(
+        root,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            &worktree.path.to_string_lossy(),
+        ],
+    );
+    if delete_branch {
+        let _ = git(root, &["branch", "-D", &worktree.branch]);
+    }
+    let _ = git(root, &["worktree", "prune"]);
+}
+
+/// Clear worktrees and node branches a previous run left behind (crash/resume),
+/// so a fresh run always starts from a single coherent tree. Called once at run
+/// start; a live batch does not call it.
+pub fn cleanup_worktrees(root: &Path) {
+    let _index = index_lock();
+    let dir = worktrees_dir(root);
+    if dir.exists() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let _ = git(root, &["worktree", "prune"]);
+    if let Ok(out) = git(
+        root,
+        &[
+            "branch",
+            "--list",
+            "fractal/node/*",
+            "--format=%(refname:short)",
+        ],
+    ) {
+        for branch in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let _ = git(root, &["branch", "-D", branch]);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1024,6 +1153,95 @@ mod tests {
             !status.contains(".portfolio.json"),
             "runtime state must not pollute status or the next node's diff: {status}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two worktrees branch from the same base, each node's own commit is
+    /// integrated back, and neither worktree ever contains the other's
+    /// uncommitted file.
+    #[test]
+    fn worktrees_isolate_node_work_and_integrate_cleanly() {
+        let dir = temp_repo("worktreeisolation");
+        ensure_repo(&dir).unwrap();
+
+        let a = create_worktree(&dir, "root-01", 1).unwrap();
+        let b = create_worktree(&dir, "root-02", 2).unwrap();
+        assert!(!has_uncommitted_changes(&a.path));
+        assert!(!has_uncommitted_changes(&b.path));
+
+        std::fs::create_dir_all(a.path.join("src")).unwrap();
+        std::fs::write(a.path.join("src/root-01.txt"), "a").unwrap();
+        assert!(
+            !b.path.join("src/root-01.txt").exists(),
+            "a sibling's uncommitted file leaked into another worktree"
+        );
+
+        std::fs::create_dir_all(b.path.join("src")).unwrap();
+        std::fs::write(b.path.join("src/root-02.txt"), "b").unwrap();
+
+        let sa = commit_node_work(&a.path, "root-01", "first")
+            .unwrap()
+            .unwrap();
+        let sb = commit_node_work(&b.path, "root-02", "second")
+            .unwrap()
+            .unwrap();
+
+        integrate_commit(&dir, &sa).unwrap();
+        integrate_commit(&dir, &sb).unwrap();
+        assert!(dir.join("src/root-01.txt").exists());
+        assert!(dir.join("src/root-02.txt").exists());
+
+        remove_worktree(&dir, &a, true);
+        remove_worktree(&dir, &b, true);
+        assert!(!a.path.exists() && !b.path.exists());
+        assert!(git(&dir, &["branch", "--list", "fractal/node/*"])
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A second commit touching the same file cannot cherry-pick: the pick is
+    /// aborted, HEAD does not move, and the tree keeps the first commit's content
+    /// with no half-applied conflict left behind.
+    #[test]
+    fn a_conflicting_integration_is_aborted_and_leaves_the_tree_unchanged() {
+        let dir = temp_repo("worktreeconflict");
+        ensure_repo(&dir).unwrap();
+        let a = create_worktree(&dir, "root-01", 1).unwrap();
+        let b = create_worktree(&dir, "root-02", 2).unwrap();
+        for (wt, body) in [(&a, "a"), (&b, "b")] {
+            std::fs::create_dir_all(wt.path.join("src")).unwrap();
+            std::fs::write(wt.path.join("src/shared.txt"), body).unwrap();
+        }
+        let sa = commit_node_work(&a.path, "root-01", "first")
+            .unwrap()
+            .unwrap();
+        let sb = commit_node_work(&b.path, "root-02", "second")
+            .unwrap()
+            .unwrap();
+
+        integrate_commit(&dir, &sa).unwrap();
+        let before = head_sha(&dir).unwrap();
+        assert!(
+            integrate_commit(&dir, &sb).is_err(),
+            "the conflicting pick must fail"
+        );
+        assert_eq!(
+            head_sha(&dir).unwrap(),
+            before,
+            "an aborted pick must not move HEAD"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("src/shared.txt")).unwrap(),
+            "a",
+            "the shared tree lost the first commit's content"
+        );
+        assert!(
+            git(&dir, &["status", "--porcelain"]).unwrap().is_empty(),
+            "the tree was left mid-conflict"
+        );
+        remove_worktree(&dir, &a, true);
+        remove_worktree(&dir, &b, false);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

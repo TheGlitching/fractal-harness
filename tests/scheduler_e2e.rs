@@ -30,6 +30,10 @@ for a in "$@"; do
   if [ "$prev" = "--cwd" ]; then ROOT="$a"; fi
   prev="$a"
 done
+# Absolute shared path for cross-node coordination. A node's own $ROOT is its
+# isolated worktree, so siblings cannot see each other's files; a concurrency
+# test hands the shared project dir through FAKE_SHARED instead.
+SHARED="${FAKE_SHARED:-$ROOT}"
 
 complete() {
   mkdir -p "$ROOT/src"
@@ -280,6 +284,108 @@ case "$MODE" in
   hang)
     echo "$$" > "$ROOT/.fake_omp_pid"
     exec sleep 120
+    ;;
+  concurrent)
+    # Two independent leaves of one split. Each announces its start in the shared
+    # dir and waits for the sibling to start while it is still running, so a
+    # marker can only appear if both really executed at the same time. Each also
+    # records whether its own worktree contains the sibling's file: it never
+    # should, because each runs in its own worktree.
+    if [ "$NODE" = "root" ]; then
+      if [ ! -d "$SHARED/tree/root/children/root-01" ]; then
+        echo '{"verb":"split","subtasks":[{"id":"a","goal":"first leaf","acceptance_criteria":["the task is done"]},{"id":"b","goal":"second leaf","acceptance_criteria":["the task is done"]}]}'
+      else
+        echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+      fi
+    else
+      sib=root-02; [ "$NODE" = "root-02" ] && sib=root-01
+      touch "$SHARED/start_$NODE"
+      i=0
+      while [ $i -lt 30 ]; do
+        if [ -f "$SHARED/start_$sib" ] && [ ! -f "$SHARED/done_$sib" ]; then break; fi
+        sleep 0.1; i=$((i+1))
+      done
+      if [ -f "$SHARED/start_$sib" ] && [ ! -f "$SHARED/done_$sib" ]; then
+        touch "$SHARED/overlapped"
+      fi
+      mkdir -p "$ROOT/src"
+      echo "$NODE" > "$ROOT/src/$NODE.txt"
+      if [ -f "$ROOT/src/$sib.txt" ]; then touch "$SHARED/saw_sibling"; fi
+      sleep 0.5
+      touch "$SHARED/done_$NODE"
+      echo '{"verb":"complete","deliverable":"done","summary":"did the task"}'
+    fi
+    ;;
+  dep_order)
+    # `b` (root-02) depends on `a` (root-01); `c` (root-03) is independent. `a`
+    # and `c` may run together, but `b` must only start once `a`'s commit is in
+    # the shared tree, so its worktree already contains root-01.txt.
+    if [ "$NODE" = "root" ]; then
+      if [ ! -d "$SHARED/tree/root/children/root-01" ]; then
+        echo '{"verb":"split","subtasks":[{"id":"a","goal":"producer","acceptance_criteria":["the task is done"]},{"id":"b","goal":"consumer","depends_on":["a"],"acceptance_criteria":["the task is done"]},{"id":"c","goal":"independent","acceptance_criteria":["the task is done"]}]}'
+      else
+        echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+      fi
+    elif [ "$NODE" = "root-02" ]; then
+      mkdir -p "$ROOT/src"
+      if [ ! -f "$ROOT/src/root-01.txt" ]; then
+        touch "$SHARED/b_ran_before_a"
+      fi
+      echo "$NODE" > "$ROOT/src/$NODE.txt"
+      echo '{"verb":"complete","deliverable":"done","summary":"consumed the producer"}'
+    else
+      mkdir -p "$ROOT/src"
+      echo "$NODE" > "$ROOT/src/$NODE.txt"
+      echo '{"verb":"complete","deliverable":"done","summary":"did the task"}'
+    fi
+    ;;
+  conflict)
+    # Two independent nodes write the SAME file. The first integrated commit
+    # wins; the second cherry-pick must conflict and fail that node without
+    # corrupting the shared tree.
+    if [ "$NODE" = "root" ]; then
+      if [ ! -d "$SHARED/tree/root/children/root-01" ]; then
+        echo '{"verb":"split","subtasks":[{"id":"a","goal":"first writer","acceptance_criteria":["the task is done"]},{"id":"b","goal":"second writer","acceptance_criteria":["the task is done"]}]}'
+      else
+        echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+      fi
+    else
+      mkdir -p "$ROOT/src"
+      echo "written by $NODE" > "$ROOT/src/shared.txt"
+      echo '{"verb":"complete","deliverable":"done","summary":"wrote shared"}'
+    fi
+    ;;
+  escalate_parallel)
+    # One child escalates while its independent sibling runs to completion in
+    # another worktree; the owner resolves on the shared tree, then the
+    # escalated child resumes. Exercises the escalation lifecycle with a
+    # concurrent batch.
+    if [ "$NODE" = "root" ]; then
+      ESC="$SHARED/.esc_par"
+      RES="$SHARED/.res_par"
+      if [ -f "$ESC" ] && [ ! -f "$RES" ]; then
+        touch "$RES"
+        echo '{"verb":"escalate_resolve","resolution":"overrule","rationale":"the constraint still holds; proceed"}'
+      elif [ ! -d "$SHARED/tree/root/children/root-01" ]; then
+        echo '{"verb":"split","subtasks":[{"id":"a","goal":"escalating leaf","acceptance_criteria":["the task is done"]},{"id":"b","goal":"independent leaf","acceptance_criteria":["the task is done"]}]}'
+      else
+        echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+      fi
+    elif [ "$NODE" = "root-01" ]; then
+      if [ -f "$SHARED/.res_par" ]; then
+        mkdir -p "$ROOT/src"
+        echo "$NODE" > "$ROOT/src/$NODE.txt"
+        echo '{"verb":"complete","deliverable":"done","summary":"resumed after overrule"}'
+      else
+        touch "$SHARED/.esc_par"
+        echo '{"verb":"escalate","assumption":"the inherited constraint is false","evidence":"observed otherwise"}'
+      fi
+    else
+      mkdir -p "$ROOT/src"
+      echo "$NODE" > "$ROOT/src/$NODE.txt"
+      sleep 0.5
+      echo '{"verb":"complete","deliverable":"done","summary":"independent success"}'
+    fi
     ;;
   *)
     complete
@@ -1200,5 +1306,179 @@ fn work_survives_when_gates_cannot_execute() {
     assert!(
         log.contains("unverified checkpoint"),
         "the work was not checkpointed:\n{log}"
+    );
+}
+
+/// Two independent ready nodes must execute at the same time, each in its own
+/// worktree: a node can never see a sibling's uncommitted file, and each commit
+/// contains only its own work.
+#[test]
+fn independent_ready_nodes_run_concurrently_in_isolated_worktrees() {
+    let p = Project::new("concurrent", "concurrent");
+    let shared = p.dir.to_string_lossy().to_string();
+    let (code, _out, err) = p.run_env(
+        &["init", "build a toy"],
+        Duration::from_secs(90),
+        &[("FRACTAL_PARALLEL", "4"), ("FAKE_SHARED", &shared)],
+    );
+    assert_eq!(code, Some(0), "concurrent run failed; stderr:\n{err}");
+    assert!(
+        p.dir.join("overlapped").exists(),
+        "the two independent ready nodes never ran at the same time"
+    );
+    assert!(
+        !p.dir.join("saw_sibling").exists(),
+        "a node saw its sibling's uncommitted file in its worktree"
+    );
+    assert!(
+        p.dir.join("src/root-01.txt").exists() && p.dir.join("src/root-02.txt").exists(),
+        "both nodes' work was not integrated into the shared tree"
+    );
+
+    let log = p.git(&["log", "--format=%H %s"]);
+    let mut seen = 0;
+    for line in log.lines() {
+        let (sha, subject) = line.split_once(' ').unwrap_or((line, ""));
+        let node = subject.split(':').next().unwrap_or("").trim();
+        if node == "root-01" || node == "root-02" {
+            let files = p.git(&["show", "--format=", "--name-only", sha]);
+            let files: Vec<&str> = files.lines().filter(|l| !l.trim().is_empty()).collect();
+            let expected = format!("src/{node}.txt");
+            assert_eq!(
+                files,
+                vec![expected.as_str()],
+                "commit {sha} ({subject}) contains another node's file: {files:?}"
+            );
+            seen += 1;
+        }
+    }
+    assert_eq!(
+        seen, 2,
+        "expected a commit for each concurrent leaf; log:\n{log}"
+    );
+}
+
+/// A dependent must still wait: it only runs once its dependency's commit is in
+/// the shared tree, and the producer's commit precedes the consumer's.
+#[test]
+fn a_dependent_waits_and_commits_integrate_in_dependency_order() {
+    let p = Project::new("deporder", "dep_order");
+    let shared = p.dir.to_string_lossy().to_string();
+    let (code, _out, err) = p.run_env(
+        &["init", "build a toy"],
+        Duration::from_secs(90),
+        &[("FRACTAL_PARALLEL", "4"), ("FAKE_SHARED", &shared)],
+    );
+    assert_eq!(code, Some(0), "dep-order run failed; stderr:\n{err}");
+    assert!(
+        !p.dir.join("b_ran_before_a").exists(),
+        "the dependent ran before its dependency was integrated"
+    );
+    for f in ["root-01.txt", "root-02.txt", "root-03.txt"] {
+        assert!(
+            p.dir.join("src").join(f).exists(),
+            "missing {f} after integration"
+        );
+    }
+    // `git log` is newest-first, so the consumer's commit must appear before the
+    // producer's only if it was created later.
+    let log = p.git(&["log", "--format=%s"]);
+    let producer = log
+        .lines()
+        .position(|l| l.starts_with("root-01:"))
+        .expect("no commit for the producer");
+    let consumer = log
+        .lines()
+        .position(|l| l.starts_with("root-02:"))
+        .expect("no commit for the consumer");
+    assert!(
+        consumer < producer,
+        "the consumer's commit is not after the producer's:\n{log}"
+    );
+}
+
+/// When two independent nodes change the same file, the second cherry-pick must
+/// conflict: that node fails with the conflict recorded, and the shared tree
+/// keeps exactly the first node's version rather than being corrupted.
+#[test]
+fn an_integration_conflict_fails_that_node_without_corrupting_the_tree() {
+    let p = Project::new("conflict", "conflict");
+    let shared = p.dir.to_string_lossy().to_string();
+    let (code, _out, err) = p.run_env(
+        &["init", "build a toy"],
+        Duration::from_secs(90),
+        &[("FRACTAL_PARALLEL", "4"), ("FAKE_SHARED", &shared)],
+    );
+    assert!(code.is_some(), "run did not terminate; stderr:\n{err}");
+    assert_ne!(
+        code,
+        Some(0),
+        "a conflicting integration must not report success"
+    );
+    let status = p.status();
+    assert!(
+        status.contains("[failed]"),
+        "the conflicting node was not failed:\n{status}"
+    );
+    let content = fs::read_to_string(p.dir.join("src/shared.txt")).unwrap_or_default();
+    assert!(
+        content.starts_with("written by root-0"),
+        "the shared tree was corrupted or left empty: {content:?}"
+    );
+
+    let mut conflicted = false;
+    for child in ["root-01", "root-02"] {
+        let decisions = fs::read_to_string(
+            p.dir
+                .join(format!("tree/root/children/{child}/decisions.md")),
+        )
+        .unwrap_or_default();
+        if decisions.contains("integration conflict") {
+            conflicted = true;
+        }
+    }
+    assert!(
+        conflicted,
+        "no node recorded the integration conflict in its decisions"
+    );
+}
+
+/// The escalation lifecycle must hold when a ready batch runs concurrently: one
+/// child escalates, its independent sibling completes in another worktree, the
+/// owner resolves the escalation, and the escalated child resumes and completes.
+#[test]
+fn escalation_resolves_while_an_independent_sibling_runs_concurrently() {
+    let p = Project::new("escalateparallel", "escalate_parallel");
+    let shared = p.dir.to_string_lossy().to_string();
+    let (code, _out, err) = p.run_env(
+        &["init", "build a toy"],
+        Duration::from_secs(90),
+        &[("FRACTAL_PARALLEL", "4"), ("FAKE_SHARED", &shared)],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "parallel escalation run failed; stderr:\n{err}"
+    );
+    let status = p.status();
+    assert!(
+        !status.contains("[failed]"),
+        "escalation failed instead of resolving:\n{status}"
+    );
+    assert!(
+        status.contains("[complete]"),
+        "the tree did not complete after the parallel escalation:\n{status}"
+    );
+    for f in ["root-01.txt", "root-02.txt"] {
+        assert!(
+            p.dir.join("src").join(f).exists(),
+            "missing {f}: a node's work was lost during escalation"
+        );
+    }
+    let decisions = fs::read_to_string(p.dir.join("tree/root/children/root-01/decisions.md"))
+        .unwrap_or_default();
+    assert!(
+        decisions.contains("escalated"),
+        "the escalation was not recorded on the escalating child:\n{decisions}"
     );
 }
