@@ -139,28 +139,39 @@ The page is organised so a run can be understood at a glance, then acted on:
   anywhere surfaces here even when the root is still `split`), counts
   (complete / running / pending / failed / split / refused), a completion bar,
   and the node that is running right now with its latest output line.
-- **Task graph**: the tree drawn as a graph with two visually distinct edge
-  kinds - parent → child, and `depends_on` (dashed, bowing to the right). Edge
-  state is animated: an active path flows, a completed edge settles solid, a
-  failed edge turns red, and a waiting edge stays dim. A running node pulses and
-  shows its current action. Nodes are labelled by their **goal**, not their raw
-  id; the short id (the last `-NN`) is a secondary tag and the full id is in the
-  tooltip and the detail view. A **Rows** view gives the same information as a
-  flat, indented list, and is the default under 640 px; a **Graph / Rows**
-  toggle is always available. The legend names every edge state, so colour is
-  never the only carrier.
-- **Node detail** (select any node): the full contract (goal, acceptance
-  criteria, `verification`, `manual_verification`, `depends_on`, interfaces,
-  inherited constraints), its latest live activity, decisions, the
+- **Task graph**, full width across the top of the page: the tree drawn as a
+  graph of nodes, each labelled with its **goal** and its **run state** in
+  words - `ready`, `running`, `waiting on <ids>`, `done`, `failed`. `ready`
+  means pending with every `depends_on` complete, so what can run in parallel
+  and what must wait are readable without decoding colours. A **Next up** line
+  names the nodes runnable right now. Parent → child edges are always drawn;
+  `depends_on` edges are hidden by default (they are what makes a dense graph
+  unreadable) and shown by the **Dependencies** toggle, or focused on the
+  selected node so one node's inputs and outputs appear on selection. The
+  legend names every edge state, so colour is never the only carrier. A
+  **Rows** view gives the same information as a flat, indented list, and is the
+  default under 640 px; a **Graph / Rows** toggle is always available.
+- **Node detail** (select any node, below the graph): the full contract (goal,
+  acceptance criteria, `verification`, `manual_verification`, `depends_on`,
+  interfaces, inherited constraints), its latest live activity, decisions, the
   `log/events.jsonl` tail, gate outcomes, errors, artifacts, and the committed
-  diff. Raw JSON is never the default view.
-- **Steering**: grouped, clearly labelled actions on the selected node - add a
-  constraint/idea (propagates to descendants), edit the contract, retry the
-  node and its subtree, and answer/route an escalation by amending a falsified
-  constraint or adding a dependency. Destructive actions are visually marked and
-  every action is confirmed before it is sent. Each mutation is an explicit form
-  submit that routes through the same `Store` methods as the TUI and scheduler;
-  the server never mutates implicitly.
+  diff rendered **the way git prints it** - `diff --git` / `---` / `+++`
+  headers, `@@` hunk headers, green additions, red removals and context lines
+  in monospace, scrollable both directions. Raw JSON is never the default view.
+- **Steering**: grouped actions on the selected node - add a constraint/idea
+  (propagates to descendants), edit the contract, answer/route an escalation,
+  and a separate, visually marked **destructive** group for retry. Each action
+  states what it is, when to use it and its consequence. The edit-contract form
+  is **pre-filled** with the node's current goal, acceptance criteria,
+  verification and manual verification, ready to change - never a placeholder.
+  Every action is confirmed **inline** (one prompt, no blocking browser
+  dialog), and on success the input clears, a persistent result is shown, and
+  the added constraint/decision is highlighted in the node's contract and
+  decisions. When no scheduler is running the result says so plainly: the
+  change is recorded in the contracts and queued, and `fractal run` must be
+  resumed for it to take effect. Each mutation is an explicit form submit that
+  routes through the same `Store` methods as the TUI and scheduler; the server
+  never mutates implicitly.
 
 The page is a single embedded HTML file with inline CSS/JS: no CDN, no build
 step, works offline. It respects `prefers-reduced-motion` (all animation is
