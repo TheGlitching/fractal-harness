@@ -9,6 +9,7 @@
 //! Every completed node now produces exactly one commit in the project repo, so
 //! the tree's history and the code's history are the same history.
 
+use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
@@ -550,6 +551,58 @@ fn cap_evidence(out: String, max_bytes: usize, whole: usize) -> String {
         &out[..cut],
         evidence_truncation_marker(cut, whole)
     )
+}
+
+/// Manifests the critic is always shown, whatever the diff contains. A criterion
+/// about the project's wiring ("app runs with `npm start`") is backed by the
+/// manifest that declares the script; an earlier node committed that manifest,
+/// so this node's diff legitimately omits it. Without the snapshot a correct
+/// criterion was unverifiable purely because of which node committed the file.
+const MANIFEST_FILES: [&str; 3] = ["package.json", "Cargo.toml", "pyproject.toml"];
+
+/// Bounded snapshot of the project files the critic needs but the diff may not
+/// contain: the manifests, plus every file a criterion or gate names that exists
+/// on disk. Generated files (lockfiles) are named but their content is omitted,
+/// so they cannot crowd out the wiring a criterion is actually about.
+pub fn project_evidence_snapshot(
+    root: &Path,
+    criteria: &[String],
+    gates: &[String],
+    max_bytes: usize,
+) -> String {
+    let re = Regex::new(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]{1,8}").unwrap();
+    let mut paths: Vec<String> = MANIFEST_FILES.iter().map(|m| m.to_string()).collect();
+    for text in criteria.iter().chain(gates.iter()) {
+        for m in re.find_iter(text) {
+            let p = m.as_str();
+            if !p.starts_with('/') && !p.contains("..") {
+                paths.push(p.to_string());
+            }
+        }
+    }
+    let mut paths: Vec<String> = paths
+        .into_iter()
+        .filter(|p| root.join(p).is_file())
+        .collect();
+    paths.sort();
+    paths.dedup();
+
+    let mut out = String::new();
+    for path in &paths {
+        if is_generated_file(path) {
+            out.push_str(&format!(
+                "\n--- project file: {path} (auto-generated; content omitted) ---\n"
+            ));
+            continue;
+        }
+        let content = std::fs::read_to_string(root.join(path)).unwrap_or_default();
+        out.push_str(&format!("\n--- project file: {path} ---\n{content}\n"));
+    }
+    if out.len() <= max_bytes {
+        return out;
+    }
+    let whole = out.len();
+    cap_evidence(out, max_bytes, whole)
 }
 
 /// Discard uncommitted noise so a retried attempt starts from the last known
@@ -1257,6 +1310,80 @@ mod tests {
         );
         remove_worktree(&dir, &a, true);
         remove_worktree(&dir, &b, false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The evidence snapshot must carry a manifest that the current node's diff
+    /// cannot show because an earlier node committed it. Without this, a
+    /// criterion like "the app runs with npm start" was unverifiable purely
+    /// because the manifest was not in this node's diff.
+    #[test]
+    fn snapshot_includes_a_manifest_absent_from_the_diff() {
+        let dir = temp_repo("snapshotmanifest");
+        ensure_repo(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"toy","scripts":{"start":"node src/app.js"}}"#,
+        )
+        .unwrap();
+        commit_node_work(&dir, "root-01", "manifest by an earlier node")
+            .unwrap()
+            .expect("manifest must commit");
+        assert!(
+            !has_uncommitted_changes(&dir),
+            "the manifest must be committed, not part of any later diff"
+        );
+
+        let snapshot = project_evidence_snapshot(
+            &dir,
+            &["the app starts with npm start".to_string()],
+            &["npm start".to_string()],
+            4000,
+        );
+        assert!(
+            snapshot.contains("package.json"),
+            "manifest missing: {snapshot}"
+        );
+        assert!(
+            snapshot.contains("node src/app.js"),
+            "manifest content must be shown, not just its name: {snapshot}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file a criterion names by path is pulled into the snapshot; a generated
+    /// lockfile is named but its content is omitted so it cannot crowd the
+    /// wiring out of the budget.
+    #[test]
+    fn snapshot_includes_a_referenced_file_and_omits_generated_content() {
+        let dir = temp_repo("snapshotref");
+        ensure_repo(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/app.ts"), "export const APP = 1;").unwrap();
+        std::fs::write(
+            dir.join("package-lock.json"),
+            format!("{{\"packages\":\"{}\"}}", "z".repeat(8000)),
+        )
+        .unwrap();
+
+        let snapshot = project_evidence_snapshot(
+            &dir,
+            &[
+                "src/app.ts wires the entry point".to_string(),
+                "package-lock.json is regenerated by the install".to_string(),
+            ],
+            &["node src/app.ts".to_string()],
+            4000,
+        );
+        assert!(
+            snapshot.contains("src/app.ts"),
+            "referenced file missing: {snapshot}"
+        );
+        assert!(snapshot.contains("APP = 1"));
+        assert!(
+            snapshot.contains("package-lock.json") && !snapshot.contains(&"z".repeat(200)),
+            "generated content must be named but omitted: {snapshot}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

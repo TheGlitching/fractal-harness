@@ -1134,6 +1134,14 @@ fulfilled.
 The 'Actual code change' section is the git diff of this work. It is ground truth; \
 the deliverable summary is only a claim. Where they disagree, believe the diff.
 
+The 'Automated gates' section is the harness's own execution of the project's \
+commands against the files on disk. Each entry names the command, its outcome and \
+the captured output. A PASS there is ground truth: a criterion that a passing \
+gate describes is satisfied by that gate, and must not be marked not-verified \
+merely because the file it depends on is absent from this node's diff. The \
+'Project files' section is a bounded snapshot of the tree as it stands, including \
+manifests and files committed by earlier nodes; it is evidence too.
+
 The harness caps how much evidence it can show for length. When it does, the cut is \
 marked explicitly and the omitted text was removed by the harness, not by the node: \
 never treat a preview that ends as the node shipping truncated work. \
@@ -1164,12 +1172,21 @@ Output ONLY a JSON object:
 {\"verdict\": \"PASS\" | \"FAIL\", \"reason\": \"...\", \"criteria\": [{\"name\": \"...\", \"pass\": true | false, \"reason\": \"...\"}]}
 ";
 
+/// Total bytes of automated evidence handed to the critic. The diff, the gate
+/// results and the project-file snapshot share it, so no one section can crowd
+/// the others out of the prompt.
+const CRITIC_EVIDENCE_BUDGET: usize = 12_000;
+/// Share of the budget reserved for the project-file snapshot.
+const CRITIC_SNAPSHOT_BUDGET: usize = 4_000;
+
+#[allow(clippy::too_many_arguments)]
 pub fn verify_node(
     store: &Store,
     node: &Node,
     deliverable: &str,
     artifacts: &[(String, String)],
     criteria: &[String],
+    gates: &[crate::verify::GateOutcome],
     model: &str,
     work_root: &Path,
 ) -> std::result::Result<(String, Vec<Value>), RunnerError> {
@@ -1210,6 +1227,22 @@ pub fn verify_node(
     // brand-new untracked files - is precisely this node's contribution, not its
     // description of itself. Judging prose alone is how a node that never
     // created a file was passed as complete.
+    //
+    // Gates and project files are evidence a diff alone cannot carry: a passing
+    // gate settles a criterion even when the file that criterion is about was
+    // committed by an earlier node and is absent from this diff.
+    let gate_commands: Vec<String> = gates.iter().map(|g| g.command.clone()).collect();
+    let gate_evidence = crate::verify::format_gate_evidence(gates);
+    let project_snapshot = crate::git::project_evidence_snapshot(
+        work_root,
+        criteria,
+        &gate_commands,
+        CRITIC_SNAPSHOT_BUDGET,
+    );
+    let diff_budget = CRITIC_EVIDENCE_BUDGET
+        .saturating_sub(project_snapshot.len())
+        .saturating_sub(gate_evidence.len())
+        .max(2_000);
     let changed_on_disk = crate::git::has_uncommitted_changes(work_root);
     let code_evidence = if !changed_on_disk {
         if !children.is_empty() {
@@ -1220,12 +1253,12 @@ pub fn verify_node(
     } else {
         format!(
             "Working-tree change (git):\n{}",
-            crate::git::worktree_change_summary(work_root, 12000)
+            crate::git::worktree_change_summary(work_root, diff_budget)
         )
     };
 
     let prompt = format!(
-        "Contract goal: {}\nAcceptance criteria:\n{}\nDeliverable summary:\n{}\n{}\nActual code change:\n{}{}",
+        "Contract goal: {}\nAcceptance criteria:\n{}\nDeliverable summary:\n{}\n{}\nActual code change:\n{}{}{}{}",
         node.goal,
         bullets(criteria),
         if deliverable.is_empty() {
@@ -1239,6 +1272,18 @@ pub fn verify_node(
             format!("\n{children_summary}\n")
         },
         code_evidence,
+        if gate_evidence.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nAutomated gates (run by the harness):\n{gate_evidence}")
+        },
+        if project_snapshot.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n\nProject files (current state, including files committed before this node):\n{project_snapshot}"
+            )
+        },
         if artifact_summary.is_empty() {
             String::new()
         } else {
