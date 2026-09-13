@@ -734,6 +734,15 @@ function renderTree() {
   });
   scroll.scrollLeft = keepLeft;
   scroll.scrollTop = keepTop;
+  // A top-down tree can be wider than a phone screen, and the root is centred
+  // over its whole subtree, so at scrollLeft 0 it may sit off to the right.
+  // Bring it into view on the first render, then leave scrolling to the viewer.
+  if (view === "graph" && keepLeft === 0) {
+    const rootEl = scroll.querySelector('.gnode[data-id="root"]');
+    if (rootEl && rootEl.offsetLeft > scroll.clientWidth - 40) {
+      scroll.scrollLeft = Math.max(0, rootEl.offsetLeft - (scroll.clientWidth - rootEl.offsetWidth) / 2);
+    }
+  }
 }
 
 /* "Next up" is the set of nodes that can start right now: pending with every
@@ -818,31 +827,58 @@ function renderGraph() {
   const compact = avail < 640;
   const W = compact ? 198 : 246;
   const H = compact ? 92 : 100;
-  const colGap = compact ? 56 : 86;
-  const rowGap = 16;
+  const colGap = compact ? 20 : 30;
+  const rowGap = compact ? 42 : 58;
   const pad = 18;
 
   const order = [];
   const visit = (n) => { order.push(n); childrenOf(n.id).forEach(visit); };
   const root = byId("root");
-  (root ? [root] : state.nodes.filter((n) => !n.parent)).forEach(visit);
+  const tops = root ? [root] : state.nodes.filter((n) => !n.parent);
+  tops.forEach(visit);
+
+  // Top-down tree layout. Each depth is one row; a node takes one horizontal
+  // slot wide enough for its whole subtree, and is centred over its children,
+  // so siblings sit side by side and a subtree stays grouped. pos.x is the
+  // card's centre (cards are drawn from x - W / 2).
+  const span = {};
+  const measure = (n) => {
+    const kids = childrenOf(n.id);
+    let total = 0;
+    kids.forEach((k, i) => { total += measure(k); if (i) total += colGap; });
+    span[n.id] = Math.max(W, total);
+    return span[n.id];
+  };
+  tops.forEach(measure);
 
   const pos = {};
-  order.forEach((n, i) => {
-    const col = Math.max(0, (Number(n.depth) || 1) - 1);
-    pos[n.id] = { x: pad + col * (W + colGap), y: pad + i * (H + rowGap) };
-  });
-
-  const parentCurve = (a, b) => {
-    const dx = Math.max(26, (b.x - a.x) / 2);
-    return `M${a.x},${a.y} C${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`;
+  const place = (n, left) => {
+    const w = span[n.id];
+    pos[n.id] = {
+      x: left + w / 2,
+      y: pad + Math.max(0, (Number(n.depth) || 1) - 1) * (H + rowGap),
+    };
+    let cursor = left;
+    childrenOf(n.id).forEach((k) => {
+      place(k, cursor);
+      cursor += span[k.id] + colGap;
+    });
   };
-  // Dependency edges bow out to the RIGHT of the cards, so they never run
-  // through the cards or over a parent edge (which always enters from the left).
-  // Each successive dependency on the same node stacks a little further out.
+  let cursor = pad;
+  tops.forEach((n) => { place(n, cursor); cursor += span[n.id] + colGap; });
+  const forestWidth = tops.length ? cursor - colGap - pad : 0;
+
+  // Parent edges drop straight down from the parent's base to the child's top.
+  const parentCurve = (a, b) => {
+    const dy = Math.max(24, (b.y - a.y) / 2);
+    return `M${a.x},${a.y} C${a.x},${a.y + dy} ${b.x},${b.y - dy} ${b.x},${b.y}`;
+  };
+  // Dependency edges bow out to the RIGHT of both cards, so they never run
+  // through the cards or over a vertical parent edge. Each successive
+  // dependency on the same node stacks a little further out.
   const depCurve = (a, b, k) => {
-    const bx = Math.max(a.x, b.x) + W + 26 + k * 11;
-    return `M${a.x + W},${a.y + H / 2} C${bx},${a.y + H / 2} ${bx},${b.y + H / 2} ${b.x + W},${b.y + H / 2}`;
+    const bx = Math.max(a.x, b.x) + W / 2 + 26 + k * 11;
+    return `M${a.x + W / 2},${a.y + H / 2} C${bx},${a.y + H / 2} ${bx},${b.y + H / 2} ${b.x + W / 2},${b.y + H / 2}`;
   };
 
   const edges = [];
@@ -861,7 +897,7 @@ function renderGraph() {
     if (n.parent && pos[n.parent]) {
       const a = pos[n.parent], b = pos[n.id];
       edges.push(`<path class="edge edge-parent edge-${pathState(n)}" d="${parentCurve(
-        { x: a.x + W, y: a.y + H / 2 }, { x: b.x, y: b.y + H / 2 })}" />`);
+        { x: a.x, y: a.y + H }, { x: b.x, y: b.y })}" />`);
     }
   }
   // Dependency edges are hidden by default so a dense graph stays readable; the
@@ -873,7 +909,7 @@ function renderGraph() {
       const focused = selected === n.id || selected === dep.id;
       if (!showDeps && !focused) return;
       const a = pos[dep.id], b = pos[n.id];
-      const bx = Math.max(a.x, b.x) + W + 26 + k * 11;
+      const bx = Math.max(a.x, b.x) + W / 2 + 26 + k * 11;
       maxRight = Math.max(maxRight, bx + 12);
       const state = dep.status === "failed" || n.status === "failed"
         ? "failed"
@@ -892,7 +928,7 @@ function renderGraph() {
       (n.stale ? ' <span class="badge warn">stale</span>' : "") +
       (n.tampered ? ' <span class="badge bad">tampered</span>' : "");
     return `<button class="gnode ${esc(st.key)} ${n.status === "running" ? "running" : ""} ${selected === n.id ? "selected" : ""}"
-      data-id="${esc(n.id)}" style="left:${p.x}px;top:${p.y}px;width:${W}px;height:${H}px"
+      data-id="${esc(n.id)}" style="left:${p.x - W / 2}px;top:${p.y}px;width:${W}px;height:${H}px"
       title="${esc(n.id)}\n${esc(n.goal || "")}\nstate: ${esc(st.label)}">
       <span class="top"><span class="row-tag">${esc(shortId(n.id))}</span><span class="gstate" title="${esc(st.label)}">${esc(st.key === "running" ? "● running" : st.key === "ready" ? "◇ " + st.label : "— " + st.label)}</span></span>
       <span class="gt">${esc(nodeName(n))}${badges}</span>
@@ -900,8 +936,8 @@ function renderGraph() {
     </button>`;
   }).join("");
 
-  const width = Math.max(avail, ...order.map((n) => pos[n.id].x + W), maxRight) + pad;
-  const height = Math.max(240, pad + order.length * (H + rowGap));
+  const width = Math.max(avail, pad + forestWidth, maxRight) + pad;
+  const height = Math.max(240, ...order.map((n) => pos[n.id].y + H)) + pad;
 
   el("tree").innerHTML =
     `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" aria-hidden="true">
