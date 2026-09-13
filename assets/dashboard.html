@@ -139,8 +139,10 @@
   }
 
   /* ---------- layout ---------- */
-  .layout { display: grid; grid-template-columns: minmax(360px, 560px) minmax(0, 1fr); gap: 18px; align-items: start; }
-  .layout > * { min-width: 0; }
+  /* The graph is the map of the whole run, so it owns the page top at full
+     width; the node detail and steering controls stack below it. */
+  .graph-panel { margin-bottom: 18px; }
+  .graph-panel > * { min-width: 0; }
 
   /* ---------- tree ---------- */
   .panel {
@@ -177,6 +179,29 @@
   .legend .swatch.complete { border-color: var(--complete); }
   .legend .swatch.failed { border-color: var(--failed); }
   .legend .swatch.pending { border-color: var(--pending); border-top-style: dashed; opacity: .6; }
+
+  .gtools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .gtools label.gtoggle {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+    color: var(--muted); cursor: pointer; user-select: none; white-space: nowrap;
+  }
+  .gtools label.gtoggle:hover { color: var(--text); }
+  .gtools input[type=checkbox] { accent-color: var(--accent); width: 14px; height: 14px; }
+
+  /* "Next up" is the answer to "what can run in parallel right now". */
+  .nextup {
+    display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+    padding: 9px 14px; border-bottom: 1px solid var(--line-soft); font-size: 12.5px;
+  }
+  .nextup .label {
+    text-transform: uppercase; letter-spacing: .08em; font-size: 11px;
+    font-weight: 700; color: var(--complete); white-space: nowrap;
+  }
+  .nextup.idle .label { color: var(--faint); }
+  .nextup .who { color: var(--text); overflow-wrap: anywhere; }
+  .nextup .who .sep { color: var(--faint); }
+  .nextup .note { color: var(--muted); }
+  .nextup .count { color: var(--faint); font-variant-numeric: tabular-nums; }
 
   .graph-scroll { overflow: auto; max-height: calc(100vh - 250px); overscroll-behavior: contain; }
   .graph { position: relative; }
@@ -221,7 +246,18 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .gnode .ga:empty { display: none; }
-  .gnode .top .row-tag { margin-left: auto; }
+  .gnode .top .gstate { margin-left: auto; }
+  /* Run state is written in words on every node, so colour is never the only
+     carrier; the border tint is a secondary cue. */
+  .gnode .gstate { font-size: 11px; font-weight: 650; letter-spacing: .01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gnode.ready { border-color: rgba(95,208,138,.5); }
+  .gnode.ready .gstate { color: var(--complete); }
+  .gnode.waiting .gstate { color: var(--suspended); }
+  .gnode.complete .gstate { color: var(--complete); }
+  .gnode.failed .gstate { color: var(--failed); }
+  .gnode.suspended .gstate { color: var(--suspended); }
+  .gnode.waiting { opacity: .9; }
+  .gnode.complete { opacity: .82; }
 
   .row {
     width: 100%; text-align: left; cursor: pointer;
@@ -268,6 +304,8 @@
   .chip.failed { color: var(--failed); }
   .chip.suspended { color: var(--suspended); }
   .chip.pending { color: var(--pending); }
+  .chip.ready { color: var(--complete); }
+  .chip.waiting { color: var(--suspended); }
 
   .badge {
     display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
@@ -303,6 +341,24 @@
   }
   .cmd { font-family: var(--mono); font-size: 12.5px; background: var(--bg-soft); border: 1px solid var(--line-soft); border-radius: 6px; padding: 1px 6px; }
 
+  /* Git-style diff: line-anchored backgrounds, monospace, scrolls both ways.
+     The +/-/@@/* markers stay in the text, so colour is never the only cue. */
+  pre.diff-box {
+    margin: 6px 0 0; padding: 6px 0; background: var(--bg-soft);
+    border: 1px solid var(--line-soft); border-radius: 10px;
+    overflow: auto; max-height: 460px; font-size: 12.5px; line-height: 1.45;
+    white-space: pre;
+  }
+  .diffline { display: block; width: max-content; min-width: 100%; padding: 0 12px; }
+  .diffline.add { background: rgba(95,208,138,.13); color: #a9ecc3; }
+  .diffline.del { background: rgba(255,123,123,.13); color: #ffb7b7; }
+  .diffline.hunk { background: rgba(138,169,255,.12); color: var(--accent); }
+  .diffline.file { color: var(--text); font-weight: 650; margin-top: 8px; }
+  .diffline.meta { color: var(--faint); }
+  .diffline.commit { color: var(--muted); }
+  .diffline.head { color: var(--accent); }
+  .diffline.ctx { color: var(--muted); }
+
   .events { display: flex; flex-direction: column; gap: 2px; }
   .event {
     display: grid; grid-template-columns: auto auto minmax(0,1fr); gap: 10px;
@@ -334,6 +390,13 @@
   details.disclosure .inner { padding: 0 12px 12px; }
 
   /* ---------- steering ---------- */
+  .steer-group { margin-top: 18px; }
+  .steer-group:first-of-type { margin-top: 0; }
+  .steer-group > h4.group-title {
+    margin: 0 0 3px; font-size: 12.5px; font-weight: 700; color: var(--text);
+    text-transform: none; letter-spacing: 0;
+  }
+  .steer-group > p.group-hint { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
   .steer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
   .action {
     background: var(--bg-soft); border: 1px solid var(--line-soft);
@@ -341,6 +404,36 @@
   }
   .action h4 { margin: 0 0 2px; font-size: 13.5px; color: var(--text); font-weight: 650; text-transform: none; letter-spacing: 0; }
   .action p.hint { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
+  .action p.hint .when { color: var(--text); font-weight: 600; }
+  .action p.hint .consequence { color: var(--running); }
+  .action.destructive { border-color: rgba(255,123,123,.4); background: rgba(255,123,123,.05); }
+  .action.destructive h4 { color: var(--failed); }
+
+  /* Inline, non-blocking confirmation replaces window.confirm(). */
+  .confirm-row {
+    display: flex; flex-direction: column; gap: 8px; margin-top: 8px;
+    padding: 10px; border-radius: 9px;
+    background: rgba(240,194,92,.08); border: 1px solid rgba(240,194,92,.35);
+  }
+  .confirm-row .confirm-msg { font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
+  .confirm-row .confirm-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .result {
+    margin: 0 0 14px; padding: 11px 13px; border-radius: 10px; font-size: 13px;
+    border: 1px solid var(--line-soft); background: var(--bg-soft); overflow-wrap: anywhere;
+  }
+  .result.ok { border-color: rgba(95,208,138,.5); }
+  .result.err { border-color: rgba(255,123,123,.5); color: #ffb4b4; }
+  .result .head { font-weight: 650; display: block; margin-bottom: 2px; }
+  .result.ok .head { color: var(--complete); }
+  .result.err .head { color: var(--failed); }
+  .result .stale-note { color: var(--running); display: block; margin-top: 5px; }
+
+  /* A newly added constraint / decision is highlighted so its trace is visible. */
+  li.hit, .event.hit {
+    background: rgba(95,208,138,.14); border-radius: 6px;
+    box-shadow: inset 2px 0 0 var(--complete); padding-left: 8px;
+  }
   form { display: flex; flex-direction: column; gap: 8px; }
   label { font-size: 12px; color: var(--muted); }
   input[type=text], textarea, select {
@@ -386,12 +479,12 @@
   /* ---------- responsive ---------- */
   @media (max-width: 900px) {
     .wrap { padding: 12px; }
-    .layout { grid-template-columns: 1fr; }
     .tree { max-height: 46vh; }
     .project { max-width: 100%; }
     .overview { padding: 15px; }
     .stats { width: 100%; }
     .stat { min-width: calc(50% - 4px); }
+    .panel-head { flex-wrap: wrap; }
   }
   @media (max-width: 430px) {
     body { font-size: 14px; }
@@ -417,32 +510,36 @@
     <section class="overview" id="overview">
       <div class="state-note">Loading run state…</div>
     </section>
-    <div class="layout">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Task graph</h2>
+    <section class="panel graph-panel">
+      <div class="panel-head">
+        <h2>Task graph</h2>
+        <div class="gtools">
+          <label class="gtoggle" title="Draw every depends_on edge. Off, only the selected node's dependencies are shown, so the graph stays readable.">
+            <input type="checkbox" id="show-deps" /> Dependencies
+          </label>
           <div class="viewtoggle" role="group" aria-label="Tree view">
             <button type="button" id="view-graph" class="active" aria-pressed="true">Graph</button>
             <button type="button" id="view-rows" aria-pressed="false">Rows</button>
           </div>
-          <span class="muted" id="treeCount"></span>
         </div>
-        <div class="legend" id="legend">
-          <span class="item"><span class="swatch parent"></span>parent → child</span>
-          <span class="item"><span class="swatch dep"></span>depends on</span>
-          <span class="item"><span class="swatch active"></span>active path</span>
-          <span class="item"><span class="swatch complete"></span>done</span>
-          <span class="item"><span class="swatch failed"></span>failed</span>
-          <span class="item"><span class="swatch pending"></span>waiting</span>
-        </div>
-        <div class="graph-scroll" id="graph-scroll">
-          <div class="graph" id="tree"><div class="state-note">Waiting for nodes…</div></div>
-        </div>
-      </section>
-      <section class="panel detail" id="detail">
-        <div class="state-note">Select a node to see its contract, activity and controls.</div>
-      </section>
-    </div>
+        <span class="muted" id="treeCount"></span>
+      </div>
+      <div class="legend" id="legend">
+        <span class="item"><span class="swatch parent"></span>parent → child</span>
+        <span class="item"><span class="swatch dep"></span>depends on</span>
+        <span class="item"><span class="swatch active"></span>active path</span>
+        <span class="item"><span class="swatch complete"></span>done</span>
+        <span class="item"><span class="swatch failed"></span>failed</span>
+        <span class="item"><span class="swatch pending"></span>waiting</span>
+      </div>
+      <div class="nextup" id="nextup" aria-live="polite"></div>
+      <div class="graph-scroll" id="graph-scroll">
+        <div class="graph" id="tree"><div class="state-note">Waiting for nodes…</div></div>
+      </div>
+    </section>
+    <section class="panel detail" id="detail">
+      <div class="state-note">Select a node to see its contract, activity and controls.</div>
+    </section>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -457,6 +554,11 @@ let state = null;
 let selected = null;
 let selectedSig = "";
 let detailBusy = false;
+let showDeps = false;
+/* The last steering result persists across poll re-renders so the user is never
+   left guessing whether an action landed; `highlight` marks the text it added. */
+let lastAction = null;
+let highlight = null;
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
@@ -485,6 +587,12 @@ function chip(status, withDot) {
   const s = status || "pending";
   return `<span class="chip ${esc(s)}">${withDot === false ? "" : '<span class="doto"></span>'}${esc(statusLabel(s))}</span>`;
 }
+/* The chip that names run state (ready / running / waiting on <ids> / done /
+   failed). It is the primary readout; colour is a secondary cue. */
+function stateChip(n) {
+  const st = runState(n);
+  return `<span class="chip ${esc(st.key)}" title="${esc(st.label)}"><span class="doto"></span>${esc(st.label)}</span>`;
+}
 function when(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -501,6 +609,31 @@ function fmtBytes(n) {
 const byId = (id) => (state && state.nodes.find((n) => n.id === id)) || null;
 const childrenOf = (id) =>
   (state ? state.nodes.filter((n) => (n.parent || null) === (id || null)) : []);
+
+/* Run state answers "can this run now?". It mirrors the scheduler's rule
+   (scheduler.rs `deps_satisfied`): a pending node is runnable once every
+   depends_on target is complete and not stale. Any other status keeps its
+   own name. Waiting names the exact ids still outstanding, so sequence and
+   parallelism are readable from the text alone. */
+function runState(n) {
+  if (!n) return { key: "pending", label: "unknown" };
+  if (n.status === "running") return { key: "running", label: "running" };
+  if (n.status === "complete") return { key: "complete", label: "done" };
+  if (n.status === "failed") return { key: "failed", label: "failed" };
+  if (n.status === "split") return { key: "split", label: "split" };
+  if (n.status === "suspended") return { key: "suspended", label: "suspended" };
+  const outstanding = (n.depends_on || []).filter((d) => {
+    const dep = byId(d);
+    return !dep || dep.status !== "complete" || dep.stale;
+  });
+  if (outstanding.length) {
+    return { key: "waiting", label: "waiting on " + outstanding.map(shortId).join(", "), outstanding };
+  }
+  return { key: "ready", label: "ready" };
+}
+function readyNodes() {
+  return state ? state.nodes.filter((n) => runState(n).key === "ready") : [];
+}
 
 /* ---------- data ---------- */
 async function jget(url) {
@@ -586,6 +719,8 @@ let view = "graph";
 
 function renderTree() {
   el("treeCount").textContent = state ? state.nodes.length + (state.nodes.length === 1 ? " node" : " nodes") : "";
+  el("show-deps").checked = showDeps;
+  renderNextUp();
   if (!state || !state.nodes.length) {
     el("tree").innerHTML = '<div class="state-note">No nodes yet. This project has not been initialised.</div>';
     return;
@@ -599,6 +734,33 @@ function renderTree() {
   });
   scroll.scrollLeft = keepLeft;
   scroll.scrollTop = keepTop;
+}
+
+/* "Next up" is the set of nodes that can start right now: pending with every
+   dependency complete. That, plus each node's run-state text, is how a viewer
+   sees what runs in parallel and what the sequence is. */
+function renderNextUp() {
+  const bar = el("nextup");
+  if (!state || !state.nodes.length) { bar.className = "nextup idle"; bar.innerHTML = ""; return; }
+  const ready = readyNodes();
+  const running = state.nodes.filter((n) => n.status === "running");
+  if (ready.length) {
+    const shown = ready.slice(0, 6).map((n) => `<span class="who" title="${esc(n.id)}">${esc(nodeName(n))}</span>`);
+    const more = ready.length > shown.length ? ` <span class="count">+${ready.length - shown.length} more</span>` : "";
+    bar.className = "nextup";
+    bar.innerHTML = `<span class="label">Next up</span><span class="who">${shown.join('<span class="sep"> · </span>')}</span>${more}`;
+    return;
+  }
+  bar.className = "nextup idle";
+  if (running.length) {
+    bar.innerHTML = `<span class="label">Next up</span><span class="note">Nothing new can start until the running node finishes.</span>`;
+  } else if (state.nodes.some((n) => n.status === "failed")) {
+    bar.innerHTML = `<span class="label">Next up</span><span class="note">A node failed. Nothing will start until it is retried or steered.</span>`;
+  } else if (state.nodes.every((n) => n.status === "complete")) {
+    bar.innerHTML = `<span class="label">Next up</span><span class="note">All nodes are done.</span>`;
+  } else {
+    bar.innerHTML = `<span class="label">Next up</span><span class="note">No node is runnable — every pending node is waiting on a dependency.</span>`;
+  }
 }
 
 function renderRows() {
@@ -620,7 +782,7 @@ function renderRows() {
             <span class="row-title">${esc(nodeName(n))}</span>
             ${activity}
           </span>
-          <span style="display:flex;align-items:center;gap:6px;flex:none">${chip(n.status)}<span class="row-tag">${esc(shortId(n.id))}</span></span>
+          <span style="display:flex;align-items:center;gap:6px;flex:none">${stateChip(n)}<span class="row-tag">${esc(shortId(n.id))}</span></span>
         </button>
         ${build(kids)}
       </li>`;
@@ -655,7 +817,7 @@ function renderGraph() {
   const avail = (scroll.clientWidth || 800) - 4;
   const compact = avail < 640;
   const W = compact ? 198 : 246;
-  const H = compact ? 80 : 88;
+  const H = compact ? 92 : 100;
   const colGap = compact ? 56 : 86;
   const rowGap = 16;
   const pad = 18;
@@ -702,9 +864,14 @@ function renderGraph() {
         { x: a.x + W, y: a.y + H / 2 }, { x: b.x, y: b.y + H / 2 })}" />`);
     }
   }
+  // Dependency edges are hidden by default so a dense graph stays readable; the
+  // toggle shows all of them, and the selected node's own dependencies are
+  // always shown so selecting a node focuses its inputs.
   for (const n of order) {
     const deps = (n.depends_on || []).map((d) => byId(d)).filter((d) => d && pos[d.id]);
     deps.forEach((dep, k) => {
+      const focused = selected === n.id || selected === dep.id;
+      if (!showDeps && !focused) return;
       const a = pos[dep.id], b = pos[n.id];
       const bx = Math.max(a.x, b.x) + W + 26 + k * 11;
       maxRight = Math.max(maxRight, bx + 12);
@@ -719,14 +886,15 @@ function renderGraph() {
 
   const cards = order.map((n) => {
     const p = pos[n.id];
+    const st = runState(n);
     const activity = n.activity || "";
     const badges =
       (n.stale ? ' <span class="badge warn">stale</span>' : "") +
       (n.tampered ? ' <span class="badge bad">tampered</span>' : "");
-    return `<button class="gnode ${n.status === "running" ? "running" : ""} ${selected === n.id ? "selected" : ""}"
+    return `<button class="gnode ${esc(st.key)} ${n.status === "running" ? "running" : ""} ${selected === n.id ? "selected" : ""}"
       data-id="${esc(n.id)}" style="left:${p.x}px;top:${p.y}px;width:${W}px;height:${H}px"
-      title="${esc(n.id)}\n${esc(n.goal || "")}">
-      <span class="top">${chip(n.status)}<span class="row-tag">${esc(shortId(n.id))}</span></span>
+      title="${esc(n.id)}\n${esc(n.goal || "")}\nstate: ${esc(st.label)}">
+      <span class="top"><span class="row-tag">${esc(shortId(n.id))}</span><span class="gstate" title="${esc(st.label)}">${esc(st.key === "running" ? "● running" : st.key === "ready" ? "◇ " + st.label : "— " + st.label)}</span></span>
       <span class="gt">${esc(nodeName(n))}${badges}</span>
       <span class="ga" title="${esc(activity)}">${esc(activity ? "▸ " + activity : "")}</span>
     </button>`;
@@ -764,15 +932,20 @@ function selectNode(id) {
   if (selected === id) return;
   selected = id;
   selectedSig = "";
-  el("tree").querySelectorAll(".row, .gnode").forEach((b) =>
-    b.classList.toggle("selected", b.dataset.id === id));
+  highlight = null;
+  // Re-render the graph so the selected node's dependency edges appear (focus
+  // mode) and the selection highlight moves.
+  renderTree();
   tickDetail(true);
 }
 
 /* ---------- detail ---------- */
-function listOr(items, renderItem) {
+function listOr(items, renderItem, hit) {
   if (!items || !items.length) return '<div class="empty">none</div>';
-  return `<ul class="clean">${items.map((i) => `<li>${renderItem ? renderItem(i) : esc(i)}</li>`).join("")}</ul>`;
+  return `<ul class="clean">${items.map((i) => {
+    const isHit = hit && String(i).includes(hit);
+    return `<li class="${isHit ? "hit" : ""}">${renderItem ? renderItem(i) : esc(i)}</li>`;
+  }).join("")}</ul>`;
 }
 
 function eventSummary(e) {
@@ -799,6 +972,26 @@ function eventList(events) {
   }).join("")}</div>`;
 }
 
+/* Render a diff the way git prints one: file headers, @@ hunk headers, green
+   additions, red removals, context lines, monospace, scrollable both ways.
+   The +, - and @@ markers stay in the text so colour is never the only cue. */
+function diffLineClass(line) {
+  if (line.startsWith("diff --git ") || line.startsWith("diff --cc ")) return "file";
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+++") || line.startsWith("---")) return "head";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  if (/^(commit |Merge:|Author:|Date:|    )/.test(line)) return "commit";
+  if (/^(index |new file|deleted file|similarity |rename |old mode|new mode|Binary files|GIT binary patch)/.test(line)) return "meta";
+  return "ctx";
+}
+function renderDiff(diff) {
+  if (!diff || !diff.trim()) return '<pre class="diff-box"><span class="diffline ctx">(no commit for this node)</span></pre>';
+  const lines = String(diff).replace(/\n$/, "").split("\n");
+  const body = lines.map((line) => `<span class="diffline ${diffLineClass(line)}">${esc(line)}</span>`).join("");
+  return `<pre class="diff-box">${body}</pre>`;
+}
+
 function renderDetail(n) {
   const parent = n.parent ? byId(n.parent) : null;
   const dc = n.decisions || [];
@@ -819,7 +1012,7 @@ function renderDetail(n) {
 
   return `
     <div class="detail-head">
-      <div class="meta">${chip(n.status)} <span class="row-tag">${esc(shortId(n.id))}</span></div>
+      <div class="meta">${stateChip(n)} <span class="row-tag">${esc(shortId(n.id))}</span></div>
       <h1>${esc(n.goal || nodeName(n))}</h1>
       <div class="meta">
         <span class="mono" title="full node id">${esc(n.id)}</span>
@@ -855,11 +1048,11 @@ function renderDetail(n) {
             : `<span class="mono">${esc(d)}</span>`;
         })}
         <h4>Interfaces</h4>${listOr(interfaces)}
-        <h4>Inherited constraints</h4>${listOr(constraints)}
+        <h4>Inherited constraints</h4>${listOr(constraints, null, highlight)}
       </div>
 
       <div class="section">
-        <h3>Decisions</h3>${listOr(dc)}
+        <h3>Decisions</h3>${listOr(dc, null, highlight)}
       </div>
 
       <div class="section">
@@ -885,9 +1078,9 @@ function renderDetail(n) {
 
       <div class="section">
         <h3>Committed diff</h3>
-        <details class="disclosure">
+        <details class="disclosure" id="diff-disclosure">
           <summary>Show the actual changes committed for this node</summary>
-          <div class="inner"><pre class="box">${esc(n.diff || "(no commit for this node)")}</pre></div>
+          <div class="inner">${renderDiff(n.diff)}</div>
         </details>
         <details class="disclosure">
           <summary>Assembled executor context (${fmtBytes(n.context_bytes)})</summary>
@@ -918,115 +1111,217 @@ function steering(n) {
     <div class="section">
       <h3>Steer this node</h3>
       <p class="hint" style="color:var(--muted);font-size:12.5px;margin:0 0 12px">
-        Every action below is applied through the same state the scheduler and TUI use. Nothing changes until you press the button.
+        Every action below is applied through the same state the scheduler and TUI use. Nothing changes until you confirm.
       </p>
-      <div class="steer-grid">
-        <div class="action">
-          <h4>Add a constraint or idea</h4>
-          <p class="hint">Applies to this node and every descendant, and reaches a live scheduler on its next step.</p>
-          <form id="f-constraint">
-            <label for="fc-text">Constraint text</label>
-            <input id="fc-text" type="text" name="text" placeholder="e.g. use the existing Store, never a parallel path" required />
-            <button class="btn" type="submit">Add constraint</button>
-          </form>
-        </div>
+      ${actionResult(n)}
 
-        <div class="action">
-          <h4>Edit the contract</h4>
-          <p class="hint">Change what this node is required to do and how it is checked.</p>
-          <form id="f-edit">
-            <label for="fe-goal">Goal</label>
-            <textarea id="fe-goal" name="goal" placeholder="${esc(n.goal)}"></textarea>
-            <label for="fe-ac">Acceptance criteria (one per line)</label>
-            <textarea id="fe-ac" name="acceptance_criteria">${esc((n.acceptance_criteria || []).join("\n"))}</textarea>
-            <label for="fe-v">Verification commands (one per line)</label>
-            <textarea id="fe-v" name="verification" style="min-height:52px">${esc((n.verification || []).join("\n"))}</textarea>
-            <label for="fe-mv">Manual verification (one per line)</label>
-            <textarea id="fe-mv" name="manual_verification" style="min-height:52px">${esc((n.manual_verification || []).join("\n"))}</textarea>
-            <button class="btn" type="submit">Save contract</button>
-          </form>
+      <div class="steer-group">
+        <h4 class="group-title">Add guidance</h4>
+        <p class="group-hint">Additive: pins a requirement or idea onto the work without rewriting it.</p>
+        <div class="steer-grid">
+          <div class="action">
+            <h4>Add a constraint or idea</h4>
+            <p class="hint">
+              What it is: text added to this node's contract.<br />
+              When: you want the work to respect something it currently does not.<br />
+              Consequence: <span class="consequence">applies to this node and every descendant</span>, and is queued for a live run's next scheduler step.
+            </p>
+            <form id="f-constraint">
+              <label for="fc-text">Constraint text</label>
+              <input id="fc-text" type="text" name="text" placeholder="e.g. use the existing Store, never a parallel path" required />
+              <button class="btn" type="submit">Add constraint</button>
+            </form>
+          </div>
         </div>
+      </div>
 
-        <div class="action">
-          <h4>Retry this node</h4>
-          <p class="hint">Resets this node and its subtree to pending. A failed node's partial work is reverted first.</p>
-          <form id="f-retry">
-            <button class="btn warn" type="submit">Retry node and subtree</button>
-          </form>
+      <div class="steer-group">
+        <h4 class="group-title">Change the plan</h4>
+        <p class="group-hint">Rewrites what the node must do, how it is checked, or what must finish first.</p>
+        <div class="steer-grid">
+          <div class="action">
+            <h4>Edit the contract</h4>
+            <p class="hint">
+              What it is: change the goal, acceptance criteria, verification commands and manual verification.<br />
+              When: the task is mis-scoped or checked the wrong way. The fields are pre-filled with the current contract.<br />
+              Consequence: <span class="consequence">the node must satisfy the new contract to be accepted.</span>
+            </p>
+            <form id="f-edit">
+              <label for="fe-goal">Goal</label>
+              <textarea id="fe-goal" name="goal">${esc(n.goal || "")}</textarea>
+              <label for="fe-ac">Acceptance criteria (one per line)</label>
+              <textarea id="fe-ac" name="acceptance_criteria">${esc((n.acceptance_criteria || []).join("\n"))}</textarea>
+              <label for="fe-v">Verification commands (one per line)</label>
+              <textarea id="fe-v" name="verification" style="min-height:52px">${esc((n.verification || []).join("\n"))}</textarea>
+              <label for="fe-mv">Manual verification (one per line)</label>
+              <textarea id="fe-mv" name="manual_verification" style="min-height:52px">${esc((n.manual_verification || []).join("\n"))}</textarea>
+              <button class="btn" type="submit">Save contract</button>
+            </form>
+          </div>
+
+          <div class="action">
+            <h4>Answer or route an escalation</h4>
+            <p class="hint">
+              What it is: amend an inherited constraint that proved false, or make this node wait for another.<br />
+              When: a node escalated because an assumption does not hold on this machine.<br />
+              Consequence: the amendment is written into the affected contracts; a dependency <span class="consequence">blocks this node until the named node is complete.</span>
+            </p>
+            <form id="f-amend">
+              <label for="fa-old">Assumption that proved false</label>
+              <input id="fa-old" type="text" name="old" placeholder="the assumption that proved false" required />
+              <label for="fa-new">Amended constraint</label>
+              <input id="fa-new" type="text" name="new" placeholder="what should be true instead" required />
+              <button class="btn" type="submit">Amend constraint</button>
+            </form>
+            <form id="f-dep" style="margin-top:12px">
+              <label for="fd-dep">Require this node to finish first</label>
+              <input id="fd-dep" type="text" name="dependency" list="node-ids" placeholder="node id" required />
+              <datalist id="node-ids">${allIds.map((id) => `<option value="${esc(id)}">${esc(nodeName(byId(id)))}</option>`).join("")}</datalist>
+              <button class="btn ghost" type="submit">Add dependency</button>
+            </form>
+          </div>
         </div>
+      </div>
 
-        <div class="action">
-          <h4>Answer or route an escalation</h4>
-          <p class="hint">Amend a falsified inherited constraint, or require another node to finish first.</p>
-          <form id="f-amend">
-            <label for="fa-old">Assumption that proved false</label>
-            <input id="fa-old" type="text" name="old" placeholder="the assumption that proved false" required />
-            <label for="fa-new">Amended constraint</label>
-            <input id="fa-new" type="text" name="new" placeholder="what should be true instead" required />
-            <button class="btn" type="submit">Amend constraint</button>
-          </form>
-          <form id="f-dep" style="margin-top:12px">
-            <label for="fd-dep">Require this node to finish first</label>
-            <input id="fd-dep" type="text" name="dependency" list="node-ids" placeholder="node id" required />
-            <datalist id="node-ids">${allIds.map((id) => `<option value="${esc(id)}">${esc(nodeName(byId(id)))}</option>`).join("")}</datalist>
-            <button class="btn ghost" type="submit">Add dependency</button>
-          </form>
+      <div class="steer-group">
+        <h4 class="group-title" style="color:var(--failed)">Destructive — removes work</h4>
+        <p class="group-hint">Irreversible from the dashboard. Always confirmed before it runs.</p>
+        <div class="steer-grid">
+          <div class="action destructive">
+            <h4>Retry this node</h4>
+            <p class="hint">
+              What it is: reset this node and its whole subtree back to pending.<br />
+              When: a node failed or was accepted on stale assumptions and must run again.<br />
+              Consequence: <span class="consequence">partial work is reverted and every descendant restarts.</span>
+            </p>
+            <form id="f-retry">
+              <button class="btn warn" type="submit">Retry node and subtree</button>
+            </form>
+          </div>
         </div>
       </div>
     </div>`;
 }
 
+/* A run is live when a node is actually running. If nothing is running the
+   dashboard must say so plainly, because a steering action is recorded and
+   queued but only a resumed scheduler applies it. */
+function isRunLive() {
+  return !!(state && state.nodes.some((n) => n.status === "running"));
+}
+function runLivenessNote() {
+  if (isRunLive()) {
+    return 'A live run will pick this up on its next scheduler step.';
+  }
+  const root = state && state.root_status ? state.root_status : "";
+  const where = root ? ` (the run is ${root})` : "";
+  return `No scheduler is running right now${where}. The change is recorded in the contracts and queued, but you must resume it with "fractal run" before it takes effect.`;
+}
+function actionResult(node) {
+  if (!lastAction || lastAction.node !== node.id) return "";
+  return `<div class="result ${lastAction.ok ? "ok" : "err"}">
+    <span class="head">${lastAction.ok ? "Applied" : "Rejected"} — ${esc(lastAction.message)}</span>
+    ${lastAction.ok ? runLivenessNote() : ""}
+  </div>`;
+}
+
+/* Inline confirmation: one prompt per action, no blocking window.confirm(),
+   no duplicate dialogs. Resolves true only when Confirm is clicked. */
+function inlineConfirm(f, btn, message) {
+  return new Promise((resolve) => {
+    if (f.dataset.armed === "1") return;
+    f.dataset.armed = "1";
+    const row = document.createElement("div");
+    row.className = "confirm-row";
+    const msg = document.createElement("span");
+    msg.className = "confirm-msg";
+    msg.textContent = message;
+    const btns = document.createElement("div");
+    btns.className = "confirm-btns";
+    const go = document.createElement("button");
+    go.type = "button"; go.className = "btn"; go.textContent = "Confirm";
+    const cancel = document.createElement("button");
+    cancel.type = "button"; cancel.className = "btn ghost"; cancel.textContent = "Cancel";
+    btns.append(go, cancel);
+    row.append(msg, btns);
+    if (btn) btn.style.display = "none";
+    f.appendChild(row);
+    const cleanup = () => { f.dataset.armed = "0"; row.remove(); if (btn) btn.style.display = ""; };
+    go.addEventListener("click", () => { cleanup(); resolve(true); });
+    cancel.addEventListener("click", () => { cleanup(); resolve(false); });
+  });
+}
+
 /* ---------- steering bindings ---------- */
 function bindSteering(n) {
-  const done = (res) => {
-    if (!res) return;
-    if (res.ok) toast("Done — " + res.message, false);
-    else toast("Rejected — " + (res.error || "unknown error"), true);
-    tick(true);
-  };
-  const submit = (id, handler) => {
+  const submit = (id, cfg) => {
     const f = el(id);
     if (!f) return;
     f.addEventListener("submit", async (ev) => {
       ev.preventDefault();
+      if (f.dataset.busy === "1" || f.dataset.armed === "1") return;
       const btn = f.querySelector("button[type=submit]");
+      const message = typeof cfg.confirm === "function" ? cfg.confirm(f) : cfg.confirm;
+      const go = await inlineConfirm(f, btn, message);
+      if (!go) return;
+      f.dataset.busy = "1";
       if (btn) btn.disabled = true;
-      try { done(await handler(f)); }
-      catch (err) { toast("Request failed — " + err, true); }
-      finally { if (btn) btn.disabled = false; }
+      try {
+        const res = await jpost(cfg.action(f));
+        if (res && res.ok) {
+          lastAction = { ok: true, message: res.message || "done", node: n.id };
+          highlight = cfg.highlight ? cfg.highlight(f) : null;
+          if (cfg.clear) cfg.clear(f);
+          toast("Applied — " + (res.message || "done"), false);
+        } else {
+          const err = (res && res.error) || "unknown error";
+          lastAction = { ok: false, message: err, node: n.id };
+          highlight = null;
+          toast("Rejected — " + err, true);
+        }
+      } catch (err) {
+        lastAction = { ok: false, message: String(err), node: n.id };
+        highlight = null;
+        toast("Request failed — " + err, true);
+      } finally {
+        f.dataset.busy = "0";
+        if (btn) btn.disabled = false;
+      }
+      tick(true);
     });
   };
 
-  submit("f-constraint", (f) => {
-    const text = f.text.value.trim();
-    if (!text) return null;
-    if (!confirm(`Add this constraint to ${n.id} and all its descendants?\n\n"${text}"`)) return null;
-    return jpost({ action: "constraint", node: n.id, text });
+  submit("f-constraint", {
+    confirm: (f) => `Add this constraint to ${n.id} and all its descendants?\n\n"${f.text.value.trim()}"`,
+    action: (f) => ({ action: "constraint", node: n.id, text: f.text.value.trim() }),
+    highlight: (f) => f.text.value.trim() || null,
+    clear: (f) => { f.text.value = ""; },
   });
-  submit("f-edit", (f) => {
-    if (!confirm(`Save these contract changes to ${n.id}?`)) return null;
-    const action = { action: "edit_contract", node: n.id };
-    if (f.goal.value.trim()) action.goal = f.goal.value.trim();
-    action.acceptance_criteria = lines(f.acceptance_criteria.value);
-    action.verification = lines(f.verification.value);
-    action.manual_verification = lines(f.manual_verification.value);
-    return jpost(action);
+  submit("f-edit", {
+    confirm: `Save these contract changes to ${n.id}?`,
+    action: (f) => {
+      const action = { action: "edit_contract", node: n.id };
+      if (f.goal.value.trim()) action.goal = f.goal.value.trim();
+      action.acceptance_criteria = lines(f.acceptance_criteria.value);
+      action.verification = lines(f.verification.value);
+      action.manual_verification = lines(f.manual_verification.value);
+      return action;
+    },
   });
-  submit("f-retry", () => {
-    if (!confirm(`Retry ${n.id}?\n\nThis resets the node and its whole subtree to pending.`)) return null;
-    return jpost({ action: "retry", node: n.id });
+  submit("f-retry", {
+    confirm: `Retry ${n.id}?\n\nThis resets the node and its whole subtree to pending and reverts its partial work. It cannot be undone from the dashboard.`,
+    action: () => ({ action: "retry", node: n.id }),
   });
-  submit("f-amend", (f) => {
-    const oldV = f.old.value.trim(), newV = f.new.value.trim();
-    if (!oldV || !newV) return null;
-    if (!confirm(`Amend the falsified constraint on ${n.id}?\n\n"${oldV}"\nbecomes\n"${newV}"`)) return null;
-    return jpost({ action: "resolve", node: n.id, resolution: "amend", old: oldV, new: newV });
+  submit("f-amend", {
+    confirm: (f) => `Amend the falsified constraint on ${n.id}?\n\n"${f.old.value.trim()}"\nbecomes\n"${f.new.value.trim()}"`,
+    action: (f) => ({ action: "resolve", node: n.id, resolution: "amend", old: f.old.value.trim(), new: f.new.value.trim() }),
+    highlight: (f) => f.new.value.trim() || null,
+    clear: (f) => { f.old.value = ""; f.new.value = ""; },
   });
-  submit("f-dep", (f) => {
-    const dep = f.dependency.value.trim();
-    if (!dep) return null;
-    if (!confirm(`Make ${n.id} wait for ${dep}?`)) return null;
-    return jpost({ action: "resolve", node: n.id, resolution: "depends_on", dependency: dep });
+  submit("f-dep", {
+    confirm: (f) => `Make ${n.id} wait for ${f.dependency.value.trim()}? It will not start until that node is complete.`,
+    action: (f) => ({ action: "resolve", node: n.id, resolution: "depends_on", dependency: f.dependency.value.trim() }),
+    clear: (f) => { f.dependency.value = ""; },
   });
 }
 function lines(v) {
@@ -1038,10 +1333,15 @@ function formFocused() {
   const a = document.activeElement;
   return !!(a && el("detail").contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
 }
+function confirmOpen() {
+  return !!el("detail").querySelector(".confirm-row");
+}
 
 async function tickDetail(force) {
   if (!selected || detailBusy) return;
-  if (!force && formFocused()) return; // never clobber what someone is typing
+  // Never clobber what someone is typing, and never remove an open inline
+  // confirmation out from under them mid-action.
+  if (!force && (formFocused() || confirmOpen())) return;
   detailBusy = true;
   try {
     const n = await jget("/api/node?id=" + encodeURIComponent(selected));
@@ -1096,6 +1396,10 @@ document.addEventListener("click", (ev) => {
 });
 el("view-graph").addEventListener("click", () => setView("graph"));
 el("view-rows").addEventListener("click", () => setView("rows"));
+el("show-deps").addEventListener("change", (ev) => {
+  showDeps = ev.target.checked;
+  renderTree();
+});
 
 /* A narrow phone gets the flat Rows view by default: the graph still works and
    is one tap away, but a wide graph must not be the first thing on a 390px
