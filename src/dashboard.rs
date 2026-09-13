@@ -92,6 +92,42 @@ pub fn serve(project: &Path, cfg: ServerConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// The line a run prints so the user knows where to watch progress.
+pub fn progress_line(url: &str) -> String {
+    format!("fractal started - see progress here: {url}")
+}
+
+/// Start the dashboard in a background thread for the lifetime of the process
+/// and return the URL to announce. Best-effort by contract: the run must not
+/// fail because the dashboard could not bind, so the caller keeps going and
+/// reports how to start it manually. The default port is tried first; if it is
+/// taken, any free port is used so a second run never blocks the first.
+pub fn spawn(project: &Path) -> Result<String, String> {
+    let requested = ServerConfig {
+        host: None,
+        port: 8787,
+        bind_all: false,
+        allow_remote_mutations: false,
+    };
+    let listener = bind_listener(&requested).or_else(|_| {
+        bind_listener(&ServerConfig {
+            host: None,
+            port: 0,
+            bind_all: false,
+            allow_remote_mutations: false,
+        })
+    })?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("could not read bound address: {e}"))?
+        .port();
+    let url = format!("http://127.0.0.1:{port}/");
+    let store = Arc::new(Store::new(project));
+    let project = project.to_path_buf();
+    std::thread::spawn(move || serve_listener(listener, store, false, project));
+    Ok(url)
+}
+
 fn serve_listener(
     listener: TcpListener,
     store: Arc<Store>,
@@ -717,6 +753,34 @@ mod tests {
         let listener = bind_listener(&cfg).expect("loopback bind must succeed");
         let addr = listener.local_addr().unwrap();
         assert!(addr.ip().is_loopback(), "default bind must be loopback");
+    }
+
+    #[test]
+    fn progress_line_names_the_url() {
+        let line = progress_line("http://127.0.0.1:8787/");
+        assert!(
+            line.contains("fractal started") && line.contains("http://127.0.0.1:8787/"),
+            "the startup line must hand the user the real URL: {line}"
+        );
+    }
+
+    #[test]
+    fn spawn_falls_back_off_a_busy_default_port() {
+        // Hold 8787 if we can; whatever the outcome, a spawned dashboard must
+        // still come up on a free port rather than failing the run.
+        let blocker = TcpListener::bind(("127.0.0.1", 8787)).ok();
+        let (_store, dir) = tree("spawn_fallback");
+        let url = spawn(&dir).expect("spawn must always find a port");
+        assert!(url.starts_with("http://127.0.0.1:"), "got {url}");
+        assert!(url.ends_with('/'), "got {url}");
+        if blocker.is_some() {
+            assert!(
+                !url.contains(":8787/"),
+                "a busy default port must fall back to a free one: {url}"
+            );
+        }
+        drop(blocker);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

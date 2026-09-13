@@ -83,6 +83,9 @@ fractal --no-tui run
 - `--model <model>` passes the model straight to the leaf executor and skips the
   picker.
 - `--yes` (alias `--no-tui`) forces headless mode even on a terminal.
+- `--no-dashboard` (or `FRACTAL_NO_DASHBOARD=1`) skips the auto-served web
+  dashboard, for CI and other environments where binding a port is unwanted.
+  The run still prints the `fractal serve` command to watch progress (see below).
 
 ### Resume a paused project
 
@@ -117,6 +120,18 @@ fractal serve -p my-project   # same --project as the other commands
 It works against a completed project and alongside a live `fractal run`. The
 page polls, so a running node's status and event log update without a full
 reload.
+
+`fractal init` and `fractal run` also auto-serve this dashboard for the length of
+the run and print the URL:
+
+```text
+fractal started - see progress here: http://127.0.0.1:8787/
+```
+
+If the default port is taken the run falls back to a free port; if the dashboard
+cannot bind at all, the run continues and the line names the `fractal serve`
+command instead. Disable auto-serving with `--no-dashboard` or
+`FRACTAL_NO_DASHBOARD=1` (for CI).
 
 The page is organised so a run can be understood at a glance, then acted on:
 
