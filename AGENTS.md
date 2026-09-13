@@ -18,6 +18,11 @@
 - State layout, verbs, and terminology must match docs/SPEC.md §4 exactly:
   contract.md, decisions.md, log/, artifacts/, children/, and the verbs
   split / complete / escalate / note_global.
+- The web dashboard (`fractal serve`, src/dashboard.rs) is a second view over the
+  same `Store`, not a parallel state path. Route every dashboard read/mutation
+  through `Store` methods (or a new one there), never through ad-hoc file or SQL
+  access, so TUI, CLI and dashboard state stay identical. Its loopback/read-only
+  defaults and `--bind-all` risk are documented in README "Web dashboard".
 
 ## Maintaining this file
 

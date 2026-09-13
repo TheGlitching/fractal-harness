@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>fractal dashboard</title>
+<style>
+  :root {
+    --bg: #12131a;
+    --panel: #1b1d27;
+    --panel2: #232633;
+    --line: #333748;
+    --text: #e7e9f0;
+    --dim: #9aa0b5;
+    --accent: #7aa2f7;
+    --complete: #6ccb8b;
+    --running: #e6c46a;
+    --split: #7aa2f7;
+    --failed: #ef6b6b;
+    --suspended: #c99fe8;
+    --pending: #7a8199;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: baseline;
+    padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0; color: var(--accent); }
+  .project { color: var(--dim); font-size: 12px; word-break: break-all; }
+  .counts span { margin-right: 12px; color: var(--dim); }
+  .counts b { color: var(--text); }
+  main { display: grid; grid-template-columns: minmax(220px, 320px) minmax(0, 1fr); gap: 0; }
+  #tree {
+    border-right: 1px solid var(--line); padding: 10px 6px; min-height: calc(100vh - 52px);
+    overflow: auto;
+  }
+  .node {
+    display: block; width: 100%; text-align: left; background: none; border: 0;
+    color: var(--text); padding: 4px 8px; border-radius: 5px; cursor: pointer;
+    font: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .node:hover { background: var(--panel2); }
+  .node.selected { background: #2c3450; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .status-complete { color: var(--complete); } .dot.status-complete { background: var(--complete); }
+  .status-running  { color: var(--running); }  .dot.status-running  { background: var(--running); }
+  .status-split    { color: var(--split); }    .dot.status-split    { background: var(--split); }
+  .status-failed   { color: var(--failed); }   .dot.status-failed   { background: var(--failed); }
+  .status-suspended{ color: var(--suspended); }.dot.status-suspended{ background: var(--suspended); }
+  .status-pending  { color: var(--pending); }  .dot.status-pending  { background: var(--pending); }
+  #detail { padding: 16px 20px; overflow: auto; min-width: 0; }
+  h2 { font-size: 15px; margin: 0 0 8px; }
+  h3 { font-size: 13px; margin: 18px 0 6px; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }
+  .badge { font-size: 11px; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; margin-left: 6px; color: var(--dim); }
+  .muted { color: var(--dim); }
+  ul { margin: 4px 0; padding-left: 20px; }
+  li { margin: 2px 0; }
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px; overflow: auto; max-height: 420px; font-size: 12px;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: normal; }
+  .ev { font-size: 12px; }
+  .ev .name { color: var(--accent); }
+  .ev.err .name { color: var(--failed); }
+  form { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 12px; }
+  label { font-size: 12px; color: var(--dim); }
+  input, textarea, select, button { font: inherit; }
+  input[type=text], textarea, select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 5px; padding: 6px 8px; width: 100%;
+  }
+  textarea { min-height: 62px; resize: vertical; }
+  button {
+    align-self: flex-start; background: var(--accent); color: #11131a; border: 0;
+    border-radius: 5px; padding: 6px 14px; cursor: pointer; font-weight: 600;
+  }
+  button:hover { filter: brightness(1.1); }
+  .notice { margin-top: 8px; padding: 6px 10px; border-radius: 6px; background: var(--panel2); font-size: 12px; }
+  .notice.err { color: var(--failed); }
+  details { margin: 6px 0; }
+  summary { cursor: pointer; color: var(--dim); }
+  #summary h3:first-child { margin-top: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>fractal</h1>
+  <span class="project" id="project"></span>
+  <span class="counts" id="counts"></span>
+  <span class="muted" id="rootstatus"></span>
+</header>
+<main>
+  <div id="tree"></div>
+  <div id="detail"><p class="muted">Select a node.</p></div>
+</main>
+<script>
+const el = (id) => document.getElementById(id);
+let selected = null;
+let lastState = null;
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
+    {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+async function jget(url) {
+  const r = await fetch(url, {headers: {"Accept": "application/json"}});
+  return r.json();
+}
+
+async function jpost(action) {
+  const r = await fetch("/api/action", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(action),
+  });
+  return r.json();
+}
+
+function renderTree(state) {
+  el("project").textContent = state.project;
+  const c = state.counts || {};
+  el("counts").innerHTML =
+    `<span>done <b>${c.complete||0}</b></span>` +
+    `<span>failed <b>${c.failed||0}</b></span>` +
+    `<span>refused <b>${(state.trace && state.trace.refused)||0}</b></span>` +
+    `<span>pending <b>${c.pending||0}</b></span>` +
+    `<span>running <b>${c.running||0}</b></span>` +
+    `<span>total <b>${c.total||0}</b></span>`;
+  el("rootstatus").textContent = "root: " + state.root_status;
+
+  const byParent = {};
+  for (const n of state.nodes) {
+    const p = n.parent || "";
+    (byParent[p] = byParent[p] || []).push(n);
+  }
+  const rows = [];
+  function walk(node, depth) {
+    const badges = (node.stale ? ' <span class="badge">stale</span>' : "")
+      + (node.tampered ? ' <span class="badge">tampered</span>' : "");
+    rows.push(
+      `<button class="node${selected === node.id ? " selected" : ""}" data-id="${esc(node.id)}" style="padding-left:${8 + depth * 14}px">` +
+      `<span class="dot status-${esc(node.status)}"></span>` +
+      `<span class="status-${esc(node.status)}">${esc(node.id)}</span>` +
+      ` <span class="muted">${esc((node.goal || "").split("\n")[0])}</span>${badges}</button>`);
+    for (const child of (byParent[node.id] || [])) walk(child, depth + 1);
+  }
+  for (const root of (byParent[""] || [])) walk(root, 0);
+  el("tree").innerHTML = rows.join("") || '<p class="muted">no nodes</p>';
+  for (const b of el("tree").querySelectorAll(".node")) {
+    b.addEventListener("click", () => { selected = b.dataset.id; tick(); });
+  }
+}
+
+function list(title, items) {
+  if (!items || !items.length) return "";
+  return `<h3>${esc(title)}</h3><ul>${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>`;
+}
+
+function renderSummary(state) {
+  return `<div id="summary"><h2>Run summary</h2>` +
+    `<div class="grid">` +
+    `<div class="card"><div class="muted">root status</div><div class="status-${esc(state.root_status)}">${esc(state.root_status)}</div></div>` +
+    `<div class="card"><div class="muted">completed / failed / refused</div><div>${(state.counts&&state.counts.complete)||0} / ${(state.counts&&state.counts.failed)||0} / ${(state.trace&&state.trace.refused)||0}</div></div>` +
+    `</div>` +
+    `<h3>Digest</h3><pre>${esc(state.digest || "")}</pre></div>`;
+}
+
+function renderNode(n) {
+  const contract = `
+    <h3>Goal</h3><pre>${esc(n.goal || "")}</pre>
+    ${list("Acceptance criteria", n.acceptance_criteria)}
+    ${list("Inherited constraints", n.constraints)}
+    ${list("Interfaces", n.interfaces)}
+    ${list("depends_on", n.depends_on)}
+    ${list("verification", n.verification)}
+    ${list("manual verification", n.manual_verification)}
+    ${list("children", n.children)}
+    <p class="muted">assembled context: ${n.context_bytes} bytes</p>`;
+
+  const memory = `
+    ${list("Decisions", n.decisions)}
+    <h3>Log / events.jsonl tail</h3>
+    <div class="ev">${(n.events || []).map((e) => {
+      const name = (e && e.event) || "event";
+      const bad = name === "error" || (e && e.error) || name.indexOf("failed") >= 0;
+      return `<div class="${bad ? "err" : ""}"><span class="name">${esc(name)}</span> ` +
+        `<span class="muted">${esc(JSON.stringify(e).slice(0, 400))}</span></div>`;
+    }).join("") || '<span class="muted">(none)</span>'}</div>
+    ${n.errors && n.errors.length ? `<h3>Errors</h3><pre>${esc(JSON.stringify(n.errors, null, 2))}</pre>` : ""}
+    ${n.gate_outcomes && n.gate_outcomes.length ? `<h3>Gate outcomes</h3><pre>${esc(JSON.stringify(n.gate_outcomes, null, 2))}</pre>` : ""}`;
+
+  const evidence = `
+    <h3>Artifacts</h3>
+    ${n.artifacts && n.artifacts.length
+      ? `<table><tr><th>file</th><th>size</th></tr>${n.artifacts.map((a) => `<tr><td>${esc(a.name)}</td><td>${a.size}</td></tr>`).join("")}</table>`
+      : '<p class="muted">(none)</p>'}
+    <h3>Committed diff</h3>
+    <pre>${esc(n.diff || "(no commit for this node)")}</pre>`;
+
+  const steering = `
+    <h3>Steer</h3>
+    <form id="f-constraint">
+      <label>Add a constraint / idea to <b>${esc(n.id)}</b> (propagates to descendants)</label>
+      <input type="text" name="text" placeholder="e.g. use the existing Store, never a parallel path" required />
+      <button type="submit">Add constraint</button>
+    </form>
+    <form id="f-edit">
+      <label>Edit contract: goal</label>
+      <textarea name="goal" placeholder="${esc(n.goal)}"></textarea>
+      <label>Acceptance criteria (one per line)</label>
+      <textarea name="acceptance_criteria">${esc((n.acceptance_criteria || []).join("\n"))}</textarea>
+      <label>verification commands (one per line, must run on this machine)</label>
+      <textarea name="verification">${esc((n.verification || []).join("\n"))}</textarea>
+      <label>manual verification (one per line, critic-judged)</label>
+      <textarea name="manual_verification">${esc((n.manual_verification || []).join("\n"))}</textarea>
+      <button type="submit">Save contract</button>
+    </form>
+    <form id="f-retry">
+      <label>Retry <b>${esc(n.id)}</b> and its subtree (reset to pending)</label>
+      <button type="submit">Retry node</button>
+    </form>
+    <form id="f-amend">
+      <label>Answer / route an escalation: amend a falsified inherited constraint</label>
+      <input type="text" name="old" placeholder="the assumption that proved false" required />
+      <input type="text" name="new" placeholder="the amended constraint" required />
+      <button type="submit">Amend constraint</button>
+    </form>
+    <form id="f-dep">
+      <label>Answer / route an escalation: require a sibling first</label>
+      <input type="text" name="dependency" placeholder="sibling node id" required />
+      <button type="submit">Add dependency</button>
+    </form>
+    <div class="notice" id="notice" hidden></div>`;
+
+  return `<h2>${esc(n.id)} <span class="status-${esc(n.status)}">[${esc(n.status)}]</span> <span class="muted">depth ${n.depth}${n.parent ? ", parent " + esc(n.parent) : ""}</span></h2>` +
+    contract + memory + evidence + steering;
+}
+
+function notice(msg, isErr) {
+  const box = el("notice");
+  if (!box) return;
+  box.hidden = false;
+  box.className = "notice" + (isErr ? " err" : "");
+  box.textContent = msg;
+}
+
+function bindForms(n) {
+  const noticeIf = (res) => {
+    if (!res) return;
+    if (res.ok) notice("done: " + res.message, false);
+    else notice("error: " + (res.error || "rejected"), true);
+    tick();
+  };
+
+  const f = el("f-constraint");
+  if (f) f.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const text = f.text.value.trim();
+    if (text) noticeIf(await jpost({action: "constraint", node: n.id, text}));
+  });
+
+  const e = el("f-edit");
+  if (e) e.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const action = {action: "edit_contract", node: n.id};
+    if (e.goal.value.trim()) action.goal = e.goal.value.trim();
+    action.acceptance_criteria = e.acceptance_criteria.value.split("\n").map((s) => s.trim()).filter(Boolean);
+    action.verification = e.verification.value.split("\n").map((s) => s.trim()).filter(Boolean);
+    action.manual_verification = e.manual_verification.value.split("\n").map((s) => s.trim()).filter(Boolean);
+    noticeIf(await jpost(action));
+  });
+
+  const r = el("f-retry");
+  if (r) r.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    noticeIf(await jpost({action: "retry", node: n.id}));
+  });
+
+  const a = el("f-amend");
+  if (a) a.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    noticeIf(await jpost({action: "resolve", node: n.id, resolution: "amend",
+      old: a.old.value.trim(), new: a.new.value.trim()}));
+  });
+
+  const d = el("f-dep");
+  if (d) d.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    noticeIf(await jpost({action: "resolve", node: n.id, resolution: "depends_on",
+      dependency: d.dependency.value.trim()}));
+  });
+}
+
+async function tick() {
+  try {
+    const state = await jget("/api/state");
+    lastState = state;
+    renderTree(state);
+    if (!selected) {
+      el("detail").innerHTML = renderSummary(state);
+    } else {
+      const node = await jget("/api/node?id=" + encodeURIComponent(selected));
+      if (node.error) {
+        el("detail").innerHTML = `<p class="muted">${esc(node.error)}</p>` + renderSummary(state);
+      } else {
+        el("detail").innerHTML = renderNode(node);
+        bindForms(node);
+      }
+    }
+  } catch (err) {
+    el("detail").innerHTML = `<p class="muted">dashboard disconnected (${esc(err)}); retrying…</p>`;
+  }
+}
+
+setInterval(tick, 1500);
+tick();
+</script>
+</body>
+</html>

@@ -100,6 +100,51 @@ While `fractal init` or `fractal run` is active:
 - **`r`**: **Retry**: Queue an instant reset and retry of the selected node and its subtasks.
 - **`q`**: Exit TUI (or press `Ctrl+C` to interrupt).
 
+### Web dashboard (observability and steering)
+
+A local, browser-based dashboard is served by the binary. It reads and writes the
+same `Store` the TUI uses, so an action taken in either place produces identical
+state and appears in the other on its next read. There is no Node build step, no
+CDN and no external service: one embedded HTML page and a small JSON API, served
+offline.
+
+```bash
+fractal serve                 # http://127.0.0.1:8787
+fractal serve --port 9000
+fractal serve -p my-project   # same --project as the other commands
+```
+
+It works against a completed project and alongside a live `fractal run`. The
+page polls, so a running node's status and event log update without a full
+reload.
+
+- **Visibility**: the whole tree (id, status, depth, parent/children, goal); per
+  node its contract (goal, acceptance criteria, interfaces, `verification`,
+  `manual_verification`, `depends_on`), inherited constraints, decisions,
+  `log/events.jsonl` tail, errors and gate outcomes, artifacts, the git diff of
+  its commit(s), and the assembled-context size.
+- **Steering**: add a constraint/idea to a node (propagates to descendants);
+  edit a node's contract (goal, acceptance criteria, `verification`,
+  `manual_verification`); retry a node; answer/route an escalation by amending a
+  falsified inherited constraint or adding a dependency. Every mutation is an
+  explicit form submit; the server never mutates implicitly.
+
+Options:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--port <port>` | `8787` | TCP port to listen on |
+| `--host <addr>` | `127.0.0.1` | Address to bind |
+| `--bind-all` | off | Bind `0.0.0.0` so another device (e.g. a phone) can reach it |
+| `--allow-remote-mutations` | off | Permit steering from non-local addresses |
+
+**Safety.** The dashboard binds to loopback by default and treats any
+non-loopback request as read-only; GET cannot mutate in any case. `--bind-all`
+exposes the dashboard to your local network, so anyone able to reach the port can
+read the project tree, contracts, decisions and diffs. Steering from another
+device requires `--allow-remote-mutations`, which you should only enable on a
+network you trust. Use a firewall or an SSH tunnel for anything more exposed.
+
 ### Inspect the tree (CLI)
 
 ```bash
