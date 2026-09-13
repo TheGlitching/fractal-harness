@@ -412,6 +412,7 @@ pub fn state_json(store: &Store, project: &Path) -> Result<Value, StoreError> {
             "children": children,
             "stale": stale.contains(&node.id),
             "tampered": tampered.contains(&node.id),
+            "activity": store.read_activity(&node.id),
         }));
     }
 
@@ -419,6 +420,8 @@ pub fn state_json(store: &Store, project: &Path) -> Result<Value, StoreError> {
         .first()
         .map(|n| n.status.clone())
         .unwrap_or_else(|| crate::store::PENDING.to_string());
+    let root_goal = nodes.first().map(|n| n.goal.clone()).unwrap_or_default();
+    let overall_status = crate::scheduler::surface_root_status(&nodes);
     let digest = store.generate_digest().unwrap_or_default();
     let trace = std::fs::read_to_string(project.join("trace.json"))
         .ok()
@@ -427,6 +430,8 @@ pub fn state_json(store: &Store, project: &Path) -> Result<Value, StoreError> {
     Ok(json!({
         "project": project.display().to_string(),
         "root_status": root_status,
+        "root_goal": root_goal,
+        "overall_status": overall_status,
         "counts": counts,
         "digest": digest,
         "trace": trace,
@@ -528,6 +533,7 @@ pub fn node_json(store: &Store, node_id: &str) -> Result<Value, StoreError> {
         "gate_outcomes": gate_outcomes,
         "artifacts": artifacts,
         "diff": diff,
+        "activity": store.read_activity(&node.id),
         "context_bytes": context.len(),
         "context": context,
     }))
@@ -741,6 +747,55 @@ mod tests {
             "the tree must expose each node's children"
         );
         assert!(value.get("digest").and_then(Value::as_str).is_some());
+        assert_eq!(
+            value.get("root_goal").and_then(Value::as_str),
+            Some("build a thing"),
+            "the run summary must name the project by its goal"
+        );
+        assert_eq!(
+            value.get("overall_status").and_then(Value::as_str),
+            Some("split"),
+            "a healthy split tree reports its root status"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_child_surfaces_at_the_run_level() {
+        let (store, dir) = tree("overall");
+        let child = store.get("root-01").unwrap();
+        store.set_status(&child, crate::store::FAILED).unwrap();
+        let value = state_json(&store, &dir).unwrap();
+        assert_eq!(
+            value.get("overall_status").and_then(Value::as_str),
+            Some("failed"),
+            "a failed node anywhere must not hide behind a split root"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn node_activity_is_exposed_for_the_tree_and_the_detail_view() {
+        let (store, dir) = tree("activity");
+        store.write_activity("root-01", "running npm test").unwrap();
+        let state = state_json(&store, &dir).unwrap();
+        let node = state
+            .get("nodes")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|n| n.get("id").and_then(Value::as_str) == Some("root-01"))
+            .unwrap();
+        assert_eq!(
+            node.get("activity").and_then(Value::as_str),
+            Some("running npm test"),
+            "the tree row must carry the latest activity"
+        );
+        let detail = node_json(&store, "root-01").unwrap();
+        assert_eq!(
+            detail.get("activity").and_then(Value::as_str),
+            Some("running npm test")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

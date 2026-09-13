@@ -118,16 +118,42 @@ It works against a completed project and alongside a live `fractal run`. The
 page polls, so a running node's status and event log update without a full
 reload.
 
-- **Visibility**: the whole tree (id, status, depth, parent/children, goal); per
-  node its contract (goal, acceptance criteria, interfaces, `verification`,
-  `manual_verification`, `depends_on`), inherited constraints, decisions,
-  `log/events.jsonl` tail, errors and gate outcomes, artifacts, the git diff of
-  its commit(s), and the assembled-context size.
-- **Steering**: add a constraint/idea to a node (propagates to descendants);
-  edit a node's contract (goal, acceptance criteria, `verification`,
-  `manual_verification`); retry a node; answer/route an escalation by amending a
-  falsified inherited constraint or adding a dependency. Every mutation is an
-  explicit form submit; the server never mutates implicitly.
+The page is organised so a run can be understood at a glance, then acted on:
+
+- **Run overview**: the project goal, the whole-run status (a failed node
+  anywhere surfaces here even when the root is still `split`), counts
+  (complete / running / pending / failed / split / refused), a completion bar,
+  and the node that is running right now with its latest output line.
+- **Task graph**: the tree drawn as a graph with two visually distinct edge
+  kinds - parent → child, and `depends_on` (dashed, bowing to the right). Edge
+  state is animated: an active path flows, a completed edge settles solid, a
+  failed edge turns red, and a waiting edge stays dim. A running node pulses and
+  shows its current action. Nodes are labelled by their **goal**, not their raw
+  id; the short id (the last `-NN`) is a secondary tag and the full id is in the
+  tooltip and the detail view. A **Rows** view gives the same information as a
+  flat, indented list, and is the default under 640 px; a **Graph / Rows**
+  toggle is always available. The legend names every edge state, so colour is
+  never the only carrier.
+- **Node detail** (select any node): the full contract (goal, acceptance
+  criteria, `verification`, `manual_verification`, `depends_on`, interfaces,
+  inherited constraints), its latest live activity, decisions, the
+  `log/events.jsonl` tail, gate outcomes, errors, artifacts, and the committed
+  diff. Raw JSON is never the default view.
+- **Steering**: grouped, clearly labelled actions on the selected node - add a
+  constraint/idea (propagates to descendants), edit the contract, retry the
+  node and its subtree, and answer/route an escalation by amending a falsified
+  constraint or adding a dependency. Destructive actions are visually marked and
+  every action is confirmed before it is sent. Each mutation is an explicit form
+  submit that routes through the same `Store` methods as the TUI and scheduler;
+  the server never mutates implicitly.
+
+The page is a single embedded HTML file with inline CSS/JS: no CDN, no build
+step, works offline. It respects `prefers-reduced-motion` (all animation is
+disabled, state remains in text and colour) and is responsive down to ~390 px.
+
+Live activity is written by the running scheduler to `.fractal/activity/<id>`,
+a display-only scratch file outside `log/events.jsonl`: it is not part of the
+audit trail and never affects the memory-tamper digest.
 
 Options:
 
