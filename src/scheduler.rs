@@ -1286,6 +1286,7 @@ fn run_one_node(
                     continue;
                 }
 
+                let mut gate_outcomes: Vec<crate::verify::GateOutcome> = Vec::new();
                 if !gates.is_empty() {
                     on_output(&format!(
                         "  [{}] running {} verification gate(s)",
@@ -1298,8 +1299,8 @@ fn run_one_node(
                     // that is the app's state, not this node's work, and it must
                     // not enter the diff, the critic's evidence or history.
                     let pre_gate_untracked = crate::git::untracked_files(work_root);
-                    let outcomes = crate::verify::run_gates(work_root, &gates, GATE_TIMEOUT_SECS);
-                    let manual: Vec<String> = outcomes
+                    gate_outcomes = crate::verify::run_gates(work_root, &gates, GATE_TIMEOUT_SECS);
+                    let manual: Vec<String> = gate_outcomes
                         .iter()
                         .filter(|o| o.manual)
                         .map(|o| o.command.clone())
@@ -1350,7 +1351,7 @@ fn run_one_node(
                                 .ok();
                         }
                     }
-                    if let Some(failures) = crate::verify::format_failures(&outcomes) {
+                    if let Some(failures) = crate::verify::format_failures(&gate_outcomes) {
                         report.verify_failures += 1;
                         report.refused += 1;
                         store
@@ -1379,6 +1380,7 @@ fn run_one_node(
                     &result.deliverable,
                     &result.artifacts,
                     &criteria,
+                    &gate_outcomes,
                     model,
                     work_root,
                 ) {

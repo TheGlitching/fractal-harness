@@ -611,6 +611,37 @@ pub fn run_gates(root: &Path, gates: &[String], timeout_secs: u64) -> Vec<GateOu
     outcomes
 }
 
+/// The gates the harness actually executed, as first-class evidence for the
+/// critic. The command, its outcome and the tail of its output are ground truth:
+/// a criterion a passing gate covers is settled by that gate, not by whether the
+/// file it depends on happens to be in this node's diff. Manual (unexecutable)
+/// entries are shown as not run so the critic knows it owns them.
+pub fn format_gate_evidence(outcomes: &[GateOutcome]) -> String {
+    if outcomes.is_empty() {
+        return String::new();
+    }
+    let mut text = String::from(
+        "Automated gates (executed by the harness against the project on disk; treat \
+         a PASS as ground truth - a criterion a passing gate covers is satisfied by \
+         that gate):\n",
+    );
+    for o in outcomes {
+        let status = if o.manual {
+            "NOT RUN (downgraded to a manual check)"
+        } else if o.passed {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        text.push_str(&format!("\n$ {} -> {status}\n", o.command));
+        if !o.output.is_empty() {
+            text.push_str(&o.output);
+            text.push('\n');
+        }
+    }
+    text
+}
+
 /// Feedback an agent can act on: the exact command and the tail of its output.
 /// Manual (unexecutable) entries are not failures and are omitted.
 pub fn format_failures(outcomes: &[GateOutcome]) -> Option<String> {
@@ -1026,5 +1057,43 @@ mod tests {
         assert!(outcome.passed, "a launch that exits 0 is a pass");
         assert!(outcome.output.contains("done"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The critic must be told which gates ran, that they passed, and what they
+    /// printed - that is the evidence a criterion can rest on when the file it
+    /// depends on is absent from the diff.
+    #[test]
+    fn gate_evidence_names_the_command_pass_and_output() {
+        let outcomes = vec![GateOutcome {
+            command: "npm start".to_string(),
+            passed: true,
+            output: "listening on :3000".to_string(),
+            manual: false,
+        }];
+        let text = format_gate_evidence(&outcomes);
+        assert!(text.contains("npm start"), "command missing: {text}");
+        assert!(text.contains("PASS"), "outcome missing: {text}");
+        assert!(
+            text.contains("listening on :3000"),
+            "output missing: {text}"
+        );
+    }
+
+    /// A manual entry was never executed, so the critic must not read it as a
+    /// pass or a failure.
+    #[test]
+    fn gate_evidence_marks_a_manual_entry_as_not_run() {
+        let outcomes = vec![GateOutcome {
+            command: "look at the layout".to_string(),
+            passed: false,
+            output: "skipped".to_string(),
+            manual: true,
+        }];
+        let text = format_gate_evidence(&outcomes);
+        assert!(text.contains("NOT RUN"), "manual entry mislabelled: {text}");
+        assert!(
+            !text.contains("-> PASS"),
+            "manual entry read as pass: {text}"
+        );
     }
 }

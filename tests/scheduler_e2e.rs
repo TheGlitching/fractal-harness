@@ -58,6 +58,20 @@ if [ -z "$NODE" ]; then
     echo '{"verdict":"FAIL","reason":"fake critic rejects the work","criteria":[{"name":"the task is done","pass":false,"reason":"fake rejection"}]}'
     exit 0
   fi
+  # Regression guard: this mode fails unless the harness handed the critic the
+  # gate result and the manifest snapshot. The leaf's only criterion is backed by
+  # `npm start`, and package.json was committed before the run, so it is absent
+  # from the node's diff and can only reach the critic through the snapshot.
+  if [ "$MODE" = "gate_evidence" ]; then
+    if printf '%s' "${!#}" | grep -q 'the app starts with npm start'; then
+      if ! printf '%s' "${!#}" | grep -q 'Automated gates' \
+         || ! printf '%s' "${!#}" | grep -q 'npm start' \
+         || ! printf '%s' "${!#}" | grep -q 'package.json'; then
+        echo '{"verdict":"FAIL","reason":"gate evidence or manifest snapshot missing from the critic prompt","criteria":[{"name":"the app starts with npm start","pass":false,"reason":"no evidence supplied"}]}'
+        exit 0
+      fi
+    fi
+  fi
   CRIT="$(printf '%s' "${!#}" | awk '
     /^Acceptance criteria:/ {grab=1; next}
     /^Deliverable summary:/ {grab=0}
@@ -226,6 +240,21 @@ case "$MODE" in
       echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
     else
       complete
+    fi
+    ;;
+  gate_evidence)
+    # The leaf's criterion is backed by a gate, and the manifest that criterion
+    # depends on was committed before the run (so it is not in the leaf's diff).
+    # It can only verify if the harness feeds the gate result and the snapshot to
+    # the critic; the fake critic above fails otherwise.
+    if [ "$NODE" = "root" ] && [ ! -d "$ROOT/tree/root/children/root-01" ]; then
+      echo '{"verb":"split","subtasks":[{"id":"a","goal":"wire the start script","acceptance_criteria":["the app starts with npm start"],"verification":["npm start"]}]}'
+    elif [ "$NODE" = "root" ]; then
+      echo '{"verb":"complete","deliverable":"children aggregated","summary":"aggregated"}'
+    else
+      mkdir -p "$ROOT/src"
+      echo "delivered" > "$ROOT/src/app.js"
+      echo '{"verb":"complete","deliverable":"done","summary":"wired the start script"}'
     fi
     ;;
   runtime_state)
@@ -537,6 +566,23 @@ impl Project {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// Commit everything currently in the project, forcing an identity so the
+    /// commit does not depend on the machine's git config.
+    fn commit_all(&self, message: &str) {
+        self.git(&["add", "."]);
+        self.git(&[
+            "-c",
+            "user.name=fractal",
+            "-c",
+            "user.email=fractal@localhost",
+            "commit",
+            "--no-verify",
+            "-q",
+            "-m",
+            message,
+        ]);
+    }
+
     /// Sum of every budget row's own-debits column.
     fn ledger_debits(&self) -> i64 {
         let db = self.dir.join(".fractal/index.db");
@@ -730,6 +776,48 @@ fn declared_leaf_gate_is_enforced() {
     assert!(
         !status.contains("[complete]"),
         "a node whose declared gate failed was marked complete:\n{status}"
+    );
+}
+
+/// A criterion backed by a passing gate must verify even when the file it depends
+/// on was committed by an earlier node and is absent from this node's diff. The
+/// fake critic fails unless it receives both the gate result and the manifest
+/// snapshot, so a completed run proves the evidence reached it.
+#[test]
+fn critic_verifies_a_gate_backed_criterion_against_a_committed_manifest() {
+    let p = Project::new("gateevidence", "gate_evidence");
+    p.install(
+        "npm",
+        "#!/usr/bin/env bash\nif [ \"$1\" = start ]; then sleep 30; fi\nexit 0\n",
+    );
+    // The manifest is committed before the run, so it is not part of the leaf's
+    // diff - exactly the situation that made the criterion unverifiable.
+    p.git(&["init"]);
+    fs::write(
+        p.dir.join("package.json"),
+        r#"{"name":"toy","scripts":{"start":"node src/app.js"}}"#,
+    )
+    .unwrap();
+    p.commit_all("chore: add the start script manifest");
+    assert!(
+        p.git(&["status", "--porcelain"]).is_empty(),
+        "the seed files must be committed before fractal init runs"
+    );
+
+    let (code, _out, err) = p.run_env(
+        &["init", "build a toy"],
+        Duration::from_secs(60),
+        &[("FRACTAL_LAUNCH_TIMEOUT", "1")],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "a gate-backed criterion with a committed manifest must verify; stderr:\n{err}"
+    );
+    let status = p.status();
+    assert!(
+        status.contains("[complete]"),
+        "the tree did not complete:\n{status}"
     );
 }
 
