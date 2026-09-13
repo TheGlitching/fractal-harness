@@ -38,6 +38,10 @@ in the project repo.
   order. A failed node's worktree is discarded, so its half-written files can
   never leak into a sibling. The harness's own paths never enter the user's
   repository.
+- **One Steering Agent**: a single butler (`fractal ask` / `fractal butler`) is
+  the architect and maintainer you talk to. It sits outside the task tree - the
+  root and every node are ordinary nodes with no special role - and applies a
+  correction to only the nodes that must change rather than replaying the tree.
 - **Interactive TUI Steering**: Inspect running nodes, review decisions & constraints, inject new global or subtree constraints, and trigger retries directly from the live TUI.
 
 ## Installation
@@ -98,6 +102,51 @@ fractal --no-tui run
 cd my-project
 fractal run
 ```
+
+### Talk to the butler
+
+There is exactly one agent you talk to: the **butler** (`fractal ask` /
+`fractal butler`, `src/butler.rs`). It is the maintainer, architect and mate of
+the tree, and it lives *outside* the tree. It is not a node: the root and every
+node stay ordinary nodes with no special role, and the interface is one
+conversation rather than a set of parameters.
+
+```bash
+fractal ask "make the settings screen accessible on a phone"
+fractal ask --run "drop the export button, it is not wanted"   # steer, then resume
+fractal butler                                                 # interactive session
+```
+
+When you ask for a change, the butler inspects the tree through its tools and
+chooses the **smallest** correct response:
+
+- **none** - the tree already satisfies the request; nothing changes and it says
+  which nodes already cover it;
+- **reopen** - only the nodes that are wrong are sent back, with a precise
+  reason, so only they re-run;
+- **split** - genuinely new work gets a new child node under the right parent;
+- **amend / edit_contract / retry / resolve** - the specific contract, gate,
+  constraint or failure involved is changed in place.
+
+It never resets or replays the whole tree. `--run` (or a later `fractal run`)
+resumes the scheduler, which runs only the reopened or newly added nodes. The
+plan, its rationale and the resulting status changes are recorded under
+`.fractal/butler/` and printed.
+
+Every butler tool routes through the same `Store` operations the TUI,
+dashboard and scheduler use - there is no parallel state path. The tools are
+also usable directly, which is how the butler calls them:
+
+```bash
+fractal butler-tool '{"tool":"tree"}'
+fractal butler-tool '{"tool":"node","id":"root-01"}'
+fractal butler-tool '{"tool":"reopen","parent":"root","children":["root-01"],"reason":"the wiring is wrong"}'
+```
+
+Tools: `tree`, `node`, `digest`, `trace`, `next`, `verify`, `constraint`,
+`amend`, `edit_contract`, `reopen`, `split`, `retry`, `resolve`, `resume`,
+`plan`. The butler agent uses the same executor as leaf nodes (`--executor` /
+`FRACTAL_EXECUTOR`) and model selection (`--model` / `FRACTAL_MODEL`).
 
 ### Interactive TUI Controls
 
@@ -366,9 +415,10 @@ build contracts are in `contracts/`. Upward escalation, fail-closed completion
 and verification, deterministic non-interactive termination, enforced budgets,
 dependency staleness, per-node isolation, workspace exclusion, bounded per-node
 context, failure isolation with unverified checkpointing, a tolerant
-transcript-command completion channel, and the `omp`/`pi`/`opencode` executors are
-implemented. Known gaps tracked for follow-up work: crash-safe reaping of gate
-subprocesses.
+transcript-command completion channel, the butler steering agent and its
+tool surface, and the `omp`/`pi`/`opencode` executors are implemented. Known
+gaps tracked for follow-up work: crash-safe reaping of gate subprocesses and a
+dashboard chat surface for the butler.
 
 ## License
 

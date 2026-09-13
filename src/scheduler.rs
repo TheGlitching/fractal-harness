@@ -538,7 +538,7 @@ fn snapshot(report: &RunReport, nodes: &[Node]) -> StatsSnapshot {
     }
 }
 
-fn next_nodes(nodes: &[Node], stale: &HashSet<String>) -> Vec<Node> {
+pub(crate) fn next_nodes(nodes: &[Node], stale: &HashSet<String>) -> Vec<Node> {
     // Stale dependents first: a dependency was reopened and its deliverable
     // changed after this node was accepted, so it must be re-verified against
     // the new dependency before anything downstream trusts it.
@@ -595,7 +595,7 @@ fn aggregatable(node: &Node, nodes: &[Node], stale: &HashSet<String>) -> bool {
 /// sibling that does not exist, or a cycle. Rejecting here (with a message the
 /// agent sees) is what stops `add_children` from having to silently drop an
 /// unmatched edge, which would make the child runnable too early.
-fn reject_split_topology(contracts: &[Contract], existing: &[String]) -> Option<String> {
+pub(crate) fn reject_split_topology(contracts: &[Contract], existing: &[String]) -> Option<String> {
     let mut canonical: HashMap<String, String> = HashMap::new();
     for id in existing {
         canonical.insert(id.clone(), id.clone());

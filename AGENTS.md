@@ -24,6 +24,12 @@
   through `Store` methods (or a new one there), never through ad-hoc file or SQL
   access, so TUI, CLI and dashboard state stay identical. Its loopback/read-only
   defaults and `--bind-all` risk are documented in README "Web dashboard".
+- The butler (`fractal ask` / `fractal butler`, src/butler.rs) is the one
+  steering agent. It lives outside the task tree, is not a node, and the root and
+  every node stay ordinary nodes - no node owns an architect role. Every butler
+  tool routes through `Store` (or the scheduler), never a parallel state path. A
+  correction reopens or adds only the nodes it must; it never replays the whole
+  tree. See README "Talk to the butler".
 
 ## Maintaining this file
 
